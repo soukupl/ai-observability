@@ -1,0 +1,17 @@
+# Architecture Decision Records
+
+- [ADR-0001: Capture telemetry via harness hooks and local transcripts](0001-capture-via-hooks-and-transcripts.md)
+- [ADR-0002: The turn is the primary unit of work](0002-turn-as-primary-unit.md)
+- [ADR-0003: Turn outcome is derived from signals only](0003-outcome-from-signals-only.md)
+- [ADR-0004: Turn summaries are always on and generated locally by a cheap model](0004-local-summaries-by-cheap-model.md)
+- [ADR-0005: Harness-neutral ingest format; Claude Code and Codex first](0005-harness-neutral-ingest-format.md)
+- [ADR-0006: Tenant isolation with company_id and Postgres Row-Level Security](0006-tenant-isolation-with-rls.md)
+- [ADR-0007: Per-user and team ingest tokens; turn-to-team attribution](0007-ingest-tokens.md)
+- [ADR-0008: Privacy modes — project naming and individual visibility](0008-privacy-modes.md)
+- [ADR-0009: Tech stack — TypeScript, Next.js, Postgres, Drizzle, Tailwind, Recharts](0009-tech-stack.md)
+- [ADR-0010: Portable, EU-hosted, self-hostable deployment](0010-portable-eu-hosting.md)
+- [ADR-0011: Local file queue with idempotent ingest](0011-local-queue-idempotent-delivery.md)
+- [ADR-0012: Configurable raw retention with permanent daily rollups](0012-retention-and-rollups.md)
+- [ADR-0013: Dashboard login via magic link and Google/GitHub OAuth](0013-dashboard-authentication.md)
+- [ADR-0014: DB roles as NOLOGIN roles reached via SET ROLE, optional per-service logins](0014-db-roles-and-connections.md)
+- [ADR-0015: Usage rows are summed by turn_id; ingest stores the turn usage as given](0015-usage-rows-sum-by-turn.md)

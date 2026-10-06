@@ -1,0 +1,12 @@
+packages:
+  - "packages/*"
+  - "apps/*"
+
+# Supply-chain hygiene: only packages with explicitly allowed install scripts may run them.
+onlyBuiltDependencies:
+  - esbuild
+  - sharp
+
+# drizzle-kit pulls esbuild 0.18 via the deprecated @esbuild-kit/* loaders (GHSA-67mh-4wv8-2f99, dev-only).
+overrides:
+  "@esbuild-kit/core-utils>esbuild": "0.25.12"

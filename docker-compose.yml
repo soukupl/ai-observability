@@ -1,0 +1,72 @@
+# Reference deployment (BRIEF §11, ADR-0010): dev, SaaS and self-hosting.
+#   Full stack:  docker compose up --build
+#   Dev deps:    docker compose --profile dev up postgres mailpit   (then `pnpm dev`)
+name: ai-obs
+
+x-app: &app
+  build: .
+  image: ai-obs:local
+  env_file:
+    - path: .env
+      required: false
+  environment: &app-env
+    # Inside the compose network the database host is `postgres`, not localhost.
+    DATABASE_URL: postgres://${POSTGRES_USER:-ai_obs}:${POSTGRES_PASSWORD:-ai_obs}@postgres:5432/${POSTGRES_DB:-ai_obs}
+    MIGRATE_DATABASE_URL: postgres://${POSTGRES_USER:-ai_obs}:${POSTGRES_PASSWORD:-ai_obs}@postgres:5432/${POSTGRES_DB:-ai_obs}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ai_obs}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ai_obs}
+      POSTGRES_DB: ${POSTGRES_DB:-ai_obs}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    <<: *app
+    command: ["migrate"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  web:
+    <<: *app
+    command: ["web"]
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    <<: *app
+    command: ["worker"]
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  mailpit:
+    image: axllent/mailpit:v1.31.3
+    profiles: ["dev"]
+    ports:
+      - "127.0.0.1:1025:1025" # SMTP
+      - "127.0.0.1:8025:8025" # web UI
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "1"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "1"
+
+volumes:
+  pgdata:

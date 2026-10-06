@@ -1,0 +1,254 @@
+import { fileURLToPath } from 'node:url';
+import { eq, sql } from 'drizzle-orm';
+import { createDb } from './client.js';
+import { ensureDefaultModelPrices } from './prices.js';
+import {
+  agentSessions,
+  budgets,
+  companies,
+  dailyRollups,
+  projects,
+  runs,
+  teamMemberships,
+  teams,
+  turns,
+  usage,
+  users,
+} from './schema/index.js';
+import { generateTurns, type SeedTurn } from './seed-data.js';
+
+export const DEMO_COMPANY_SLUG = 'acme';
+const SUPER_ADMIN = (process.env.SUPER_ADMIN_EMAILS ?? 'admin@example.com').split(',')[0]!.trim().toLowerCase();
+
+const PEOPLE = [
+  { key: 'alice', name: 'Alice Admin', role: 'admin' as const, team: 'Platform', teamRole: 'member' as const },
+  { key: 'bob', name: 'Bob Lead', role: 'member' as const, team: 'Platform', teamRole: 'lead' as const },
+  { key: 'carol', name: 'Carol Dev', role: 'member' as const, team: 'Platform', teamRole: 'member' as const },
+  { key: 'dave', name: 'Dave Mobile', role: 'member' as const, team: 'Mobile', teamRole: 'member' as const },
+];
+const PROJECTS = [
+  { key: 'github.com/acme/billing', name: 'billing', team: 'Platform' },
+  { key: 'github.com/acme/mobile-app', name: 'mobile-app', team: 'Mobile' },
+];
+
+const day = (d: Date) => d.toISOString().slice(0, 10);
+
+/**
+ * Development seed (`pnpm db:seed`): demo company "Acme" (2 teams, 4 users incl. a lead and an
+ * admin), a super admin, model prices, 2 projects, ~300 turns with runs + usage over 60 days, daily
+ * rollups and one budget. Idempotent: the Acme company is deleted (cascade) and rebuilt each run.
+ * Runs as the schema owner with `SET LOCAL ROLE app_definer`, so it also works where the owner is
+ * not a superuser and FORCE RLS applies.
+ */
+export async function seed(url = process.env.MIGRATE_DATABASE_URL || process.env.DATABASE_URL) {
+  const { db, close } = createDb({ url, max: 1 });
+  try {
+    await ensureDefaultModelPrices(db);
+    const summary = await db.transaction(async (tx) => {
+      await tx.execute(sql`set local role app_definer`);
+      await tx.delete(companies).where(eq(companies.slug, DEMO_COMPANY_SLUG));
+      await tx
+        .insert(users)
+        .values({ email: SUPER_ADMIN, name: 'Platform Admin', isSuperAdmin: true })
+        .onConflictDoNothing();
+
+      const [company] = await tx
+        .insert(companies)
+        .values({ name: 'Acme', slug: DEMO_COMPANY_SLUG, plan: 'team' })
+        .returning({ id: companies.id });
+      const companyId = company!.id;
+      const teamIds: Record<string, string> = {};
+      for (const name of ['Platform', 'Mobile']) {
+        const [t] = await tx.insert(teams).values({ companyId, name }).returning({ id: teams.id });
+        teamIds[name] = t!.id;
+      }
+      const userIds: Record<string, string> = {};
+      for (const p of PEOPLE) {
+        const [u] = await tx
+          .insert(users)
+          .values({ companyId, email: `${p.key}@acme.example`, name: p.name, companyRole: p.role, primaryTeamId: teamIds[p.team] })
+          .returning({ id: users.id });
+        userIds[p.key] = u!.id;
+        await tx.insert(teamMemberships).values({ companyId, teamId: teamIds[p.team]!, userId: u!.id, role: p.teamRole });
+      }
+      const projectIds: Record<string, string> = {};
+      for (const p of PROJECTS) {
+        const [row] = await tx
+          .insert(projects)
+          .values({ companyId, key: p.key, displayName: p.name, teamId: teamIds[p.team] })
+          .returning({ id: projects.id });
+        projectIds[p.key] = row!.id;
+      }
+
+      const generated = generateTurns({
+        actors: PEOPLE.map((p) => ({ key: p.key, team: p.team })),
+        projects: PROJECTS.map((p) => ({ key: p.key, team: p.team })),
+        count: 300,
+        days: 60,
+        now: new Date(),
+      });
+      const ctx = { companyId, teamIds, userIds, projectIds };
+      const sessionIds = await insertSessions(tx, ctx, generated);
+      let runCount = 0;
+      for (const t of generated) runCount += await insertTurn(tx, ctx, sessionIds, t);
+      await insertRollups(tx, ctx, generated);
+      await tx.insert(budgets).values({ companyId, teamId: teamIds.Platform, kind: 'cost', limitValue: '100' });
+      return { turns: generated.length, runs: runCount };
+    });
+    console.log(`seed: Acme with ${summary.turns} turns, ${summary.runs} sub-agent runs; super admin ${SUPER_ADMIN}`);
+  } finally {
+    await close();
+  }
+}
+
+type Tx = Parameters<Parameters<ReturnType<typeof createDb>['db']['transaction']>[0]>[0];
+interface Ctx {
+  companyId: string;
+  teamIds: Record<string, string>;
+  userIds: Record<string, string>;
+  projectIds: Record<string, string>;
+}
+
+async function insertSessions(tx: Tx, c: Ctx, all: SeedTurn[]) {
+  const ids = new Map<string, string>();
+  for (const t of all) {
+    if (ids.has(t.sessionKey)) continue;
+    const group = all.filter((x) => x.sessionKey === t.sessionKey);
+    const [s] = await tx
+      .insert(agentSessions)
+      .values({
+        companyId: c.companyId,
+        teamId: c.teamIds[t.actor.team],
+        userId: c.userIds[t.actor.key],
+        projectId: c.projectIds[t.project.key],
+        externalId: `seed-${t.sessionKey}`,
+        harness: t.harness,
+        harnessVersion: t.harness === 'claude-code' ? '2.9.0' : '0.60.0',
+        startedAt: new Date(Math.min(...group.map((x) => x.startedAt.getTime()))),
+        endedAt: new Date(Math.max(...group.map((x) => x.endedAt.getTime()))),
+        endReason: 'exit',
+      })
+      .returning({ id: agentSessions.id });
+    ids.set(t.sessionKey, s!.id);
+  }
+  return ids;
+}
+
+const tok = (x: { input: number; output: number; cacheRead: number; cacheWrite: number; reasoning: number; requests: number }) => ({
+  inputTokens: x.input,
+  outputTokens: x.output,
+  cacheReadTokens: x.cacheRead,
+  cacheWriteTokens: x.cacheWrite,
+  reasoningTokens: x.reasoning,
+  requests: x.requests,
+});
+
+async function insertTurn(tx: Tx, c: Ctx, sessionIds: Map<string, string>, t: SeedTurn): Promise<number> {
+  // Team attribution rule 1: every demo project is mapped to a team.
+  const owner = { companyId: c.companyId, teamId: c.teamIds[t.project.team]!, userId: c.userIds[t.actor.key]! };
+  const [turn] = await tx
+    .insert(turns)
+    .values({
+      ...owner,
+      attribution: 'verified',
+      sessionId: sessionIds.get(t.sessionKey),
+      projectId: c.projectIds[t.project.key],
+      externalId: `seed-${t.externalId}`,
+      harness: t.harness,
+      model: t.model,
+      effort: t.effort,
+      startedAt: t.startedAt,
+      endedAt: t.endedAt,
+      durationMs: t.durationMs,
+      ...tok(t),
+      phasesMs: t.phasesMs,
+      tools: t.tools,
+      filesTouched: t.filesTouched,
+      linesAdded: t.linesAdded,
+      linesRemoved: t.linesRemoved,
+      outcome: t.outcome,
+      outcomeSignals: t.signals,
+      outcomeProvisional: false,
+      summary: t.summary,
+    })
+    .returning({ id: turns.id });
+  const turnId = turn!.id;
+  await tx.insert(usage).values(t.usage.map((u) => ({ ...owner, turnId, startedAt: t.startedAt, model: u.model, effort: u.effort, ...tok(u) })));
+  const runIds: string[] = [];
+  for (const r of t.runs) {
+    const [row] = await tx
+      .insert(runs)
+      .values({
+        ...owner,
+        turnId,
+        turnExternalId: `seed-${t.externalId}`,
+        parentRunId: r.parentIndex === null ? null : runIds[r.parentIndex],
+        parentExternalId: r.parentIndex === null ? null : t.runs[r.parentIndex]!.externalId,
+        externalId: r.externalId,
+        agentType: r.agentType,
+        depth: r.depth,
+        model: r.model,
+        effort: r.effort,
+        startedAt: r.startedAt,
+        endedAt: r.endedAt,
+        durationMs: r.durationMs,
+        ...tok(r),
+        phasesMs: r.phasesMs,
+        outcome: r.outcome,
+        outcomeProvisional: false,
+      })
+      .returning({ id: runs.id });
+    runIds.push(row!.id);
+    await tx.insert(usage).values({ ...owner, turnId, runId: row!.id, startedAt: r.startedAt, model: r.usage.model, effort: r.usage.effort, ...tok(r.usage) });
+  }
+  return t.runs.length;
+}
+
+/**
+ * Same fold as the worker (apps/worker/src/rollups/aggregate.ts, ADR-0015): company × day × team ×
+ * user × project × harness × model × effort. Turn count, runs, duration, phases and outcome go to the
+ * turn's primary model × effort; tokens go to each usage row's model × effort (sub-agents included).
+ */
+async function insertRollups(tx: Tx, c: Ctx, all: SeedTurn[]) {
+  const groups = new Map<string, typeof dailyRollups.$inferInsert>();
+  const group = (t: SeedTurn, model: string, effort: string | null) => {
+    const teamId = c.teamIds[t.project.team]!;
+    const k = [day(t.startedAt), teamId, t.actor.key, t.project.key, t.harness, model, effort].join('|');
+    let g = groups.get(k);
+    if (!g) {
+      g = {
+        companyId: c.companyId, day: day(t.startedAt), teamId, userId: c.userIds[t.actor.key], projectId: c.projectIds[t.project.key],
+        harness: t.harness, model, effort, turns: 0, runs: 0, inputTokens: 0, outputTokens: 0,
+        cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, requests: 0, durationMs: 0, phasesMs: {},
+        success: 0, failed: 0, abandoned: 0, unknown: 0,
+      };
+      groups.set(k, g);
+    }
+    return g;
+  };
+  for (const t of all) {
+    const g = group(t, t.model, t.effort);
+    g.turns! += 1;
+    g.runs! += t.runs.length;
+    g.durationMs! += t.durationMs;
+    for (const [ph, ms] of Object.entries(t.phasesMs)) g.phasesMs![ph] = (g.phasesMs![ph] ?? 0) + (ms ?? 0);
+    g[t.outcome]! += 1;
+    for (const u of [...t.usage, ...t.runs.map((r) => r.usage)]) {
+      const ug = group(t, u.model, u.effort);
+      ug.inputTokens! += u.input;
+      ug.outputTokens! += u.output;
+      ug.cacheReadTokens! += u.cacheRead;
+      ug.cacheWriteTokens! += u.cacheWrite;
+      ug.reasoningTokens! += u.reasoning;
+      ug.requests! += u.requests;
+    }
+  }
+  await tx.insert(dailyRollups).values([...groups.values()]);
+}
+
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  seed().catch((err: unknown) => {
+    console.error(err);
+    process.exit(1);
+  });
+}

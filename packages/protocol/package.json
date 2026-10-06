@@ -1,0 +1,28 @@
+{
+  "name": "@ai-obs/protocol",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ai-obs ingest schema v1: types, zod schemas, constants and fixtures",
+  "type": "module",
+  "exports": {
+    ".": {
+      "@ai-obs/source": "./src/index.ts",
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
+    },
+    "./fixtures/*": "./fixtures/*"
+  },
+  "files": [
+    "dist",
+    "src",
+    "fixtures"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "tsc -p tsconfig.build.json --watch --preserveWatchOutput",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "zod": "4.6.5"
+  }
+}

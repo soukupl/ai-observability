@@ -1,0 +1,163 @@
+import Link from 'next/link';
+import { notFound } from 'next/navigation';
+import { AttributionBadge, Badge, OutcomeBadge } from '@/components/Badge';
+import { Card } from '@/components/Card';
+import { StackedBar100 } from '@/components/charts/StackedBar100';
+import { Timeline } from '@/components/charts/Timeline';
+import { formatCost, formatDateTime, formatDuration, formatInt, formatTokens } from '@/components/format';
+import { PageHeader } from '@/components/PageHeader';
+import { RunTree } from '@/components/RunTree';
+import { requireUser } from '@/lib/auth/session';
+import { withDashboardContext } from '@/lib/queries/page';
+import { getTurnDetail } from '@/lib/queries/turns';
+import { parseStartedMs, phaseRow, toRunTree } from '../_helpers';
+
+export const metadata = { title: 'Turn' };
+
+type Props = { params: Promise<{ id: string }>; searchParams: Promise<Record<string, string | string[] | undefined>> };
+
+function Fact({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="min-w-0">
+      <dt className="text-xs text-zinc-500 dark:text-zinc-400">{label}</dt>
+      <dd className="mt-0.5 break-words text-sm text-zinc-900 dark:text-zinc-100">{children}</dd>
+    </div>
+  );
+}
+
+export default async function TurnDetailPage({ params, searchParams }: Props) {
+  const user = await requireUser();
+  const [{ id }, sp] = await Promise.all([params, searchParams]);
+  const detail = await withDashboardContext(user, (ctx) => getTurnDetail(ctx, id, parseStartedMs(sp.startedMs)));
+  if (!detail) notFound();
+  const { turn, runs, timeline, usage, limited } = detail;
+  const phases = phaseRow(turn.phasesMs);
+  const signals = turn.outcomeSignals ?? [];
+  const tools = Object.entries(turn.tools ?? {}).sort((a, b) => b[1] - a[1]);
+  const tk = turn.tokens;
+
+  return (
+    <>
+      <PageHeader
+        title="Turn detail"
+        description={formatDateTime(turn.startedMs)}
+        actions={
+          <Link href="/turns" className="text-sm font-medium text-blue-700 hover:underline dark:text-blue-400">
+            All turns
+          </Link>
+        }
+      />
+      {limited && (
+        <p role="note" className="mb-3 text-xs text-amber-700 dark:text-amber-400">
+          Aggregates-only mode: this is someone else&apos;s turn, so phases, tools and outcome signals are not shown.
+        </p>
+      )}
+      <div className="space-y-4">
+        <Card title="Facts">
+          <dl className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+            <Fact label="Outcome">
+              <span className="inline-flex flex-wrap items-center gap-1">
+                <OutcomeBadge outcome={turn.outcome} />
+                {turn.outcomeProvisional && <Badge tone="warn" title="Outcome may still change when the next prompt arrives">provisional</Badge>}
+              </span>
+            </Fact>
+            {turn.userName !== undefined && <Fact label="User">{turn.userName ?? (turn.userId ? 'unknown user' : '—')}</Fact>}
+            {turn.attribution && !limited && (
+              <Fact label="Attribution">
+                <AttributionBadge attribution={turn.attribution} />
+              </Fact>
+            )}
+            <Fact label="Team">{turn.teamName ?? '—'}</Fact>
+            <Fact label="Project">{turn.projectName ?? '—'}</Fact>
+            <Fact label="Harness">{turn.harness}</Fact>
+            <Fact label="Model">{turn.model ?? '—'}</Fact>
+            <Fact label="Effort">{turn.effort ?? '—'}</Fact>
+            <Fact label="Duration">{formatDuration(turn.durationMs)}</Fact>
+            <Fact label="≈ Cost (API list prices)">{formatCost(turn.cost)}</Fact>
+            {turn.filesTouched !== null && <Fact label="Files touched">{formatInt(turn.filesTouched)}</Fact>}
+            {turn.linesAdded !== null && (
+              <Fact label="Lines">
+                +{formatInt(turn.linesAdded)} / −{formatInt(turn.linesRemoved)}
+              </Fact>
+            )}
+          </dl>
+          {turn.summary && <p className="mt-3 border-t border-zinc-100 pt-3 text-sm text-zinc-700 dark:border-zinc-800 dark:text-zinc-300">{turn.summary}</p>}
+        </Card>
+
+        <Card title="Tokens" description="Input excludes cache reads and writes; thinking tokens are part of output.">
+          <dl className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+            <Fact label="Total">{formatTokens(tk.total)}</Fact>
+            <Fact label="Input">{formatTokens(tk.input)}</Fact>
+            <Fact label="Output">{formatTokens(tk.output)}</Fact>
+            <Fact label="Cache read">{formatTokens(tk.cacheRead)}</Fact>
+            <Fact label="Cache write">{formatTokens(tk.cacheWrite)}</Fact>
+            <Fact label="Thinking (in output)">{formatTokens(tk.reasoning)}</Fact>
+          </dl>
+          {usage && usage.length > 0 && (
+            <div className="mt-3 overflow-x-auto">
+              <table className="w-full text-sm">
+                <caption className="sr-only">Usage by model</caption>
+                <thead>
+                  <tr className="border-b border-zinc-200 text-xs text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
+                    <th className="px-2 py-2 text-left font-medium">Model</th>
+                    <th className="px-2 py-2 text-left font-medium">Effort</th>
+                    <th className="px-2 py-2 text-right font-medium">Tokens</th>
+                    <th className="px-2 py-2 text-right font-medium">≈ Cost</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {usage.map((u) => (
+                    <tr key={`${u.model}|${u.effort}`} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/60">
+                      <td className="px-2 py-2">{u.model}</td>
+                      <td className="px-2 py-2">{u.effort ?? '—'}</td>
+                      <td className="px-2 py-2 text-right tabular-nums">{formatTokens(u.tokens.total)}</td>
+                      <td className="px-2 py-2 text-right tabular-nums">{formatCost(u.cost)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Card>
+
+        {!limited && (
+          <Card title="Phases" description="Where the turn's time went.">
+            {phases ? (
+              <StackedBar100 rows={[{ label: 'this turn', values: phases.values }]} keys={phases.keys} valueFormat="duration" labelWidth={70} ariaLabel="Phase split of the turn" />
+            ) : (
+              <p className="text-sm text-zinc-500 dark:text-zinc-400">No phase data for this turn.</p>
+            )}
+            {tools.length > 0 && (
+              <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">Tools: {tools.map(([k, v]) => `${k} ×${v}`).join(', ')}</p>
+            )}
+          </Card>
+        )}
+
+        {!limited && (
+          <Card title="Outcome signals" description="Why the outcome was classified this way.">
+            {signals.length > 0 ? (
+              <ul className="flex flex-wrap gap-2">
+                {signals.map((s) => (
+                  <li key={s}>
+                    <Badge>{s}</Badge>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-sm text-zinc-500 dark:text-zinc-400">No signals recorded (outcome {turn.outcome}).</p>
+            )}
+          </Card>
+        )}
+
+        <Card title="Timeline" description="Main agent and sub-agent runs on the turn's time axis.">
+          <Timeline items={timeline} totalMs={turn.durationMs} />
+        </Card>
+
+        <Card title="Runs" description="Parent to child.">
+          <RunTree root={toRunTree(detail)} />
+          {runs.length === 0 && <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">No sub-agent runs in this turn.</p>}
+        </Card>
+      </div>
+    </>
+  );
+}

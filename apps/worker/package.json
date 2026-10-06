@@ -1,0 +1,27 @@
+{
+  "name": "@ai-obs/worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Background jobs: rollups, budgets, retention, e-mail",
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "tsx watch --env-file-if-exists=../../.env src/index.ts",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --root ../.. --project worker",
+    "once": "tsx --env-file-if-exists=../../.env src/index.ts --once"
+  },
+  "dependencies": {
+    "@ai-obs/db": "workspace:*",
+    "@ai-obs/protocol": "workspace:*",
+    "drizzle-orm": "0.45.3",
+    "nodemailer": "10.0.13"
+  },
+  "devDependencies": {
+    "@types/nodemailer": "8.0.2"
+  }
+}

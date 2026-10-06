@@ -1,0 +1,33 @@
+{
+  "name": "@ai-obs/db",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Drizzle schema, migrations, DB roles + RLS, seed and connection helpers",
+  "type": "module",
+  "exports": {
+    ".": {
+      "@ai-obs/source": "./src/index.ts",
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "migrations"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "tsc -p tsconfig.build.json --watch --preserveWatchOutput",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "tsx --env-file-if-exists=../../.env src/migrate.ts",
+    "db:seed": "tsx --env-file-if-exists=../../.env src/seed.ts"
+  },
+  "dependencies": {
+    "drizzle-orm": "0.45.3",
+    "postgres": "3.4.9"
+  },
+  "devDependencies": {
+    "drizzle-kit": "0.31.11"
+  }
+}

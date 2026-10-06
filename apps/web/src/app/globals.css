@@ -1,0 +1,16 @@
+@import 'tailwindcss';
+
+/* Dark mode is class-based (`.dark` on <html>); the inline script in layout.tsx sets it from the
+   saved choice or prefers-color-scheme. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+:root {
+  color-scheme: light;
+}
+:root.dark {
+  color-scheme: dark;
+}

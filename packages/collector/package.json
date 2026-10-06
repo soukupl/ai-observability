@@ -1,0 +1,26 @@
+{
+  "name": "ai-obs",
+  "version": "0.1.0",
+  "description": "ai-obs collector: zero-dependency CLI that captures AI coding-agent usage from harness hooks",
+  "type": "module",
+  "license": "UNLICENSED",
+  "bin": {
+    "ai-obs": "./bin/ai-obs.js"
+  },
+  "files": [
+    "bin",
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "tsc -p tsconfig.build.json --watch --preserveWatchOutput",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --root ../.. --project collector"
+  },
+  "devDependencies": {
+    "@ai-obs/protocol": "workspace:*"
+  }
+}
