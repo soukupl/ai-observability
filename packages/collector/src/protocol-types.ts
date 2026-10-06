@@ -7,6 +7,10 @@ export const SCHEMA_VERSION = 1 as const;
 export const MAX_BATCH_EVENTS = 500;
 export const MAX_BATCH_BYTES = 1_000_000;
 export const MAX_SUMMARY_LENGTH = 140;
+export const MAX_USAGE_NAME_LENGTH = 128;
+export const MAX_SKILLS_PER_EVENT = 100;
+export const MAX_MCP_SERVERS_PER_EVENT = 50;
+export const MAX_MCP_TOOLS_PER_SERVER = 100;
 export const USER_TOKEN_PREFIX = 'aiobs_u_' as const;
 export const TEAM_TOKEN_PREFIX = 'aiobs_t_' as const;
 /** Recursion guard for the collector's own summarizer child process (BRIEF §5.6). */
@@ -60,6 +64,13 @@ export interface ProjectRef {
   name?: string;
 }
 
+/** How a skill was started: by the model (Skill tool / reading its SKILL.md) or typed by the user (`/name`). */
+export type SkillSource = 'model' | 'user';
+/** Skill name → uses by source. Names are plain or `sha256:<64 hex>` (company project-naming mode). */
+export type SkillCounts = Record<string, { model: number; user: number }>;
+/** MCP server → tool → calls. Names are plain or `sha256:<64 hex>` (company project-naming mode). */
+export type McpCounts = Record<string, Record<string, number>>;
+
 interface EventBase {
   event_id: string;
   harness: string;
@@ -86,6 +97,8 @@ export interface TurnEvent extends EventBase {
   usage: UsageEntry[];
   phases_ms: PhasesMs;
   tools: Record<string, number>;
+  skills?: SkillCounts;
+  mcp?: McpCounts;
   files_touched: number;
   lines_added: number;
   lines_removed: number;
@@ -107,6 +120,8 @@ export interface RunEvent extends EventBase {
   usage: UsageEntry[];
   phases_ms: PhasesMs;
   tools?: Record<string, number>;
+  skills?: SkillCounts;
+  mcp?: McpCounts;
   outcome: Outcome;
 }
 

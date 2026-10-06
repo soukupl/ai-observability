@@ -83,10 +83,13 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
         outcome_signals: ['next_prompt_correction'],
         outcome_provisional: false,
         summary: 'Added JWT refresh to auth middleware',
+        skills: { 'code-review': { model: 1, user: 0 }, 'ship-check': { model: 0, user: 1 } },
+        mcp: { github: { create_pull_request: 1, search_code: 3 } },
       });
 
       const [r] = await q(sql`select *, input_tokens::int from runs where external_id = 'agent-a1'`);
-      expect(r).toMatchObject({ turn_id: t!.id, team_id: w.teams.mobile, user_id: w.users.alice, depth: 1, input_tokens: 300 });
+      expect(r).toMatchObject({ turn_id: t!.id, team_id: w.teams.mobile, user_id: w.users.alice, depth: 1, input_tokens: 300, skills: {} });
+      expect(Object.keys(r!.mcp as object)).toHaveLength(1);
 
       const u = await q<{ turn_id: string | null; run_id: string | null; input_tokens: number }>(
         sql`select turn_id, run_id, model, input_tokens::int from usage where turn_id = ${t!.id} or run_id = ${r!.id} order by model`,
@@ -148,6 +151,14 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
       expect((await post(w.tokens.hashedCo, b)).body).toMatchObject({ accepted: 1 });
       const rows = await q(sql`select key, display_name from projects where company_id = ${w.hashedCompanyId}`);
       expect(rows).toEqual([{ key: hashProjectKey('github.com/hush/secret'), display_name: null }]);
+    });
+
+    it('hashed company: plain skill and MCP names are hashed before they are stored', async () => {
+      const turn = { ...ev.turn('h-2', 'h-turn-2'), skills: { 'secret-skill': { model: 1, user: 0 } }, mcp: { 'internal-db': { drop_table: 1 } } };
+      expect((await post(w.tokens.hashedCo, batch([turn as never]))).body).toMatchObject({ accepted: 1, rejected: [] });
+      const [t] = await q(sql`select skills, mcp from turns where external_id = 'claude-code:h-turn-2'`);
+      expect(JSON.stringify(t)).not.toMatch(/secret-skill|internal-db|drop_table/);
+      expect(Object.keys(t!.skills as object)[0]).toMatch(/^sha256:[0-9a-f]{64}$/);
     });
   });
 

@@ -7,6 +7,7 @@ import {
   budgets,
   companies,
   dailyRollups,
+  dailySkillMcpRollups,
   projects,
   runs,
   teamMemberships,
@@ -163,6 +164,8 @@ async function insertTurn(tx: Tx, c: Ctx, sessionIds: Map<string, string>, t: Se
       ...tok(t),
       phasesMs: t.phasesMs,
       tools: t.tools,
+      skills: t.skills,
+      mcp: t.mcp,
       filesTouched: t.filesTouched,
       linesAdded: t.linesAdded,
       linesRemoved: t.linesRemoved,
@@ -194,6 +197,7 @@ async function insertTurn(tx: Tx, c: Ctx, sessionIds: Map<string, string>, t: Se
         durationMs: r.durationMs,
         ...tok(r),
         phasesMs: r.phasesMs,
+        mcp: r.mcp,
         outcome: r.outcome,
         outcomeProvisional: false,
       })
@@ -244,6 +248,48 @@ async function insertRollups(tx: Tx, c: Ctx, all: SeedTurn[]) {
     }
   }
   await tx.insert(dailyRollups).values([...groups.values()]);
+  await insertSkillMcpRollups(tx, c, all);
+}
+
+/** Same fold as the worker's aggregateSkillMcp: per turn (main agent + runs) one row per skill, MCP server and tool. */
+async function insertSkillMcpRollups(tx: Tx, c: Ctx, all: SeedTurn[]) {
+  const groups = new Map<string, typeof dailySkillMcpRollups.$inferInsert>();
+  const add = (t: SeedTurn, kind: 'skill' | 'mcp', name: string, tool: string, model: number, user: number) => {
+    const teamId = c.teamIds[t.project.team]!;
+    const k = [day(t.startedAt), teamId, t.actor.key, t.project.key, t.harness, t.model, kind, name, tool].join('|');
+    let g = groups.get(k);
+    if (!g) {
+      g = {
+        companyId: c.companyId, day: day(t.startedAt), teamId, userId: c.userIds[t.actor.key], projectId: c.projectIds[t.project.key],
+        harness: t.harness, model: t.model, kind, name, tool, calls: 0, modelCalls: 0, userCalls: 0, turns: 0,
+      };
+      groups.set(k, g);
+    }
+    g.calls! += model + user;
+    g.modelCalls! += model;
+    g.userCalls! += user;
+    g.turns! += 1;
+  };
+  for (const t of all) {
+    for (const [name, s] of Object.entries(t.skills)) add(t, 'skill', name, '', s.model, s.user);
+    const mcp = new Map<string, Map<string, number>>();
+    for (const calls of [t.mcp, ...t.runs.map((r) => r.mcp)]) {
+      for (const [server, tools] of Object.entries(calls)) {
+        const m = mcp.get(server) ?? new Map<string, number>();
+        for (const [tool, n] of Object.entries(tools)) m.set(tool, (m.get(tool) ?? 0) + n);
+        mcp.set(server, m);
+      }
+    }
+    for (const [server, tools] of mcp) {
+      let total = 0;
+      for (const [tool, n] of tools) {
+        add(t, 'mcp', server, tool, n, 0);
+        total += n;
+      }
+      add(t, 'mcp', server, '', total, 0);
+    }
+  }
+  if (groups.size) await tx.insert(dailySkillMcpRollups).values([...groups.values()]);
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {

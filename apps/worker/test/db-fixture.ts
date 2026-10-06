@@ -84,6 +84,10 @@ export interface TurnSpec {
   session?: string;
   /** createdAt/updatedAt stamp (default: the turn start) */
   stamp?: string;
+  /** skill / MCP use of the turn (main agent) and of its first sub-agent run */
+  skills?: Record<string, { model: number; user: number }>;
+  mcp?: Record<string, Record<string, number>>;
+  runMcp?: Record<string, Record<string, number>>;
 }
 
 /** Inserts a turn with one session, one run per extra usage entry and matching usage rows. */
@@ -112,6 +116,7 @@ export async function addTurn(db: Database, companyId: string, s: TurnSpec): Pro
         startedAt: started, endedAt: new Date(started.getTime() + 60_000), durationMs: 60_000,
         inputTokens: sum(2), outputTokens: sum(3), cacheReadTokens: sum(4), cacheWriteTokens: sum(5), requests: s.usage.length,
         phasesMs: { thinking: 40_000, coding: 20_000 }, outcome: s.outcome ?? 'success', createdAt: stamp, updatedAt: stamp,
+        skills: s.skills ?? {}, mcp: s.mcp ?? {},
       })
       .returning({ id: turns.id });
     for (const [i, u] of s.usage.entries()) {
@@ -121,7 +126,7 @@ export async function addTurn(db: Database, companyId: string, s: TurnSpec): Pro
           .insert(runs)
           .values({
             companyId, teamId: s.team, userId: s.user, turnId: t!.id, turnExternalId: `t-${s.key}`, externalId: `r${i}`, agentType: 'Explore',
-            depth: 1, startedAt: started, endedAt: started, createdAt: stamp,
+            depth: 1, startedAt: started, endedAt: started, createdAt: stamp, mcp: i === 1 ? (s.runMcp ?? {}) : {},
           })
           .returning({ id: runs.id });
         runId = r!.id;

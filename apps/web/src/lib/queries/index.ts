@@ -6,6 +6,7 @@ export * from './projects';
 export * from './models';
 export * from './phases';
 export * from './agents';
+export * from './skills-mcp';
 export * from './turns';
 export * from './runs-tree';
 export * from './budgets';

@@ -219,6 +219,8 @@ export function buildRun(
     usage: agg.usage,
     phases: agg.phases,
     tools: agg.tools,
+    skills: agg.skills,
+    mcp: agg.mcp,
     outcome: final,
     ...(a.workflowId
       ? { ext: { workflow_id: a.workflowId, ...(a.workflowPhase ? { workflow_phase: slug(a.workflowPhase, 48) } : {}), ...(a.label ? { workflow_label: slug(a.label, 48) } : {}) } }

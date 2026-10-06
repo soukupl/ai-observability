@@ -1,13 +1,14 @@
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { usageDelta } from '../../src/adapters/codex/accumulator.js';
+import { applyItem, newAcc, usageDelta } from '../../src/adapters/codex/accumulator.js';
 import { locateRollout } from '../../src/adapters/codex/locate.js';
 import { parseRolloutLine } from '../../src/adapters/codex/records.js';
 import { readFirstLine, readNewLines } from '../../src/adapters/codex/rollout.js';
 import { extractCodexText, FALLBACK_SUMMARY_MODEL, pickSummaryModel, summaryArgv } from '../../src/adapters/codex/summarize.js';
 import { parseApplyPatch, parseExecOutput, spawnedAgentIds, toolFacts } from '../../src/adapters/codex/tools.js';
 import { isRevertCommand } from '../../src/analysis/outcome.js';
+import { mcpFromTools } from '../../src/analysis/usage.js';
 import { cleanupHomes, tmpHome } from '../helpers.js';
 import { CHILD, fixtureLines, SESSION } from './codex-helpers.js';
 
@@ -145,5 +146,26 @@ describe('summaries via codex exec', () => {
     const jsonl = ['{"type":"thread.started"}', '{"type":"item.completed","item":{"type":"agent_message","text":"{\\"t1\\":\\"x\\"}"}}'].join('\n');
     expect(extractCodexText(jsonl)).toBe('{"t1":"x"}');
     expect(extractCodexText('{"t1": "plain"}')).toBe('{"t1": "plain"}');
+  });
+});
+
+describe('skill and MCP usage', () => {
+  const call = (name: string, args: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
+    JSON.stringify({ timestamp: '2026-10-05T10:00:03.000Z', type: 'response_item', payload: { type: 'function_call', name, arguments: JSON.stringify(args), call_id: `c-${name}`, ...extra } });
+
+  it('counts MCP calls per server and tool from the namespace, and SKILL.md reads as model-invoked skills', () => {
+    const acc = newAcc(0, 'gpt-5.6-terra', 'medium');
+    for (const line of [
+      call('search_code', { q: 'x' }, { namespace: 'mcp__github' }),
+      call('search_code', { q: 'y' }, { namespace: 'mcp__github' }),
+      call('exec_command', { cmd: "cat '/Users/dev/.codex/skills/release-notes/SKILL.md'" }),
+      call('exec_command', { cmd: 'ls skills/other/SKILL.md' }),
+      call('exec_command', { cmd: 'rg -n retry src' }),
+    ]) {
+      const item = parseRolloutLine(line);
+      if (item) applyItem(acc, item);
+    }
+    expect(mcpFromTools(acc.tools)).toEqual({ github: { search_code: 2 } });
+    expect(acc.skills).toEqual({ 'release-notes': { model: 1, user: 0 } });
   });
 });

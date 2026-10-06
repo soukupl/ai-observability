@@ -137,6 +137,7 @@ Shared, harness-neutral helpers:
 | `src/analysis/digest.ts` | `buildDigest()`. Truncates the prompt and the last message to 300 chars. Digests are used locally only |
 | `src/analysis/summaries.ts` | `summarizeWithCommand`, `runSummaryCommand` (sets `AI_OBS_SUMMARIZING=1`, 120 s timeout), `buildSummaryPrompt`, `parseSummaryResponse` |
 | `src/project-key.ts` / `ctx.projectKey(cwd)` | Normalized git remote, or `sha256:`, following the company's naming mode |
+| `src/analysis/usage.ts` | Skill / MCP usage (ADR-0016): `parseMcpTool`, `addSkill`, `addMcp`, `mcpFromTools`, `mergeSkills` / `mergeMcp`, wire normalisation, `skillReadBy` (Codex SKILL.md reads) and `applyUsageNaming` / `hashUsageName`. Adapters pass **plain** names to `turnEvent` / `runEvent` (`skills`, `mcp`); `ctx.queue` hashes them in `hashed` mode before anything is queued |
 
 Token convention (matches `packages/db`): `input` excludes cache reads and writes; `reasoning` is part
 of `output`; a turn's totals are the sum of its `usage` rows.
@@ -321,6 +322,9 @@ How the adapter works:
     created, the collector falls back to plain sha256 of the path. Keys made before this change
     (plain sha256) differ, so such a project shows up once more as a new project.
   - Until the server has been reached once, the collector assumes `hashed` without a salt.
+- **Skill and MCP names** (ADR-0016) follow the same mode: plain skill, MCP server and tool names in `plain`, `sha256:` +
+  HMAC-SHA256 under the company salt (plain sha256 without one) of `skill:<name>`, `mcp:<server>`, `mcp:<server>/<tool>` in
+  `hashed`, applied in `ctx.queue` before an event reaches the queue. Skill arguments and MCP inputs / outputs are never read.
 - **Hook job files** keep only harness-related env vars (`CLAUDE_*`, `CODEX_*`, `AI_OBS_*`) and drop
   any whose name suggests a secret. Job files are deleted after processing.
 - **Local only:** prompt digests for summaries, edit fingerprints for revert detection (hashes only)

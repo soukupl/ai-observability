@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { addDays } from '../src/lib/dates.js';
-import { aggregateDay, planDays, type TurnRow, type UsageRow } from '../src/rollups/aggregate.js';
+import { aggregateDay, aggregateSkillMcp, planDays, type TurnRow, type UsageRow } from '../src/rollups/aggregate.js';
 
 const turn = (id: string, over: Partial<TurnRow> = {}): TurnRow => ({
   id, teamId: 'team1', userId: 'u1', projectId: 'p1', harness: 'claude-code', model: 'opus', effort: 'high',
@@ -105,5 +105,37 @@ describe('planDays', () => {
     expect(plan.map((p) => `${p.companyId}:${p.day}`)).toEqual([
       'c1:2026-10-05', 'c2:2026-10-05', 'c1:2026-10-04', 'c2:2026-10-04', 'c1:2026-09-15',
     ]);
+  });
+});
+
+describe('aggregateSkillMcp', () => {
+  const turn = (id: string, userId: string | null, model: string | null = 'm'): TurnRow => ({
+    id, teamId: 'team', userId, projectId: null, harness: 'claude-code', model, effort: null, durationMs: 0, phasesMs: {}, outcome: 'success',
+  });
+
+  it('sums a turn and its runs, counts each turn once per row, and splits MCP servers into total and tool rows', () => {
+    const rows = aggregateSkillMcp(
+      [turn('t1', 'u1'), turn('t2', 'u1'), turn('t3', null, null)],
+      [
+        { turnId: 't1', skills: { s: { model: 1, user: 0 } }, mcp: { srv: { a: 2 } } },
+        { turnId: 't1', skills: { s: { model: 2 } }, mcp: { srv: { a: 1, b: 1 } } },
+        { turnId: 't2', skills: { s: { user: 1 } }, mcp: null },
+        { turnId: 't3', skills: { s: { model: 1, user: 0 } }, mcp: {} },
+        { turnId: 'not-picked', skills: { x: { model: 1, user: 0 } }, mcp: null },
+      ],
+    );
+    const pick = (r: (typeof rows)[number]) => [r.userId, r.model, r.kind, r.name, r.tool, r.calls, r.modelCalls, r.userCalls, r.turns];
+    expect(rows.map(pick)).toEqual([
+      ['u1', 'm', 'mcp', 'srv', '', 4, 4, 0, 1],
+      ['u1', 'm', 'mcp', 'srv', 'a', 3, 3, 0, 1],
+      ['u1', 'm', 'mcp', 'srv', 'b', 1, 1, 0, 1],
+      ['u1', 'm', 'skill', 's', '', 4, 3, 1, 2],
+      [null, 'unknown', 'skill', 's', '', 1, 1, 0, 1],
+    ]);
+  });
+
+  it('ignores zero and malformed counts', () => {
+    const rows = aggregateSkillMcp([turn('t', 'u')], [{ turnId: 't', skills: { s: { model: 0, user: -1 } }, mcp: { srv: { a: 'x' as never } } }]);
+    expect(rows).toEqual([]);
   });
 });

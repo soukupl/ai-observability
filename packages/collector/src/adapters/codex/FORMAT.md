@@ -131,7 +131,8 @@ they are ignored.
 | `spawn_agent`, `wait_agent` / `wait`, `followup_task`, `resume_agent` | `delegating`. This is dropped from the parent, because the time counts in the child run |
 | `send_message`, `send_input`, `close_agent`, `list_agents`, `update_plan`, `request_permissions`, `tool_search` | other |
 | `web_search`, `view_image` | exploring |
-| MCP (`namespace mcp__…`) | other, counted as tool `mcp` |
+| MCP (`namespace mcp__…`) | other, counted as tool `mcp` and per server × tool in `mcp` (ADR-0016) |
+| `exec_command` / `shell` that reads `…/<name>/SKILL.md` (`cat`, `sed`, `head`, …) | Codex has no skill tool: the model opens a skill by reading its SKILL.md (the `<skills_instructions>` developer message lists them). Counted as one `model` use of skill `<name>` (the directory). Codex writes no marker for a skill the user names in a prompt, so `user` uses are never recorded for Codex |
 
 `git checkout -- / restore / reset --hard / revert / stash` in the next turn, or removing at least 80 %
 of the lines the previous turn added, marks the previous turn `next_turn_revert`.

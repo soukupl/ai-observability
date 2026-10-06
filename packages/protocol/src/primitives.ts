@@ -1,5 +1,13 @@
 import { z } from 'zod';
-import { MAX_SUMMARY_LENGTH, OUTCOME_STATUSES, PHASES } from './constants.js';
+import {
+  MAX_MCP_SERVERS_PER_EVENT,
+  MAX_MCP_TOOLS_PER_SERVER,
+  MAX_SKILLS_PER_EVENT,
+  MAX_SUMMARY_LENGTH,
+  MAX_USAGE_NAME_LENGTH,
+  OUTCOME_STATUSES,
+  PHASES,
+} from './constants.js';
 
 const ULID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/i;
 const HASHED_PROJECT_KEY_RE = /^sha256:[0-9a-f]{64}$/;
@@ -55,6 +63,31 @@ export const phasesMs = z.object(phaseShape);
 
 /** Tool category → call count, e.g. `{ edit: 3, bash: 2, read: 7 }`. */
 export const tools = z.record(z.string().min(1).max(128), count);
+
+/**
+ * A skill, MCP server or MCP tool name: the harness's name in the company's `plain` project-naming
+ * mode, `sha256:<64 hex>` in `hashed` mode. No whitespace or control characters.
+ */
+export const usageName = z
+  .string()
+  .min(1)
+  .max(MAX_USAGE_NAME_LENGTH)
+  .regex(/^[^\s\p{Cc}]+$/u, 'must not contain whitespace or control characters');
+
+const maxKeys = (max: number) => (r: Record<string, unknown>) => Object.keys(r).length <= max;
+
+/** Skill name → uses by source, e.g. `{ "code-review": { model: 2, user: 1 } }`. */
+export const skills = z
+  .record(usageName, z.object({ model: count.default(0), user: count.default(0) }))
+  .refine(maxKeys(MAX_SKILLS_PER_EVENT), { message: `at most ${MAX_SKILLS_PER_EVENT} skills` });
+
+/** MCP server → tool → call count, e.g. `{ github: { create_pull_request: 3 } }`. */
+export const mcp = z
+  .record(
+    usageName,
+    z.record(usageName, count).refine(maxKeys(MAX_MCP_TOOLS_PER_SERVER), { message: `at most ${MAX_MCP_TOOLS_PER_SERVER} tools per server` }),
+  )
+  .refine(maxKeys(MAX_MCP_SERVERS_PER_EVENT), { message: `at most ${MAX_MCP_SERVERS_PER_EVENT} MCP servers` });
 
 export const outcome = z.object({
   status: z.enum(OUTCOME_STATUSES),

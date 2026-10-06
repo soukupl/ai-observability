@@ -182,6 +182,9 @@ export async function seedCompany(owner: Database, slug: string, mode: Fixture['
           inputTokens: sum('input'), outputTokens: sum('output'), cacheReadTokens: sum('cacheRead'),
           cacheWriteTokens: sum('cacheWrite'), reasoningTokens: sum('reasoning'), phasesMs: { thinking: durationMs / 2, coding: durationMs / 4, testing: durationMs / 4 },
           outcome, summary: `Turn ${n} summary`, filesTouched: 2, linesAdded: 10, linesRemoved: 3,
+          // skill / MCP use: code-review every 4th turn (typed every 8th), github MCP every 3rd
+          skills: n % 4 === 0 ? { 'code-review': { model: 1, user: n % 8 === 0 ? 1 : 0 } } : {},
+          mcp: n % 3 === 0 ? { github: { search_code: 2 } } : {},
         });
         const runModel = opts.mixed ? SUB_AGENT_MODEL : model;
         const runEffort = opts.mixed ? null : effort;
@@ -197,6 +200,7 @@ export async function seedCompany(owner: Database, slug: string, mode: Fixture['
           startedAt: new Date(startedMs + 1000), endedAt: new Date(startedMs + 1000 + durationMs / 2), durationMs: durationMs / 2,
           inputTokens: sub.input, outputTokens: sub.output, cacheReadTokens: sub.cacheRead, reasoningTokens: sub.reasoning,
           phasesMs: { exploring: durationMs / 2 }, outcome: 'success',
+          mcp: n % 2 === 0 ? { github: { get_file: 1 }, docs: { search: 1 } } : {},
         });
         usageOf(sub, { turnId, runId });
         if (deep) {

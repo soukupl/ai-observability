@@ -1,12 +1,15 @@
 import { PHASE_RULES_VERSION, toPhasesMs, type PhaseTotals } from './analysis/phases.js';
+import { normalizeMcp, normalizeSkills } from './analysis/usage.js';
 import {
   MAX_SUMMARY_LENGTH,
+  type McpCounts,
   type Outcome,
   type PhasesMs,
   type ProjectRef,
   type RunEvent,
   type SessionEndEvent,
   type SessionStartEvent,
+  type SkillCounts,
   type TurnEvent,
   type TurnOutcomeEvent,
   type TurnSummaryEvent,
@@ -93,6 +96,13 @@ function normalizeTools(tools: Record<string, number> | undefined): Record<strin
   return out;
 }
 
+/** `skills` / `mcp` wire fields, omitted when empty (older servers and collectors never see them). */
+function usageOf(i: { skills?: SkillCounts; mcp?: McpCounts }): { skills?: SkillCounts; mcp?: McpCounts } {
+  const skills = normalizeSkills(i.skills);
+  const mcp = normalizeMcp(i.mcp);
+  return { ...(skills ? { skills } : {}), ...(mcp ? { mcp } : {}) };
+}
+
 const phasesOf = (p: Partial<PhaseTotals> | PhasesMs): PhasesMs => toPhasesMs(p);
 
 const PLAIN_KEY_RE = /^[a-z0-9.-]+(:\d+)?\/[^\s\\]+$/i;
@@ -130,6 +140,9 @@ export interface TurnInput extends Common {
   /** phase totals of the main run (delegating is dropped automatically) */
   phases: Partial<PhaseTotals> | PhasesMs;
   tools?: Record<string, number>;
+  /** plain names; the context's queue hashes them in hashed mode */
+  skills?: SkillCounts;
+  mcp?: McpCounts;
   filesTouched?: number;
   linesAdded?: number;
   linesRemoved?: number;
@@ -153,6 +166,7 @@ export function turnEvent(i: TurnInput): TurnEvent {
     usage: normalizeUsage(i.usage),
     phases_ms: phasesOf(i.phases),
     tools: normalizeTools(i.tools),
+    ...usageOf(i),
     files_touched: int(i.filesTouched),
     lines_added: int(i.linesAdded),
     lines_removed: int(i.linesRemoved),
@@ -178,6 +192,8 @@ export interface RunInput extends Common {
   usage: readonly UsageEntry[];
   phases: Partial<PhaseTotals> | PhasesMs;
   tools?: Record<string, number>;
+  skills?: SkillCounts;
+  mcp?: McpCounts;
   outcome: Outcome;
 }
 
@@ -200,6 +216,7 @@ export function runEvent(i: RunInput): RunEvent {
     usage: normalizeUsage(i.usage),
     phases_ms: phasesOf(i.phases),
     ...(i.tools ? { tools: normalizeTools(i.tools) } : {}),
+    ...usageOf(i),
     outcome: normalizeOutcome(i.outcome),
     ...extOf(i),
   };

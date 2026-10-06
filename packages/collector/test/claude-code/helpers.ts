@@ -25,7 +25,7 @@ export interface Harness {
   hook(name: string, receivedAtMs: number, payload?: Record<string, unknown>): Promise<void>;
 }
 
-export function setup(opts: ClaudeCodeAdapterOptions & { now?: () => Date } = {}): Harness {
+export function setup(opts: ClaudeCodeAdapterOptions & { now?: () => Date; projectNaming?: 'plain' | 'hashed'; projectSalt?: string } = {}): Harness {
   const paths = tmpHome();
   const config = writeTestConfig(paths);
   const claudeDir = opts.claudeDir ?? mkdtempSync(join(tmpdir(), 'ai-obs-claude-'));
@@ -39,7 +39,8 @@ export function setup(opts: ClaudeCodeAdapterOptions & { now?: () => Date } = {}
     paths,
     queue: { enqueue: (e) => void events.push(...e) },
     log: createLogger(paths, 'test'),
-    projectNaming: 'plain',
+    projectNaming: opts.projectNaming ?? 'plain',
+    projectSalt: opts.projectSalt ?? null,
     now: opts.now ?? (() => new Date('2026-10-01T12:00:00Z')),
     resolveProject: async () => ({ key: 'github.com/acme/billing', name: 'billing' }),
   });

@@ -356,6 +356,10 @@ export interface TurnDetail {
     endedMs: number;
     phasesMs: Record<string, number> | null;
     tools: Record<string, number> | null;
+    /** skills of the turn and its runs (null when limited) */
+    skills: Record<string, { model: number; user: number }> | null;
+    /** MCP server → tool → calls of the turn and its runs (null when limited) */
+    mcp: Record<string, Record<string, number>> | null;
     filesTouched: number | null;
     linesAdded: number | null;
     linesRemoved: number | null;
@@ -373,6 +377,27 @@ export interface TurnDetail {
   limited: boolean;
 }
 
+/** Skill / MCP counts of a turn and its runs, summed. */
+export function mergeUses(uses: Array<{ skills: unknown; mcp: unknown }>): {
+  skills: Record<string, { model: number; user: number }>;
+  mcp: Record<string, Record<string, number>>;
+} {
+  const skills: Record<string, { model: number; user: number }> = {};
+  const mcp: Record<string, Record<string, number>> = {};
+  for (const u of uses) {
+    for (const [name, c] of Object.entries((u.skills ?? {}) as Record<string, { model?: number; user?: number }>)) {
+      const cur = (skills[name] ??= { model: 0, user: 0 });
+      cur.model += num(c?.model);
+      cur.user += num(c?.user);
+    }
+    for (const [server, tools] of Object.entries((u.mcp ?? {}) as Record<string, Record<string, number>>)) {
+      const cur = (mcp[server] ??= {});
+      for (const [tool, n] of Object.entries(tools ?? {})) cur[tool] = (cur[tool] ?? 0) + num(n);
+    }
+  }
+  return { skills, mcp };
+}
+
 /**
  * One turn with its run tree and timeline, or null when it does not exist or the viewer may not see
  * it. `atMs` (the list row's startedMs) lets the aggregate path find someone else's turn without a
@@ -388,7 +413,9 @@ export async function getTurnDetail(ctx: QueryCtx, turnId: string, atMs?: number
   const [own] = await rows<Record<string, unknown>>(
     ctx.tx,
     sql`select ${LIST_COLS}, (extract(epoch from t.ended_at) * 1000)::bigint as ended_ms, t.phases_ms, t.tools, t.files_touched,
-          t.lines_added, t.lines_removed, t.outcome_signals, t.outcome_provisional,
+          t.lines_added, t.lines_removed, t.outcome_signals, t.outcome_provisional, t.skills, t.mcp,
+          (select coalesce(jsonb_agg(jsonb_build_object('skills', r.skills, 'mcp', r.mcp)), '[]'::jsonb) from runs r
+            where r.turn_id = t.id and r.company_id = t.company_id and (r.skills <> '{}'::jsonb or r.mcp <> '{}'::jsonb)) as run_uses,
           (t.user_id = ${ctx.viewer.id}::uuid) as is_mine ${userCols}
         from turns t ${join} where t.id = ${turnId}::uuid and t.company_id = ${ctx.viewer.companyId}::uuid`,
   );
@@ -402,6 +429,7 @@ export async function getTurnDetail(ctx: QueryCtx, turnId: string, atMs?: number
       endedMs: num(own.ended_ms),
       phasesMs: (own.phases_ms as Record<string, number>) ?? {},
       tools: (own.tools as Record<string, number>) ?? {},
+      ...mergeUses([{ skills: own.skills, mcp: own.mcp }, ...((own.run_uses as Array<{ skills: unknown; mcp: unknown }>) ?? [])]),
       filesTouched: num(own.files_touched),
       linesAdded: num(own.lines_added),
       linesRemoved: num(own.lines_removed),
@@ -412,7 +440,7 @@ export async function getTurnDetail(ctx: QueryCtx, turnId: string, atMs?: number
     const found = await findViaAgg(ctx, turnId, atMs);
     if (!found) return null;
     base = mapRow(found, lk, false, (await aggTurnCosts(ctx, [found])).get(String(found.id)) ?? ZERO_COST);
-    extra = { endedMs: base.startedMs + base.durationMs, phasesMs: null, tools: null, filesTouched: null, linesAdded: null, linesRemoved: null, outcomeSignals: null, outcomeProvisional: null };
+    extra = { endedMs: base.startedMs + base.durationMs, phasesMs: null, tools: null, skills: null, mcp: null, filesTouched: null, linesAdded: null, linesRemoved: null, outcomeSignals: null, outcomeProvisional: null };
     limited = true;
   } else {
     return null;

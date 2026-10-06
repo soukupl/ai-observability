@@ -53,6 +53,10 @@ export interface SeedTurn extends Tokens {
   durationMs: number;
   phasesMs: PhasesMs;
   tools: Record<string, number>;
+  /** skill name → uses by source (main agent) */
+  skills: Record<string, { model: number; user: number }>;
+  /** MCP server → tool → calls (main agent) */
+  mcp: Record<string, Record<string, number>>;
   filesTouched: number;
   linesAdded: number;
   linesRemoved: number;
@@ -60,8 +64,15 @@ export interface SeedTurn extends Tokens {
   signals: string[];
   summary: string;
   usage: SeedUsage[];
-  runs: Array<SeedRun & { usage: SeedUsage }>;
+  runs: Array<SeedRun & { usage: SeedUsage; mcp: Record<string, Record<string, number>> }>;
 }
+
+const SKILLS = ['code-review', 'ship-check', 'bug-fixing', 'keep-documentation', 'tdd'];
+const MCP: Record<string, string[]> = {
+  github: ['search_code', 'get_file_contents', 'create_pull_request'],
+  atlassian: ['searchJiraIssuesUsingJql', 'getJiraIssue'],
+  'claude-in-chrome': ['navigate', 'read_page', 'computer'],
+};
 
 /** mulberry32: small seeded PRNG so `pnpm db:seed` always produces the same data. */
 export function rng(seed: number) {
@@ -156,6 +167,22 @@ export function generateTurns(opts: {
   seed?: number;
 }): SeedTurn[] {
   const r = rng(opts.seed ?? 42);
+  // A separate stream for skills / MCP, so adding them did not change the rest of the demo data.
+  const su = rng((opts.seed ?? 42) + 7);
+  const mcpCalls = (chance: number): Record<string, Record<string, number>> => {
+    const calls: Record<string, Record<string, number>> = {};
+    for (const [server, tools] of Object.entries(MCP)) {
+      if (su.next() >= chance) continue;
+      calls[server] = { [su.pick(tools)]: su.int(1, 4) };
+    }
+    return calls;
+  };
+  const skillUses = (harness: string): SeedTurn['skills'] => {
+    if (su.next() >= 0.35) return {};
+    // Typed `/skill` commands are a Claude Code thing; Codex only records skills the agent opens.
+    const typed = harness === 'claude-code' && su.next() < 0.4;
+    return { [su.pick(SKILLS)]: { model: typed ? 0 : 1, user: typed ? 1 : 0 } };
+  };
   const out: SeedTurn[] = [];
   for (let i = 0; i < opts.count; i++) {
     const actor = r.pick(opts.actors);
@@ -190,6 +217,7 @@ export function generateTurns(opts: {
         phasesMs: splitPhases(r, runMs),
         outcome: r.next() < 0.85 ? 'success' : 'failed',
         usage: u,
+        mcp: mcpCalls(0.15),
         ...t,
       });
     }
@@ -208,6 +236,8 @@ export function generateTurns(opts: {
       durationMs,
       phasesMs: splitPhases(r, durationMs - runs.reduce((a, x) => a + (x.depth === 1 ? x.durationMs : 0), 0)),
       tools: { edit: r.int(0, 20), bash: r.int(0, 15), read: r.int(0, 40) },
+      skills: skillUses(harness),
+      mcp: mcpCalls(0.3),
       filesTouched: r.int(0, 12),
       linesAdded: added,
       linesRemoved: r.int(0, added),

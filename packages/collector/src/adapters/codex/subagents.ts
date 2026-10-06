@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { provisionalOutcome } from '../../analysis/outcome.js';
 import { attributeTime } from '../../analysis/phases.js';
 import { primaryModel } from '../../analysis/tokens.js';
+import { mcpFromTools } from '../../analysis/usage.js';
 import { countTools, runEvent } from '../../events.js';
 import type { RunEvent, UsageEntry } from '../../protocol-types.js';
 import { addUsage, applyItem, newAcc, usageDelta, type RunAcc } from './accumulator.js';
@@ -136,6 +137,8 @@ export function resolveChildren(input: {
         usage: acc.usage,
         phases: attributeTime(acc.timeline, child.endedAt),
         tools: toolCounts(acc.tools),
+        skills: acc.skills,
+        mcp: mcpFromTools(acc.tools),
         outcome: provisionalOutcome({ stopFailure: acc.error, interrupted: acc.interrupted, lastCheck: acc.lastCheck }),
       }),
     );

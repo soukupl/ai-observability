@@ -4,7 +4,7 @@ import { AttributionBadge, Badge, OutcomeBadge } from '@/components/Badge';
 import { Card } from '@/components/Card';
 import { StackedBar100 } from '@/components/charts/StackedBar100';
 import { Timeline } from '@/components/charts/Timeline';
-import { formatCost, formatDateTime, formatDuration, formatInt, formatTokens } from '@/components/format';
+import { formatCost, formatDateTime, formatDuration, formatInt, formatTokens, formatUsageName } from '@/components/format';
 import { PageHeader } from '@/components/PageHeader';
 import { RunTree } from '@/components/RunTree';
 import { requireUser } from '@/lib/auth/session';
@@ -34,6 +34,8 @@ export default async function TurnDetailPage({ params, searchParams }: Props) {
   const phases = phaseRow(turn.phasesMs);
   const signals = turn.outcomeSignals ?? [];
   const tools = Object.entries(turn.tools ?? {}).sort((a, b) => b[1] - a[1]);
+  const skills = Object.entries(turn.skills ?? {}).sort((a, b) => b[1].model + b[1].user - (a[1].model + a[1].user));
+  const mcp = Object.entries(turn.mcp ?? {}).map(([server, t]) => [server, Object.entries(t).sort((a, b) => b[1] - a[1])] as const);
   const tk = turn.tokens;
 
   return (
@@ -130,6 +132,31 @@ export default async function TurnDetailPage({ params, searchParams }: Props) {
             {tools.length > 0 && (
               <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">Tools: {tools.map(([k, v]) => `${k} ×${v}`).join(', ')}</p>
             )}
+          </Card>
+        )}
+
+        {!limited && (skills.length > 0 || mcp.length > 0) && (
+          <Card title="Skills & MCP" description="Skills used and MCP calls made in this turn, sub-agents included.">
+            <dl className="space-y-2 text-sm">
+              {skills.length > 0 && (
+                <div>
+                  <dt className="text-xs text-zinc-500 dark:text-zinc-400">Skills</dt>
+                  <dd className="text-zinc-900 dark:text-zinc-100">
+                    {skills
+                      .map(([name, c]) => `${formatUsageName(name)}${c.user > 0 ? ` (typed ×${c.user})` : ''}${c.model > 0 ? ` (by the model ×${c.model})` : ''}`)
+                      .join(', ')}
+                  </dd>
+                </div>
+              )}
+              {mcp.map(([server, calls]) => (
+                <div key={server}>
+                  <dt className="text-xs text-zinc-500 dark:text-zinc-400" title={server}>
+                    MCP {formatUsageName(server)}
+                  </dt>
+                  <dd className="text-zinc-900 dark:text-zinc-100">{calls.map(([tool, n]) => `${formatUsageName(tool)} ×${n}`).join(', ')}</dd>
+                </div>
+              ))}
+            </dl>
           </Card>
         )}
 

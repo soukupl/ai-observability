@@ -251,6 +251,8 @@ export function emitTurn(em: Emitter, t: StoredTurn): void {
       usage,
       phases: t.agg.phases,
       tools: t.agg.tools,
+      skills: t.agg.skills,
+      mcp: t.agg.mcp,
       filesTouched: t.agg.fileKeys.length,
       linesAdded: t.agg.linesAdded,
       linesRemoved: t.agg.linesRemoved,

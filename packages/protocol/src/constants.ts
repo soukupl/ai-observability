@@ -6,6 +6,16 @@ export const MAX_BATCH_EVENTS = 500;
 export const MAX_BATCH_BYTES = 1_000_000;
 export const MAX_SUMMARY_LENGTH = 140;
 
+/** Skill / MCP usage limits per turn or run event (docs/briefs/skills-and-mcp-stats.md). */
+export const MAX_USAGE_NAME_LENGTH = 128;
+export const MAX_SKILLS_PER_EVENT = 100;
+export const MAX_MCP_SERVERS_PER_EVENT = 50;
+export const MAX_MCP_TOOLS_PER_SERVER = 100;
+
+/** How a skill was started: picked up by the model (Skill tool) or typed by the user (`/name`). */
+export const SKILL_SOURCES = ['model', 'user'] as const;
+export type SkillSource = (typeof SKILL_SOURCES)[number];
+
 /**
  * Reported phases (BRIEF §5.4). `delegating` time is deliberately absent: waiting for
  * sub-agents is excluded from the parent run and counted in the child run instead.

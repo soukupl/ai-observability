@@ -36,6 +36,13 @@
       "when": 1791247629768,
       "tag": "0004_auth_invites_salt_hardening",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1791326330236,
+      "tag": "0005_skills_mcp",
+      "breakpoints": true
     }
   ]
 }

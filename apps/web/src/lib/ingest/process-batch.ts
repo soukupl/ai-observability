@@ -123,7 +123,7 @@ export async function processBatch(
       rejected.push({ event_id: event.event_id, reason: outside });
       continue;
     }
-    const limited = enforceLimits(event);
+    const limited = enforceLimits(event, token.projectNaming);
     if (limited.ok) ordered.push(limited.event);
     else rejected.push({ event_id: event.event_id, reason: limited.reason });
   }

@@ -25,6 +25,10 @@ export const tokenColumns = () => ({
 
 export type PhasesMs = Partial<Record<string, number>>;
 export type ToolCounts = Partial<Record<string, number>>;
+/** Skill name → uses by source (plain or `sha256:` names, company project-naming mode). */
+export type SkillCounts = Record<string, { model: number; user: number }>;
+/** MCP server → tool → calls (plain or `sha256:` names). */
+export type McpCounts = Record<string, Record<string, number>>;
 
 /** Timing, phase, tool and outcome columns shared by turns and runs. No paths, prompts or code. */
 export const workColumns = () => ({
@@ -36,6 +40,8 @@ export const workColumns = () => ({
   ...tokenColumns(),
   phasesMs: jsonb('phases_ms').$type<PhasesMs>().notNull().default({}),
   tools: jsonb('tools').$type<ToolCounts>().notNull().default({}),
+  skills: jsonb('skills').$type<SkillCounts>().notNull().default({}),
+  mcp: jsonb('mcp').$type<McpCounts>().notNull().default({}),
   outcome: outcomeEnum('outcome').notNull().default('unknown'),
   outcomeSignals: jsonb('outcome_signals').$type<string[]>().notNull().default([]),
   outcomeProvisional: boolean('outcome_provisional').notNull().default(true),

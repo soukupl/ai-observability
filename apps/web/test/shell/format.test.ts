@@ -76,7 +76,7 @@ describe('navFor', () => {
     const both = navFor({ companyRole: 'admin', isSuperAdmin: true, company });
     expect(both.slice(-2)).toEqual([ADMIN_NAV, SUPER_NAV]);
   });
-  it('lists all six dashboard views', () => {
-    expect(VIEW_NAV.map((n) => n.href)).toEqual(['/overview', '/projects', '/models', '/phases', '/agents', '/turns']);
+  it('lists all seven dashboard views', () => {
+    expect(VIEW_NAV.map((n) => n.href)).toEqual(['/overview', '/projects', '/models', '/phases', '/agents', '/skills-mcp', '/turns']);
   });
 });

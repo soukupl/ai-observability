@@ -2,8 +2,9 @@ import { createHash } from 'node:crypto';
 import type { EditFingerprint } from '../../analysis/outcome.js';
 import { addPhaseTotals, attributeTime, emptyPhaseTotals, type PhaseTotals, type TimelineEntry } from '../../analysis/phases.js';
 import { mergeUsage, sumUsage, type UsageRecord } from '../../analysis/tokens.js';
+import { addMcp, addSkill, mergeMcp, mergeSkills, parseMcpTool } from '../../analysis/usage.js';
 import { toolKey } from '../../events.js';
-import type { UsageEntry } from '../../protocol-types.js';
+import type { McpCounts, SkillCounts, UsageEntry } from '../../protocol-types.js';
 import type { SlimEntry, ToolResultInfo } from './transcript.js';
 
 /** Stored caps: state files stay small even for very long sessions. */
@@ -41,6 +42,10 @@ export interface Agg {
   /** phase totals including `delegating` */
   phases: PhaseTotals;
   tools: Record<string, number>;
+  /** skills by plain name: Skill tool calls (`model`) and typed `/skill` commands (`user`). Absent in older state. */
+  skills: SkillCounts;
+  /** MCP calls by plain server → tool name. Absent in older state. */
+  mcp: McpCounts;
   /** distinct raw tool names in first-use order (digest input) */
   toolNames: string[];
   /** hashed paths of successfully edited files */
@@ -69,6 +74,8 @@ export function emptyAgg(at: number): Agg {
     responseIds: [],
     phases: emptyPhaseTotals(),
     tools: {},
+    skills: {},
+    mcp: {},
     toolNames: [],
     fileKeys: [],
     linesAdded: 0,
@@ -108,12 +115,21 @@ export function analyzeEntries(entries: readonly SlimEntry[], opts: AnalyzeOptio
   const fpAdded: string[] = [];
   const fpRemoved: string[] = [];
   let end = start;
+  /** a typed slash command waiting for its expansion (only skills / custom commands have one) */
+  let command: string | null = null;
 
   for (const e of entries) {
     if (e.k === 'stop') continue;
+    // A command's expansion is written with the prompt; it is not activity and does not move the turn's end.
+    if (e.k === 'expansion') {
+      if (command) addSkill(agg.skills, command, 'user');
+      command = null;
+      continue;
+    }
     end = Math.max(end, e.at);
     if (e.k === 'prompt') {
       if (e.at > start) timeline.push({ at: e.at, type: 'prompt' });
+      command = e.command;
       continue;
     }
     if (e.k === 'interrupt') {
@@ -123,6 +139,7 @@ export function analyzeEntries(entries: readonly SlimEntry[], opts: AnalyzeOptio
     }
     if (e.k === 'assistant') {
       agg.active = true;
+      command = null;
       if (e.usage && !(e.usage.responseId && opts.skipResponseIds?.has(e.usage.responseId))) records.push(e.usage);
       for (const b of e.blocks) {
         if (b.t === 'output') {
@@ -133,6 +150,9 @@ export function analyzeEntries(entries: readonly SlimEntry[], opts: AnalyzeOptio
         timeline.push({ at: e.at, type: 'tool_call', id: b.id, phase: b.phase });
         toolCalls.push(b.name);
         toolNames.push(b.name);
+        if (b.skill) addSkill(agg.skills, b.skill, 'model');
+        const mcp = parseMcpTool(b.name);
+        if (mcp) addMcp(agg.mcp, mcp.server, mcp.tool);
         if (b.edit && b.filePath) pendingEdits.set(b.id, { filePath: b.filePath, estimate: b.edit.fp, added: b.edit.added, removed: b.edit.removed });
         if (b.phase === 'testing' || b.phase === 'validating') checks.set(b.id, b.phase);
         if (b.agent) agg.agentCalls[b.id] = { type: b.agent.type, background: b.agent.background, completed: false };
@@ -190,6 +210,8 @@ export function mergeAgg(a: Agg, b: Agg): Agg {
     responseIds: uniqCap([...a.responseIds, ...b.responseIds], MAX_IDS),
     phases: addPhaseTotals(a.phases, b.phases),
     tools,
+    skills: mergeSkills(a.skills, b.skills),
+    mcp: mergeMcp(a.mcp, b.mcp),
     toolNames: [...new Set([...a.toolNames, ...b.toolNames])].slice(0, 30),
     fileKeys: uniqCap([...a.fileKeys, ...b.fileKeys], MAX_FILE_KEYS),
     linesAdded: a.linesAdded + b.linesAdded,

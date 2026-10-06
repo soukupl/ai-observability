@@ -4,12 +4,14 @@ import {
   effort,
   ext,
   harness,
+  mcp,
   model,
   nonEmptyId,
   outcome,
   phasesMs,
   project,
   shortText,
+  skills,
   summary,
   timestamp,
   tools,
@@ -50,6 +52,10 @@ export const turnEvent = z
     usage: z.array(usageEntry).max(64),
     phases_ms: phasesMs,
     tools: tools.default({}),
+    /** skills used by the main agent (optional: older collectors omit it) */
+    skills: skills.optional(),
+    /** MCP calls of the main agent (optional: older collectors omit it) */
+    mcp: mcp.optional(),
     files_touched: count.default(0),
     lines_added: count.default(0),
     lines_removed: count.default(0),
@@ -74,6 +80,8 @@ export const runEvent = z
     usage: z.array(usageEntry).max(64),
     phases_ms: phasesMs,
     tools: tools.optional(),
+    skills: skills.optional(),
+    mcp: mcp.optional(),
     outcome,
   })
   .refine(endsAfterStart, endsAfterStartMsg);

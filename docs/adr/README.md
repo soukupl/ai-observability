@@ -15,3 +15,4 @@
 - [ADR-0013: Dashboard login via magic link and Google/GitHub OAuth](0013-dashboard-authentication.md)
 - [ADR-0014: DB roles as NOLOGIN roles reached via SET ROLE, optional per-service logins](0014-db-roles-and-connections.md)
 - [ADR-0015: Usage rows are summed by turn_id; ingest stores the turn usage as given](0015-usage-rows-sum-by-turn.md)
+- [ADR-0016: Record skill and MCP usage by name, following the project-naming mode](0016-skill-and-mcp-usage.md)

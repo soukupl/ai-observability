@@ -135,3 +135,85 @@ export function planDays(input: DayPlanInput, addDays: (day: string, n: number) 
   for (const c of input.changed) add(c.companyId, c.day);
   return [...out.values()].sort((a, b) => (a.day === b.day ? a.companyId.localeCompare(b.companyId) : a.day < b.day ? 1 : -1));
 }
+
+/** Skill / MCP counts of one turn or run (turns.skills / turns.mcp, runs.skills / runs.mcp). */
+export interface SkillMcpUse {
+  turnId: string;
+  skills: Record<string, { model?: number; user?: number }> | null;
+  mcp: Record<string, Record<string, number>> | null;
+}
+
+export interface SkillMcpRollupRow {
+  teamId: string;
+  userId: string | null;
+  projectId: string | null;
+  harness: string;
+  model: string;
+  kind: 'skill' | 'mcp';
+  name: string;
+  /** '' for a skill and for an MCP server's total row */
+  tool: string;
+  calls: number;
+  modelCalls: number;
+  userCalls: number;
+  /** distinct turns of the group that used it */
+  turns: number;
+}
+
+const n = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0);
+
+/**
+ * Folds the skill / MCP use of the picked turns (each turn plus its runs) into daily_skill_mcp_rollups
+ * rows, grouped like daily_rollups by the turn's (team, user, project, harness, primary model). Per skill:
+ * one row (tool ''). Per MCP server: a total row (tool '') and one row per tool. `turns` counts each turn
+ * once per row, so a server row is not the sum of its tool rows.
+ */
+export function aggregateSkillMcp(turns: TurnRow[], uses: SkillMcpUse[]): SkillMcpRollupRow[] {
+  const perTurn = new Map<string, { skills: Map<string, { model: number; user: number }>; mcp: Map<string, Map<string, number>> }>();
+  for (const u of uses) {
+    let acc = perTurn.get(u.turnId);
+    if (!acc) perTurn.set(u.turnId, (acc = { skills: new Map(), mcp: new Map() }));
+    for (const [name, c] of Object.entries(u.skills ?? {})) {
+      const cur = acc.skills.get(name) ?? { model: 0, user: 0 };
+      cur.model += n(c?.model);
+      cur.user += n(c?.user);
+      acc.skills.set(name, cur);
+    }
+    for (const [server, tools] of Object.entries(u.mcp ?? {})) {
+      const cur = acc.mcp.get(server) ?? new Map<string, number>();
+      for (const [tool, k] of Object.entries(tools ?? {})) cur.set(tool, (cur.get(tool) ?? 0) + n(k));
+      acc.mcp.set(server, cur);
+    }
+  }
+
+  const groups = new Map<string, SkillMcpRollupRow>();
+  const add = (t: TurnRow, kind: 'skill' | 'mcp', name: string, tool: string, model: number, user: number) => {
+    if (model + user <= 0) return;
+    const m = t.model ?? UNKNOWN_MODEL;
+    const key = JSON.stringify([t.teamId, t.userId, t.projectId, t.harness, m, kind, name, tool]);
+    let g = groups.get(key);
+    if (!g) {
+      g = { teamId: t.teamId, userId: t.userId, projectId: t.projectId, harness: t.harness, model: m, kind, name, tool, calls: 0, modelCalls: 0, userCalls: 0, turns: 0 };
+      groups.set(key, g);
+    }
+    g.calls += model + user;
+    g.modelCalls += model;
+    g.userCalls += user;
+    g.turns += 1;
+  };
+
+  for (const t of turns) {
+    const acc = perTurn.get(t.id);
+    if (!acc) continue;
+    for (const [name, c] of acc.skills) add(t, 'skill', name, '', c.model, c.user);
+    for (const [server, tools] of acc.mcp) {
+      let total = 0;
+      for (const [tool, k] of tools) {
+        add(t, 'mcp', server, tool, k, 0);
+        total += k;
+      }
+      add(t, 'mcp', server, '', total, 0);
+    }
+  }
+  return [...groups.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([, g]) => g);
+}

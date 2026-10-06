@@ -6,14 +6,19 @@ const user = (content: unknown, extra: Record<string, unknown> = {}) => slimEntr
 
 describe('claude-code transcript entries', () => {
   it('tells prompts from everything else a user entry can be', () => {
-    expect(user('fix the bug')).toMatchObject({ k: 'prompt', human: true, uuid: 'u' });
+    expect(user('fix the bug')).toMatchObject({ k: 'prompt', human: true, uuid: 'u', command: null });
+    expect(user('<command-message>code-review</command-message>\n<command-name>/code-review</command-name>\n<command-args>--fix</command-args>')).toMatchObject({ k: 'prompt', command: 'code-review' });
     expect(user([{ type: 'text', text: 'see image' }, { type: 'image', source: {} }])).toMatchObject({ k: 'prompt' });
     expect(user('<task-notification>\n<task-id>1</task-id>', { origin: { kind: 'task-notification' } })).toMatchObject({ k: 'prompt', human: false });
     expect(user('[Request interrupted by user]')).toEqual({ k: 'interrupt', at: Date.parse(ts) });
     expect(user('<local-command-stdout>ok</local-command-stdout>')).toBeNull();
     expect(user('<local-command-caveat>Caveat</local-command-caveat>')).toBeNull();
-    expect(user('expanded skill text', { isMeta: true })).toBeNull();
+    expect(user('expanded skill text', { isMeta: true })).toEqual({ k: 'expansion', at: Date.parse(ts) });
+    expect(user('Base directory for this skill: …', { isMeta: true, sourceToolUseID: 'toolu_1' })).toBeNull();
+    expect(user('<local-command-caveat>Caveat</local-command-caveat>', { isMeta: true })).toBeNull();
+    expect(user('<command-message>x</command-message>\n<command-name>x</command-name>', { isMeta: true })).toBeNull();
     expect(user('summary of earlier conversation', { isCompactSummary: true })).toBeNull();
+    expect(user('summary of earlier conversation', { isCompactSummary: true, isMeta: true })).toBeNull();
     expect(user([{ type: 'tool_result', tool_use_id: 't', content: 'x' }])).toMatchObject({ k: 'tool_result' });
     expect(slimEntry({ type: 'system', subtype: 'stop_hook_summary', timestamp: ts })).toEqual({ k: 'stop', at: Date.parse(ts) });
     expect(slimEntry({ type: 'system', subtype: 'api_error', timestamp: ts })).toBeNull();

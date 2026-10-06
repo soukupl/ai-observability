@@ -63,6 +63,45 @@ export const dailyRollups = pgTable(
   ],
 );
 
+/**
+ * Daily skill / MCP use (docs/briefs/skills-and-mcp-stats.md), written by the worker together with
+ * daily_rollups in the same slice transaction and with the same rules (no unique key, anonymised rows
+ * kept, ADR-0012). One row per company × UTC day of the turn's `started_at` × team × user × project ×
+ * harness × primary model × kind × name × tool, counting the turn and its runs:
+ *   kind 'skill': name = skill, tool = '' (calls = model_calls + user_calls);
+ *   kind 'mcp':   name = server, tool = '' for the server total, or the tool name for one tool.
+ * `turns` = distinct turns that used it, so server rows (tool '') are not the sum of their tool rows.
+ */
+export const dailySkillMcpRollups = pgTable(
+  'daily_skill_mcp_rollups',
+  {
+    id: pk(),
+    companyId: uuid('company_id')
+      .notNull()
+      .references(() => companies.id, { onDelete: 'cascade' }),
+    day: date('day', { mode: 'string' }).notNull(),
+    teamId: uuid('team_id').references(() => teams.id, { onDelete: 'set null' }),
+    userId: uuid('user_id').references(() => users.id, { onDelete: 'set null' }),
+    projectId: uuid('project_id').references(() => projects.id, { onDelete: 'set null' }),
+    harness: text('harness').notNull(),
+    model: text('model').notNull(),
+    kind: text('kind').notNull(),
+    name: text('name').notNull(),
+    tool: text('tool').notNull().default(''),
+    calls: bigint('calls', { mode: 'number' }).notNull().default(0),
+    modelCalls: bigint('model_calls', { mode: 'number' }).notNull().default(0),
+    userCalls: bigint('user_calls', { mode: 'number' }).notNull().default(0),
+    turns: count('turns'),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    index('daily_skill_mcp_rollups_company_day_idx').on(t.companyId, t.day),
+    index('daily_skill_mcp_rollups_company_team_day_idx').on(t.companyId, t.teamId, t.day),
+    index('daily_skill_mcp_rollups_user_idx').on(t.userId),
+    check('daily_skill_mcp_rollups_kind', sql`${t.kind} in ('skill', 'mcp')`),
+  ],
+);
+
 /** Monthly token or ≈cost limit for a team or a user; notifies at 80 % / 100 %, never blocks (BRIEF §9). */
 export const budgets = pgTable(
   'budgets',

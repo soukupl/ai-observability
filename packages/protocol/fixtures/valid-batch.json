@@ -28,7 +28,9 @@
         { "model": "claude-haiku-4-5", "effort": null, "input": 300, "output": 120, "cache_read": 0, "cache_write": 0, "reasoning": 0, "requests": 2 }
       ],
       "phases_ms": { "thinking": 60000, "exploring": 40000, "coding": 90000, "documenting": 5000, "testing": 30000, "validating": 10000, "other": 5000 },
-      "tools": { "edit": 6, "bash": 4, "read": 11 },
+      "tools": { "edit": 6, "bash": 4, "read": 11, "skill": 1, "mcp": 4 },
+      "skills": { "code-review": { "model": 1, "user": 0 }, "ship-check": { "model": 0, "user": 1 } },
+      "mcp": { "github": { "create_pull_request": 1, "search_code": 3 } },
       "files_touched": 4,
       "lines_added": 120,
       "lines_removed": 18,
@@ -52,6 +54,7 @@
         { "model": "claude-haiku-4-5", "effort": null, "input": 300, "output": 120, "cache_read": 0, "cache_write": 0, "reasoning": 0, "requests": 2 }
       ],
       "phases_ms": { "thinking": 20000, "exploring": 40000 },
+      "mcp": { "sha256:4c1f0e6b9a3d2c8e7f5a1b0d9c8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e": { "sha256:0f1e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4": 2 } },
       "outcome": { "status": "success", "signals": [] }
     },
     {

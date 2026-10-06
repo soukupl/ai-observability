@@ -14,6 +14,7 @@ Design: [BRIEF §7](../../BRIEF.md), [ADR-0006](../../docs/adr/0006-tenant-isola
 | `migrations/0002_pending_patches.sql` | Generated `pending_turn_patches` + watermark indexes `turns(updated_at)`, `runs(created_at)`, then hand-written grants / RLS, `ingest_apply_pending_patch()` and the placeholder-turn data fix |
 | `migrations/0003_price_fallback_turn_list_order.sql` | Hand-written: `estimate_cost_usd()` earliest-price fallback; `agg_turn_list()` ordered by `started_at desc, id` |
 | `migrations/0004_auth_invites_salt_hardening.sql` | Generated `companies.project_salt`, `pending_turn_patches.user_id`; hand-written review fixes: `auth_pending_invitations`, `auth_accept_invitation(email, name, invitation_id)` (old 2-arg form dropped, plan capacity checked), `lookup_ingest_token` needs a live membership for user tokens, `ingest_match_user_by_email(email, team)`, parked-patch ownership in `ingest_apply_pending_patch`, `ingest_project_salt()`, `platform_email_in_use()`, platform audit policy narrowed to `platform.%` |
+| `migrations/0005_skills_mcp.sql` | Generated `turns.skills` / `turns.mcp`, `runs.skills` / `runs.mcp`, `daily_skill_mcp_rollups`; hand-written: its RLS (same policies as `daily_rollups`), `GRANT UPDATE (skills, mcp)` to `app_ingest`, `agg_skill_mcp()` and `agg_skill_mcp_rollups()` (ADR-0016) |
 | `src/connections.ts` | `dbFor(kind)` — one pool per service role |
 | `src/rls.ts` | `withRlsContext()` (dashboard), `withIngestContext()` (ingest) |
 | `src/migrate.ts` | Migrate entry point (Docker `migrate` service, `pnpm db:migrate`) |
@@ -68,6 +69,12 @@ Design: [BRIEF §7](../../BRIEF.md), [ADR-0006](../../docs/adr/0006-tenant-isola
   (the worker marks each row it writes in its id: UUID version digit 8, then `a` = had a user, `0` = none, so
   `user_id` null with an `8a` id is a deleted user's row), and a day whose raw turns were partly deleted is never
   rebuilt, only extended with turns created after the last rollup.
+- `daily_skill_mcp_rollups` (ADR-0016) is written by the worker in the same slice transaction as `daily_rollups`, with the
+  same mode (`rebuild` / `append`), the same picked turns and the same row-id marking (anonymised rows survive). One row
+  per day × team × user × project × harness × the turn's primary model × kind × name × tool, counting the turn **and its
+  runs**: a skill has one row (`tool = ''`); an MCP server has a total row (`tool = ''`) plus one row per tool. `turns` is
+  the number of distinct turns in the group, so summing it over groups stays exact, but a server row is not the sum of its
+  tool rows. Names are as ingested (plain or `sha256:`).
 - Privacy: there are no columns for prompts, code, diffs or file paths. A CHECK constraint rejects
   project keys that look like local paths. Summaries are at most 140 characters.
 - Timestamps are `timestamptz`. The aggregate functions group by UTC day.
@@ -204,5 +211,6 @@ Acme uses the default `aggregates-only` mode.
   membership condition, team-bound git-e-mail matching, parked-patch ownership, platform audit scope and e-mail check, the
   project salt.
 - `test/seed-rollups.test.ts` (own database `ai_obs_seed_test`) runs the demo seed and checks its rollups follow
-  the fold above (tokens per usage model, turns per primary model).
+  the fold above (tokens per usage model, turns per primary model) and that its skill / MCP rollups equal the raw
+  turns and runs.
 - `test/rls-context.test.ts` and `test/seed-data.test.ts` are pure unit tests.

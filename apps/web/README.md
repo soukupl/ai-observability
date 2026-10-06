@@ -115,6 +115,9 @@ Request handling, in order:
 4. **Validate server-side** (`limits.ts`), after the wire schema: counts the columns or aggregates cannot hold
    (tokens ≤ 1e10 per usage entry, requests ≤ 1e7, phases ≤ 24 h, tool counts ≤ 1e9, depth ≤ 1000, files / lines /
    rules version ≤ 2^31-1) **reject** the event with a reason such as `lines_added is out of range` (never clamped).
+   Skill and MCP counts (`skills`, `mcp`; ADR-0016) are bounded at 1e6 per entry; in a company with `hashed` project
+   naming a plain skill / server / tool name is hashed here (`sha256:` + SHA-256 of `skill:<name>`, `mcp:<server>`,
+   `mcp:<server>/<tool>`), so it is never stored.
    Tool keys are lower-cased and restricted to `[a-z0-9_]{1,64}` (anything else → `other`, `mcp__*` → `mcp`), agent
    types to `[A-Za-z0-9_.:-]{1,64}` (else `other`) and outcome signals to the known set, so an older collector cannot
    store paths or internal names. A turn or run that started before the company's retention cutoff (plan maximum
@@ -244,6 +247,9 @@ outcomes and token totals agree exactly between the two (tested). Differences:
   model for turn counts).
 - **Zero-token usage rows** (a model that was only mentioned) are dropped from usage queries and never priced (DP-10).
 - **Phases, agents and the turns explorer** have no rollup form and always read raw rows (empty beyond retention).
+- **Skills & MCP** reads `turns.skills` / `turns.mcp` plus the turns' runs on raw ranges and `daily_skill_mcp_rollups` on
+  long ones (`agg_skill_mcp` / `agg_skill_mcp_rollups` on the aggregate path); both give the same rows (tested). Effort
+  is not a dimension there, so the effort filter is ignored except on the direct raw path.
 - `ctx.forceSource` overrides the choice (tests, tooling).
 
 ### Cost (`cost.ts`)
@@ -257,7 +263,7 @@ models is `partial` (shown as `≈ $12.50+`) when some had no price. `formatCost
 
 ### CSV export
 
-`GET /api/export?view=<overview|projects|models|phases|agents|turns|budgets>&<filters>` (+ `group=team|project|model`
+`GET /api/export?view=<overview|projects|models|phases|agents|skills-mcp|turns|budgets>&<filters>` (+ `group=team|project|model`
 for phases, `outcome=` for turns) re-runs the view's query inside `withUserDb`, so it can show no more than the
 screen, streams UTF-8 CSV (BOM, CRLF, RFC 4180 quoting, formula starters neutralised) and appends an
 `audit_log` row `{action: 'export', target: view, meta: {filters, rows, …}}`. Turn exports are paged by keyset (stable with ties on the start time) and capped at 50,000 rows; a capped export ends with a `TRUNCATED: only the newest N turns…` row, sends `X-Truncated: true` and records `truncated: true` in the audit meta (the row count includes the marker row). Only telemetry views are exported: the admin tables (members, teams, tokens, projects) are administration data, not telemetry, and have no CSV (BRIEF §8 covers the dashboard views); the audit log has its own export.
@@ -315,11 +321,21 @@ KPI tiles (sub-agent spawns, spawns per turn, sub-agent tokens), an `HBarChart` 
 and depth. "Spawns per turn" is spawns / turns, not the share of turns that used a sub-agent (no such query exists).
 Workflow agents of Claude Code show up as `workflow:<label>`.
 
+### Skills & MCP (`/skills-mcp`)
+
+`getSkillsMcp` (`src/lib/queries/skills-mcp.ts`) returns skills (uses, by the model vs typed by the user, turns, distinct
+users), MCP servers with their tools (calls, turns, distinct users) and calls per day; a turn and its runs count together and
+a server counts each turn once. The page shows KPI tiles (skill uses, share typed by users, MCP calls), the skills table with
+CSV (`/api/export?view=skills-mcp`: one row per skill, server and server × tool), a `<details>` list of servers that open into
+their tools, and stacked areas of uses / calls per day (top 6 + other; `skills-mcp-view.ts`, tests in `test/views/skills-mcp`).
+The users column is shown to leads and admins only. Hashed names (company project-naming mode) are shortened to
+`sha256:12345678…` (`formatUsageName`). Turn detail lists the turn's skills (typed / by the model) and MCP calls per server.
+
 ### Turns explorer (`/turns`, `/turns/[id]`)
 
 `/turns` is a paged, filterable table (`?outcome=all|success|failed|abandoned|unknown&page=`; started, user (only when
 `canSeeUsers`), project, harness, model, effort, duration, tokens, ≈ cost, outcome, attribution, summary). `/turns/[id]?startedMs=…`
-shows facts (with a "provisional" badge), token breakdown, per-model usage, phases, tools, outcome signals, summary, a Gantt
+shows facts (with a "provisional" badge), token breakdown, per-model usage, phases, tools, skills & MCP calls, outcome signals, summary, a Gantt
 `Timeline` and the `RunTree`. In aggregates-only mode someone else's turn shows only the facts that carry no person
 information (`limited`). An unknown id returns a real 404: the detail pages have no `loading.tsx` (a Suspense boundary above `notFound()` would send the 200 status line first), so the list pages and their skeletons live in the `(list)` route groups of `projects/` and `turns/`.
 

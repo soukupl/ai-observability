@@ -1,5 +1,6 @@
 import type { CollectorContext, HarnessAdapter } from './adapters/types.js';
 import { summarizeAndQueue } from './analysis/summaries.js';
+import { applyUsageNaming } from './analysis/usage.js';
 import type { CollectorConfig } from './config.js';
 import type { Logger } from './log.js';
 import { harnessStateDir, type AiObsPaths } from './paths.js';
@@ -31,7 +32,8 @@ export function createContext(deps: ContextDeps): CollectorContext {
     harness: deps.adapter.name,
     config: deps.config,
     paths: deps.paths,
-    queue: deps.queue,
+    // Skill / MCP names follow the project-naming mode: hashed here, before anything reaches the queue.
+    queue: { enqueue: (events) => deps.queue.enqueue(applyUsageNaming(events, deps.projectNaming, deps.projectSalt)) },
     state: new SessionStateStore(harnessStateDir(deps.paths, deps.adapter.name)),
     log: deps.log,
     projectNaming: deps.projectNaming,

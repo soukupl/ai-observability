@@ -1,9 +1,11 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { validateBatch, type IngestEvent } from '@ai-obs/protocol';
 import {
   INT4_MAX,
   MAX_PHASE_MS,
   MAX_TOKENS_PER_ENTRY,
+  MAX_USAGE_CALLS,
   enforceLimits,
   normalizeAgentType,
   normalizeTools,
@@ -62,6 +64,30 @@ describe('enforceLimits', () => {
 
     const run = enforceLimits(parse({ ...ev.run('t', 'r', null, 1), agent_type: 'C:\\agents\\x' } as never));
     expect(run.ok && run.event.type === 'run' && run.event.agent_type).toBe('other');
+  });
+
+  it('bounds skill and MCP counts per entry', () => {
+    const ok = parse({ ...ev.turn('s', 't'), skills: { a: { model: MAX_USAGE_CALLS, user: 0 } }, mcp: { s: { t: MAX_USAGE_CALLS } } } as never);
+    expect(enforceLimits(ok).ok).toBe(true);
+    const skill = parse({ ...ev.turn('s', 't'), skills: { a: { model: 0, user: MAX_USAGE_CALLS + 1 } } } as never);
+    expect(enforceLimits(skill)).toEqual({ ok: false, reason: 'skills is out of range' });
+    const mcp = parse({ ...ev.run('t', 'r', null, 1), mcp: { s: { t: MAX_USAGE_CALLS + 1 } } } as never);
+    expect(enforceLimits(mcp)).toEqual({ ok: false, reason: 'mcp is out of range' });
+  });
+
+  it('hashed mode: plain skill / MCP names are hashed like an unsalted collector, hashed ones kept', () => {
+    const sha = (s: string) => `sha256:${createHash('sha256').update(s).digest('hex')}`;
+    const pre = sha('anything');
+    const turn = parse({
+      ...ev.turn('s', 't'),
+      skills: { 'code-review': { model: 1, user: 2 }, [pre]: { model: 1, user: 0 } },
+      mcp: { github: { search_code: 3 } },
+    } as never);
+    const plain = enforceLimits(turn, 'plain');
+    expect(plain.ok && plain.event.type === 'turn' && plain.event.skills).toEqual({ 'code-review': { model: 1, user: 2 }, [pre]: { model: 1, user: 0 } });
+    const hashed = enforceLimits(turn, 'hashed');
+    expect(hashed.ok && hashed.event.type === 'turn' && hashed.event.skills).toEqual({ [sha('skill:code-review')]: { model: 1, user: 2 }, [pre]: { model: 1, user: 0 } });
+    expect(hashed.ok && hashed.event.type === 'turn' && hashed.event.mcp).toEqual({ [sha('mcp:github')]: { [sha('mcp:github/search_code')]: 3 } });
   });
 
   it('normalizeTools / normalizeAgentType edge cases', () => {

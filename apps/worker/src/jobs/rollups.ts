@@ -1,9 +1,18 @@
-import { dailyRollups, runs, turns, usage, type Database } from '@ai-obs/db';
+import { dailyRollups, dailySkillMcpRollups, runs, turns, usage, type Database } from '@ai-obs/db';
 import { and, eq, gte, lt, sql } from 'drizzle-orm';
 import type { WorkerContext } from '../context.js';
 import { addDays, dayStart, utcDay } from '../lib/dates.js';
 import { effectiveRetentionDays, retentionCutoffDay } from '../lib/retention-policy.js';
-import { aggregateDay, planDays, type RollupRow, type TurnRow, type UsageRow } from '../rollups/aggregate.js';
+import {
+  aggregateDay,
+  aggregateSkillMcp,
+  planDays,
+  type RollupRow,
+  type SkillMcpRollupRow,
+  type SkillMcpUse,
+  type TurnRow,
+  type UsageRow,
+} from '../rollups/aggregate.js';
 import { rollupRowId, sliceMode } from '../rollups/slice.js';
 import type { Job } from '../scheduler.js';
 
@@ -18,7 +27,8 @@ const num = (v: unknown): number => Number(v ?? 0);
 const ANONYMISED = sql`(user_id is null and substr(id::text, 15, 2) = '8a')`;
 
 /**
- * Rewrites one (company, day) slice from raw rows in one transaction (daily_rollups has no unique key, see
+ * Rewrites one (company, day) slice from raw rows in one transaction (daily_rollups and
+ * daily_skill_mcp_rollups together, with the same mode and the same picked turns) (daily_rollups has no unique key, see
  * packages/db/README.md). Returns null, touching nothing, when the day has no raw turns (their rows were
  * expired or never existed; the permanent rollup stays as it is) or nothing new to add.
  *
@@ -45,6 +55,7 @@ export async function recomputeDay(db: Database, companyId: string, day: string)
       .select({
         id: turns.id, teamId: turns.teamId, userId: turns.userId, projectId: turns.projectId, harness: turns.harness,
         model: turns.model, effort: turns.effort, durationMs: turns.durationMs, phasesMs: turns.phasesMs, outcome: turns.outcome,
+        skills: turns.skills, mcp: turns.mcp,
         known: sql<boolean>`coalesce(${turns.createdAt} <= ${lastWrite}, false)`,
       })
       .from(turns)
@@ -75,17 +86,39 @@ export async function recomputeDay(db: Database, companyId: string, day: string)
       .groupBy(runs.turnId);
     for (const r of runAgg) if (r.turnId) runCounts.set(r.turnId, num(r.n));
 
-    // aggregateDay ignores usage rows of turns that were not picked.
+    // Skill / MCP use: the turn's own counts plus those of its runs.
+    const runUses = await tx
+      .select({ turnId: runs.turnId, skills: runs.skills, mcp: runs.mcp })
+      .from(runs)
+      .innerJoin(turns, and(eq(runs.turnId, turns.id), eq(runs.companyId, turns.companyId)))
+      .where(and(inDay, sql`(${runs.skills} <> '{}'::jsonb or ${runs.mcp} <> '{}'::jsonb)`));
+    const uses: SkillMcpUse[] = [
+      ...picked.map((t) => ({ turnId: t.id, skills: t.skills, mcp: t.mcp })),
+      ...runUses.flatMap((r) => (r.turnId ? [{ turnId: r.turnId, skills: r.skills, mcp: r.mcp }] : [])),
+    ];
+
+    // aggregateDay / aggregateSkillMcp ignore rows of turns that were not picked.
     const rows = aggregateDay(picked as TurnRow[], usageRows, runCounts);
-    if (mode === 'rebuild') await tx.delete(dailyRollups).where(sql`${inSlice} and not ${ANONYMISED}`);
+    const skillRows = aggregateSkillMcp(picked as TurnRow[], uses);
+    if (mode === 'rebuild') {
+      await tx.delete(dailyRollups).where(sql`${inSlice} and not ${ANONYMISED}`);
+      await tx.delete(dailySkillMcpRollups).where(sql`${inSlice} and not ${ANONYMISED}`);
+    }
     for (let i = 0; i < rows.length; i += INSERT_CHUNK) {
       await tx.insert(dailyRollups).values(rows.slice(i, i + INSERT_CHUNK).map((r) => toInsert(companyId, day, r)));
     }
-    return { turns: picked.length, rows: rows.length };
+    for (let i = 0; i < skillRows.length; i += INSERT_CHUNK) {
+      await tx.insert(dailySkillMcpRollups).values(skillRows.slice(i, i + INSERT_CHUNK).map((r) => toSkillInsert(companyId, day, r)));
+    }
+    return { turns: picked.length, rows: rows.length + skillRows.length };
   });
 }
 
 const toInsert = (companyId: string, day: string, r: RollupRow): typeof dailyRollups.$inferInsert => ({
+  id: rollupRowId(r.userId !== null), companyId, day, ...r,
+});
+
+const toSkillInsert = (companyId: string, day: string, r: SkillMcpRollupRow): typeof dailySkillMcpRollups.$inferInsert => ({
   id: rollupRowId(r.userId !== null), companyId, day, ...r,
 });
 

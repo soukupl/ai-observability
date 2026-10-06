@@ -48,10 +48,10 @@ The file is append-only JSONL with one entry per line. Every message entry has `
 
 | `type` | What it is | Used |
 |---|---|---|
-| `user`, string `message.content` | A typed prompt. Also slash commands (`<command-name>…`), task notifications (`<task-notification>…`, with `origin.kind = "task-notification"` and `promptSource: "system"`) and local-command output (`<local-command-stdout>`, `<local-command-caveat>`) | Prompts start turns. Local-command output is ignored. |
+| `user`, string `message.content` | A typed prompt. Also slash commands (`<command-message>x</command-message><command-name>/x</command-name><command-args>…`; the name is kept as the prompt's `command`, the args never), task notifications (`<task-notification>…`, with `origin.kind = "task-notification"` and `promptSource: "system"`) and local-command output (`<local-command-stdout>`, `<local-command-caveat>`) | Prompts start turns. Local-command output is ignored. |
 | `user`, content `[{type:"text"},{type:"image"}…]` | A prompt with attachments | Treated as a prompt. |
 | `user`, content `[{type:"tool_result", tool_use_id, content, is_error?}]` + top-level `toolUseResult` | A tool result | Exit codes, edit stats and agent status. |
-| `user` with `isMeta: true` / `isCompactSummary` / `isVisibleInTranscriptOnly` | Skill expansions, caveats, compaction summaries, queued input delivered as meta | Ignored. Agent activity after such an entry with no prompt counts as a continuation of the previous turn. |
+| `user` with `isMeta: true` / `isCompactSummary` / `isVisibleInTranscriptOnly` | Skill expansions, caveats, compaction summaries, queued input delivered as meta | Not prompts. Agent activity after such an entry with no prompt counts as a continuation of the previous turn. An `isMeta` entry right after a typed `/name` prompt, with no `sourceToolUseID` and not a `<local-command-…>` / `<command-…>` text, is the skill's (or custom command's) **expansion**: it counts one `user` use of that skill (slim kind `expansion`; it is not activity and does not move the turn's end). Built-in commands (`/model`, `/compact`, `/clear`, …) are followed by `<local-command-stdout>` or nothing, never by an expansion. A Skill tool call's expansion has `sourceToolUseID` and is not counted again; a skill the harness loads itself writes a meta entry with its own `<command-name>` (no slash) and is not counted. |
 | `user` text `[Request interrupted by user]` / `[Request interrupted by user for tool use]` | Esc or a rejected tool. No `Stop` follows. | Marks the turn as interrupted. |
 | `assistant` | **One entry per content block** (`thinking`, `text`, `tool_use`). The entries of one API response share `message.id` and `requestId`, and **each repeats the full `message.usage`**. | Tokens (de-duplicated by `message.id`), model, effort, tools, timeline. |
 | `assistant` with `isApiErrorMessage: true`, `message.model: "<synthetic>"` | An API error placeholder (e.g. a 429) | Counts as activity; carries no usage. |
@@ -81,6 +81,8 @@ The file is append-only JSONL with one entry per line. Every message entry has `
 | `Edit` | `file_path`, `old_string`, `new_string`, `replace_all` | `{filePath, oldString, newString, originalFile, structuredPatch:[{oldStart, oldLines, newStart, newLines, lines:[" ctx", "-old", "+new"]}], userModified}` |
 | `Write` | `file_path`, `content` | `{type: "create"\|"update", filePath, content, structuredPatch, originalFile}`. `create` has an empty patch, so its lines are the content's lines. |
 | `MultiEdit` / `NotebookEdit` | `edits[]` / `notebook_path`, `new_source` | Counts are estimated from the input. |
+| `Skill` | `skill` (e.g. `code-review`, `plugin:skill`), `args?` | `Launching skill: <name>`. Counts one `model` use of `input.skill`; the args are not read. |
+| `mcp__<server>__<tool>` | (not read) | Counted per server × tool (`<server>` up to the first `__` after the prefix). |
 | `Agent` (formerly `Task`) | `description`, `prompt`, `subagent_type`, `model?`, `run_in_background?` | Sync: `{status:"completed", agentId, agentType, totalTokens, usage, …}`. Background: `{status:"async_launched", agentId, isAsync:true, outputFile}`. |
 
 Lines added and removed come from `structuredPatch` when it is present, and otherwise from a

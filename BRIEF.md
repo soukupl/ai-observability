@@ -40,11 +40,12 @@ The design is now being implemented; see README.md for the build.
 | 14 | Retention | Per-company, 30 days – 24 months raw, **default 13 months**; daily rollups kept forever | [0012](docs/adr/0012-retention-and-rollups.md) |
 | 15 | Delivery | Local file queue + retry; client-generated event IDs; server de-duplicates | [0011](docs/adr/0011-local-queue-idempotent-delivery.md) |
 | 16 | Install | One CLI: `npx ai-obs init --token …` configures every detected harness | brief only |
-| 17 | Dashboard | All seven views in v1 (see §8) | brief only |
+| 17 | Dashboard | All eight views in v1 (see §8) | brief only |
 | 18 | Alerts | Monthly token/cost budgets per team/user, e-mail at 80 % / 100 %, never blocking | brief only |
 | 19 | Billing | Plans + limits (Free / Team / Business) set by super admin; no payments | brief only |
 | 20 | Hosting | All backend services **provisioned with Docker** (Compose: web, worker, migrate, postgres); official SaaS in the **EU**; self-hostable | [0010](docs/adr/0010-portable-eu-hosting.md) |
 | 21 | Data access | CSV export of every telemetry table view (RLS-scoped, audit-logged; admin tables are administration data, not telemetry, and have no CSV; the audit log has its own export); no public read API | brief only |
+| 22 | Skills & MCP | Skill uses (model-invoked vs typed `/skill`) and MCP calls per server × tool, by name; names follow the project-naming mode (hashed on the machine) | [0016](docs/adr/0016-skill-and-mcp-usage.md) |
 
 ## 3. Scope
 
@@ -137,7 +138,10 @@ Crashed sessions (no `SessionEnd`) are swept on the next `SessionStart`.
 
 Per turn and per run: model(s), effort level, input / output / cache-read / cache-write / reasoning
 (thinking) tokens (de-duplicated per API response), start, end, duration, tool-call counts, files
-touched (count only), lines added / removed, phase durations, outcome, summary.
+touched (count only), lines added / removed, phase durations, outcome, summary. Also skill uses by skill
+name (split into started by the model and typed by the user as `/name`) and MCP calls by server × tool; in
+`hashed` project-naming mode these names are hashed on the machine
+([ADR-0016](docs/adr/0016-skill-and-mcp-usage.md), [brief](docs/briefs/skills-and-mcp-stats.md)).
 
 ### 5.4 Phase classification (no LLM)
 
@@ -205,6 +209,8 @@ provisional outcome and later sends a `turn_outcome` patch event.
       "phases_ms": { "thinking": 0, "exploring": 0, "coding": 0, "documenting": 0,
                      "testing": 0, "validating": 0, "other": 0 },
       "tools": { "edit": 0, "bash": 0, "read": 0 }, "files_touched": 0, "lines_added": 0, "lines_removed": 0,
+      "skills": { "code-review": { "model": 1, "user": 0 } },            // optional (ADR-0016)
+      "mcp": { "github": { "search_code": 3 } },                         // optional (ADR-0016)
       "outcome": { "status": "success", "signals": ["tests_passed"], "provisional": true },
       "phase_rules_version": 1 },
     { "event_id": "ulid", "type": "run", "turn_id": "…", "run_id": "agent-id", "parent_run_id": null,
@@ -238,19 +244,20 @@ All tenant tables carry `company_id` and are protected by RLS.
 | `machines` | company_id, user_id, machine_id, os, first/last seen |
 | `projects` | company_id, `key` (normalized remote or hash), display_name, mapped team_id |
 | `agent_sessions` | company_id, user_id, machine_id, project_id, harness, harness_version, started/ended, end_reason |
-| `turns` | company_id, team_id, user_id, `attribution` (verified/matched/unverified), session_id, project_id, harness, primary model, effort, timings, token totals, `phases_ms`, tool counts, files/lines, outcome + signals, summary, phase_rules_version |
-| `runs` | turn_id, parent_run_id, agent_type, depth, model, effort, timings, tokens, phases, outcome |
+| `turns` | company_id, team_id, user_id, `attribution` (verified/matched/unverified), session_id, project_id, harness, primary model, effort, timings, token totals, `phases_ms`, tool counts, `skills`, `mcp`, files/lines, outcome + signals, summary, phase_rules_version |
+| `runs` | turn_id, parent_run_id, agent_type, depth, model, effort, timings, tokens, phases, `skills`, `mcp`, outcome |
 | `usage` | per run × model × effort token counts (handles mixed-model turns) |
 | `ingest_events` | event_id (unique, for de-duplication), received_at — pruned after 30 days |
 | `model_prices` | model, effective_from, input / output / cache-read / cache-write price per MTok |
 | `daily_rollups` | company, team, user (nullable after anonymization), project, harness, model, effort, day → counts, tokens, duration, phase ms, outcome counts |
+| `daily_skill_mcp_rollups` | company, team, user (nullable after anonymization), project, harness, primary model, day, kind (skill / mcp), name, tool (`''` = skill or server total) → calls, model / user calls, turns (ADR-0016) |
 | `budgets` | company_id, team_id / user_id, period (month), kind (tokens / cost), limit, notified_80_at, notified_100_at |
 | `audit_log` | company_id, actor, action, target, meta, at (logins, token changes, settings, exports) |
 
 **Cost** = token counts × the `model_prices` row effective on the turn's date (for a date before the model's earliest row, that earliest row), computed at query time
 and always labelled "≈ at API list prices".
 
-## 8. Dashboard (all seven views in v1)
+## 8. Dashboard (all eight views in v1)
 
 Global filter bar: date range · team · project · user (when allowed) · harness · model. Tailwind,
 light / dark, responsive. Charts via Recharts, one clear chart per question.
@@ -262,6 +269,7 @@ light / dark, responsive. Charts via Recharts, one clear chart per question.
 | **Models & effort** | Cost, tokens, success rate, median duration per model × effort | Horizontal bars |
 | **Phases** | Time split per team / project / model | 100 % stacked bars |
 | **Agents** | Sub-agent types: spawn count, token share, success rate; depth | Bars + parent → child tree on turn detail |
+| **Skills & MCP** | Skills: uses, by the model vs typed by the user, turns, distinct users (leads / admins); MCP servers that expand into their tools: calls, turns, distinct users. Turn detail lists a turn's skills and MCP calls | Stacked area: uses / calls per day |
 | **Turns explorer** | Filterable table (user*, project, model, effort, outcome, date); turn detail with run timeline and tree | Timeline (Gantt-style) |
 | **Admin** | Company: teams, members, roles, invitations, tokens, project mapping, settings, budgets, audit log. Super admin console: companies, plans, status, admin contacts only | – |
 
@@ -314,7 +322,7 @@ Set by the super admin; new sign-ups land on **Free**. Values are placeholders. 
 3. Killing the network during a session loses no data and creates no duplicates after reconnect.
 4. RLS tests prove: no cross-company reads; members see only their own rows; leads only their teams;
    aggregates-only mode exposes no per-user data to leads/admins; the super-admin role cannot read telemetry.
-5. All seven views render with real data in light and dark mode and on a phone-width screen.
+5. All dashboard views (§8) render with real data in light and dark mode and on a phone-width screen.
 6. A budget crossing 80 % sends an e-mail exactly once.
 7. Retention job removes expired raw data while long-range charts keep working from rollups.
 

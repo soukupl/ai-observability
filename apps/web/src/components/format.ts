@@ -89,3 +89,8 @@ export function formatValue(format: ValueFormat, n: number): string {
       return formatPercent(n);
   }
 }
+
+/** A skill / MCP name; a hashed one (company project-naming mode, `sha256:<64 hex>`) is shortened. */
+export function formatUsageName(name: string): string {
+  return name.startsWith('sha256:') ? `${name.slice(0, 15)}…` : name;
+}

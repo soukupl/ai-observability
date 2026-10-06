@@ -1,4 +1,13 @@
-import { OUTCOME_SIGNALS, type IngestEvent, type Outcome, type UsageEntry } from '@ai-obs/protocol';
+import { createHash } from 'node:crypto';
+import {
+  OUTCOME_SIGNALS,
+  type IngestEvent,
+  type McpCounts,
+  type Outcome,
+  type ProjectNamingMode,
+  type SkillCounts,
+  type UsageEntry,
+} from '@ai-obs/protocol';
 
 /*
  * Server-side value limits and privacy normalisation, applied to every event after wire validation
@@ -22,6 +31,8 @@ export const MAX_REQUESTS_PER_ENTRY = 10_000_000;
 export const MAX_PHASE_MS = 86_400_000;
 export const MAX_TOOL_CALLS = 1_000_000_000;
 export const MAX_RUN_DEPTH = 1_000;
+/** One skill or MCP tool in one turn / run. */
+export const MAX_USAGE_CALLS = 1_000_000;
 
 export const TOOL_KEY_RE = /^[a-z0-9_]{1,64}$/;
 export const AGENT_TYPE_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
@@ -59,6 +70,55 @@ export function normalizeTools(tools: Record<string, number>): Record<string, nu
   return out;
 }
 
+const HASHED_NAME_RE = /^sha256:[0-9a-f]{64}$/;
+const sha256Name = (input: string) => `sha256:${createHash('sha256').update(input, 'utf8').digest('hex')}`;
+
+/**
+ * Skill / MCP names in the company's project-naming mode. The collector hashes them on the machine; in
+ * hashed mode a plain name (a collector with a stale config, or a third-party one) is hashed here the way
+ * the collector does without a salt (`sha256:` + SHA-256 of `skill:<name>`, `mcp:<server>`,
+ * `mcp:<server>/<tool>`), so the name is never stored.
+ */
+const usageKey = (name: string, input: string, naming: ProjectNamingMode) =>
+  naming === 'hashed' && !HASHED_NAME_RE.test(name) ? sha256Name(input) : name;
+
+/** Null when a count is out of range. */
+export function normalizeSkills(skills: SkillCounts, naming: ProjectNamingMode): SkillCounts | null {
+  const out: SkillCounts = {};
+  for (const [name, c] of Object.entries(skills)) {
+    if (c.model > MAX_USAGE_CALLS || c.user > MAX_USAGE_CALLS) return null;
+    const key = usageKey(name, `skill:${name}`, naming);
+    const cur = (out[key] ??= { model: 0, user: 0 });
+    cur.model += c.model;
+    cur.user += c.user;
+  }
+  return out;
+}
+
+/** Null when a count is out of range. */
+export function normalizeMcp(mcp: McpCounts, naming: ProjectNamingMode): McpCounts | null {
+  const out: McpCounts = {};
+  for (const [server, tools] of Object.entries(mcp)) {
+    const s = usageKey(server, `mcp:${server}`, naming);
+    const dst = (out[s] ??= {});
+    for (const [tool, n] of Object.entries(tools)) {
+      if (n > MAX_USAGE_CALLS) return null;
+      const t = usageKey(tool, `mcp:${server}/${tool}`, naming);
+      dst[t] = (dst[t] ?? 0) + n;
+    }
+  }
+  return out;
+}
+
+/** `skills` / `mcp` of a turn or run event, normalised; a string = the field that is out of range. */
+function usageFields(e: { skills?: SkillCounts; mcp?: McpCounts }, naming: ProjectNamingMode): { skills?: SkillCounts; mcp?: McpCounts } | string {
+  const skills = e.skills ? normalizeSkills(e.skills, naming) : undefined;
+  if (skills === null) return 'skills';
+  const mcp = e.mcp ? normalizeMcp(e.mcp, naming) : undefined;
+  if (mcp === null) return 'mcp';
+  return { ...(skills ? { skills } : {}), ...(mcp ? { mcp } : {}) };
+}
+
 export function normalizeAgentType(agentType: string): string {
   return AGENT_TYPE_RE.test(agentType) ? agentType : 'other';
 }
@@ -68,8 +128,11 @@ export function normalizeOutcome(o: Outcome): Outcome {
   return { ...o, signals: [...new Set(o.signals.filter((s) => KNOWN_SIGNALS.has(s)))] };
 }
 
-/** Pure. Returns the event to apply (normalised copy) or the reason it is rejected. */
-export function enforceLimits(event: IngestEvent): LimitResult {
+/**
+ * Pure. Returns the event to apply (normalised copy) or the reason it is rejected. `naming` is the
+ * company's project-naming mode (skill / MCP names are hashed in `hashed` mode).
+ */
+export function enforceLimits(event: IngestEvent, naming: ProjectNamingMode = 'plain'): LimitResult {
   switch (event.type) {
     case 'turn': {
       const bad =
@@ -81,7 +144,9 @@ export function enforceLimits(event: IngestEvent): LimitResult {
       if (event.phase_rules_version > INT4_MAX) return tooBig('phase_rules_version');
       const tools = normalizeTools(event.tools);
       if (!tools) return tooBig('tools');
-      return { ok: true, event: { ...event, tools, outcome: normalizeOutcome(event.outcome) } };
+      const used = usageFields(event, naming);
+      if (typeof used === 'string') return tooBig(used);
+      return { ok: true, event: { ...event, tools, ...used, outcome: normalizeOutcome(event.outcome) } };
     }
     case 'run': {
       const bad = usageProblem(event.usage) ?? phasesProblem(event.phases_ms);
@@ -89,12 +154,15 @@ export function enforceLimits(event: IngestEvent): LimitResult {
       if (event.depth > MAX_RUN_DEPTH) return tooBig('depth');
       const tools = event.tools ? normalizeTools(event.tools) : undefined;
       if (tools === null) return tooBig('tools');
+      const used = usageFields(event, naming);
+      if (typeof used === 'string') return tooBig(used);
       return {
         ok: true,
         event: {
           ...event,
           agent_type: normalizeAgentType(event.agent_type),
           ...(tools ? { tools } : {}),
+          ...used,
           outcome: normalizeOutcome(event.outcome),
         },
       };

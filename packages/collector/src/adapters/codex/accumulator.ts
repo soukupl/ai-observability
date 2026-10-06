@@ -1,6 +1,7 @@
 import { editFingerprint, isRevertCommand } from '../../analysis/outcome.js';
 import type { PhaseOrDelegating, TimelineEntry } from '../../analysis/phases.js';
-import type { UsageEntry } from '../../protocol-types.js';
+import { addSkill } from '../../analysis/usage.js';
+import type { SkillCounts, UsageEntry } from '../../protocol-types.js';
 import type { RolloutItem, TokenTotals } from './records.js';
 import { parseExecOutput, pathHash, spawnedAgentIds, toolFacts } from './tools.js';
 
@@ -16,7 +17,10 @@ export interface RunAcc {
   effort: string | null;
   usage: UsageEntry[];
   timeline: TimelineEntry[];
+  /** raw tool name → calls (MCP tools as `mcp__<server>__<tool>`) */
   tools: Record<string, number>;
+  /** skills the model opened (SKILL.md reads), by plain name. Absent in older state. */
+  skills?: SkillCounts;
   toolNames: string[];
   pending: Record<string, { check: 'testing' | 'validating' | null; phase: PhaseOrDelegating; name: string }>;
   procs: Record<string, { phase: PhaseOrDelegating; check: 'testing' | 'validating' | null }>;
@@ -120,6 +124,7 @@ export function applyItem(acc: RunAcc, item: RolloutItem): void {
     case 'tool_call': {
       const f = toolFacts(item.name, item.args, item.input, (id) => acc.procs[id], isRevertCommand);
       acc.tools[item.name] = (acc.tools[item.name] ?? 0) + 1;
+      if (f.skill) addSkill((acc.skills ??= {}), f.skill, 'model');
       if (!acc.toolNames.includes(item.name) && acc.toolNames.length < 30) acc.toolNames.push(item.name);
       acc.pending[item.callId] = { check: f.processId ? (acc.procs[f.processId]?.check ?? null) : f.check, phase: f.phase, name: item.name };
       if (f.revert) acc.revertCmd = true;

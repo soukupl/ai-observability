@@ -79,4 +79,24 @@ describe.skipIf(skip !== null)(skip ? `seed rollups - SKIPPED: ${skip}` : 'seed 
     const [sub] = await q(sql`select sum(turns)::int turns from daily_rollups where model in ('claude-haiku-4-5', 'gpt-5.4-mini')`);
     expect(sub!.turns).toBe(0); // sub-agent-only models carry tokens, never turns
   });
+
+  it('skill / MCP rollups equal the raw turns and runs (server rows count each turn once)', async () => {
+    const raw = await q(sql`with uses as (
+        select t.id, ${dayOf} as day, u.skills, u.mcp from turns t
+        cross join lateral (select t.skills, t.mcp union all select r.skills, r.mcp from runs r where r.turn_id = t.id) u
+      ), flat as (
+        select id, day, 'skill' as kind, s.key as name, '' as tool, (s.value->>'model')::int + (s.value->>'user')::int as calls
+        from uses cross join lateral jsonb_each(skills) s
+        union all
+        select id, day, 'mcp', m.key, tl.key, (tl.value #>> '{}')::int from uses cross join lateral jsonb_each(mcp) m cross join lateral jsonb_each(m.value) tl
+      )
+      select day, kind, name, tool, sum(calls)::int calls, count(distinct id)::int turns from flat group by 1, 2, 3, 4
+      union all
+      select day, kind, name, '', sum(calls)::int, count(distinct id)::int from flat where kind = 'mcp' group by 1, 2, 3
+      order by 1, 2, 3, 4`);
+    const roll = await q(sql`select day::text as day, kind, name, tool, sum(calls)::int calls, sum(turns)::int turns
+      from daily_skill_mcp_rollups group by 1, 2, 3, 4 order by 1, 2, 3, 4`);
+    expect(raw.length).toBeGreaterThan(0);
+    expect(roll).toEqual(raw);
+  });
 });

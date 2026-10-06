@@ -10,6 +10,7 @@ import {
   getModelsEffort,
   getPhases,
   getProjects,
+  getSkillsMcp,
   getTokenSeries,
   getTurnDetail,
   listTurns,
@@ -371,6 +372,8 @@ describe.skipIf(skipReason !== null)(skipReason ? `dashboard queries - SKIPPED: 
       expect(d!.turn.phasesMs?.thinking).toBeGreaterThan(0);
       expect(d!.usage!.length).toBe(1);
       expect(d!.usage!.reduce((s, u) => s + u.tokens.total, 0)).toBe(d!.turn.tokens.total);
+      // nested turns are every third one, which also call github search_code twice (runs add get_file / docs)
+      expect(d!.turn.mcp!.github!.search_code).toBe(2);
     });
 
     it('aggregate path: someone else\'s turn is found by time hint, without attribution', async () => {
@@ -397,6 +400,42 @@ describe.skipIf(skipReason !== null)(skipReason ? `dashboard queries - SKIPPED: 
     });
   });
 
+  describe('skills & MCP', () => {
+    it('raw = rollup = aggregate path; a server counts each turn once; sub-agent calls included', async () => {
+      const raw = await run(B, 'admin', (ctx) => getSkillsMcp({ ...ctx, forceSource: 'raw' }, R30));
+      const roll = await run(B, 'admin', (ctx) => getSkillsMcp({ ...ctx, forceSource: 'rollup' }, R30));
+      const agg = await run(A, 'admin', (ctx) => getSkillsMcp({ ...ctx, forceSource: 'raw' }, R30));
+      const aggRoll = await run(A, 'admin', (ctx) => getSkillsMcp({ ...ctx, forceSource: 'rollup' }, R30));
+      const body = (r: typeof raw) => canon({ skills: r.skills, servers: r.servers, days: r.days });
+      expect(body(roll)).toEqual(body(raw));
+      expect(body(agg)).toEqual(body(raw));
+      expect(body(aggRoll)).toEqual(body(raw));
+
+      const [skill] = raw.skills;
+      expect(skill).toMatchObject({ name: 'code-review' });
+      expect(skill!.calls).toBe(skill!.modelCalls + skill!.userCalls);
+      expect(skill!.userCalls).toBeGreaterThan(0);
+      expect(skill!.users).toBe(1); // every 4th turn is m2's (4 users take turns)
+      const github = raw.servers.find((s) => s.name === 'github')!;
+      expect(github.tools.map((t) => t.tool)).toEqual(['search_code', 'get_file']);
+      expect(github.calls).toBe(github.tools.reduce((a, t) => a + t.calls, 0));
+      // turns with both search_code (turn) and get_file (run) count once for the server
+      expect(github.turns).toBeLessThan(github.tools.reduce((a, t) => a + t.turns, 0));
+      expect(raw.days.filter((d) => d.kind === 'skill').reduce((a, d) => a + d.calls, 0)).toBe(skill!.calls);
+    });
+
+    it('a member sees only their own use; a lead in aggregates-only mode only their team', async () => {
+      const admin = await run(A, 'admin', (ctx) => getSkillsMcp(ctx, R30));
+      const member = await run(A, 'm2', (ctx) => getSkillsMcp(ctx, R30));
+      const lead = await run(A, 'lead', (ctx) => getSkillsMcp(ctx, R30));
+      const calls = (r: typeof admin) => r.servers.reduce((a, s) => a + s.calls, 0);
+      expect(member.servers.every((s) => s.users <= 1)).toBe(true);
+      expect(calls(member)).toBeLessThan(calls(admin));
+      expect(calls(lead)).toBeLessThan(calls(admin));
+      expect(calls(lead)).toBeGreaterThan(calls(member));
+    });
+  });
+
   describe('visibility: leads / admins in aggregates-only mode get no per-user data', () => {
     const userKeys = /"(userId|user_id|userName|user_name|email)"/;
 
@@ -411,6 +450,7 @@ describe.skipIf(skipReason !== null)(skipReason ? `dashboard queries - SKIPPED: 
           models: await getModelsEffort(ctx, R30),
           phases: await getPhases(ctx, R30, 'team'),
           agents: await getAgents(ctx, R30),
+          skillsMcp: await getSkillsMcp(ctx, R30),
           turns,
           detail: await getTurnDetail(ctx, someone.id, someone.startedMs),
           budgets: await getBudgetProgress(ctx),
@@ -491,7 +531,7 @@ describe.skipIf(skipReason !== null)(skipReason ? `dashboard queries - SKIPPED: 
   describe('exports', () => {
     it('every view builds a rectangular table', async () => {
       for (const fx of [A, B]) {
-        for (const view of ['overview', 'projects', 'models', 'phases', 'agents', 'turns', 'budgets'] as const) {
+        for (const view of ['overview', 'projects', 'models', 'phases', 'agents', 'skills-mcp', 'turns', 'budgets'] as const) {
           const t = await run(fx, 'admin', (ctx) => buildExportTable(ctx, view, R30, { group: 'project' }));
           expect(t.headers.length).toBeGreaterThan(1);
           expect(t.rows.length, `${fx.mode} ${view}`).toBeGreaterThan(0);

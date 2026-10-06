@@ -204,6 +204,40 @@ describe('worker jobs against Postgres', () => {
       expect(team.reduce((a, r) => a + r.input, 0)).toBe(1527);
     });
 
+    it('folds skill and MCP use (turn + runs) into daily_skill_mcp_rollups and keeps a deleted user\'s rows', async (ctx) => {
+      if (skip) return ctx.skip();
+      const x = await seedCompany(owner, { slug: 'skills', retentionDays: 90 });
+      const day = '2026-10-05';
+      await addTurn(owner, x.companyId, {
+        key: 'sk-c', at: `${day}T08:00:00Z`, user: x.carol, team: x.teamA, usage: [[OPUS, 'high', 10, 0, 0, 0], [HAIKU, null, 1, 0, 0, 0]],
+        skills: { 'code-review': { model: 1, user: 1 } }, mcp: { github: { search_code: 2 } }, runMcp: { github: { search_code: 1, get_file: 1 } },
+      });
+      await addTurn(owner, x.companyId, { key: 'sk-b', at: `${day}T09:00:00Z`, user: x.bob, team: x.teamA, usage: [[OPUS, 'high', 10, 0, 0, 0]], skills: { 'code-review': { model: 0, user: 1 } } });
+      await addTurn(owner, x.companyId, { key: 'sk-none', at: `${day}T10:00:00Z`, user: x.bob, team: x.teamA, usage: [[OPUS, 'high', 10, 0, 0, 0]] });
+      const totals = () =>
+        rows<{ kind: string; name: string; tool: string; calls: number; model_calls: number; user_calls: number; turns: number; users: number }>(sql`
+          select kind, name, tool, sum(calls)::int calls, sum(model_calls)::int model_calls, sum(user_calls)::int user_calls,
+            sum(turns)::int turns, count(distinct user_id)::int users
+          from daily_skill_mcp_rollups where company_id = ${x.companyId} and day = ${day}::date group by 1, 2, 3 order by 1, 2, 3`);
+      const c = makeCtx();
+      await runRollups(c);
+      const expected = [
+        { kind: 'mcp', name: 'github', tool: '', calls: 4, model_calls: 4, user_calls: 0, turns: 1, users: 1 },
+        { kind: 'mcp', name: 'github', tool: 'get_file', calls: 1, model_calls: 1, user_calls: 0, turns: 1, users: 1 },
+        { kind: 'mcp', name: 'github', tool: 'search_code', calls: 3, model_calls: 3, user_calls: 0, turns: 1, users: 1 },
+        { kind: 'skill', name: 'code-review', tool: '', calls: 3, model_calls: 1, user_calls: 2, turns: 2, users: 2 },
+      ];
+      expect(await totals()).toEqual(expected);
+      await runRollups(makeCtx()); // idempotent
+      expect(await totals()).toEqual(expected);
+
+      // Deleting carol keeps her (now anonymised) rows through a rebuild of the slice.
+      await ownerTx(owner, (tx) => tx.execute(sql`delete from users where id = ${x.carol}`));
+      await rows(sql`update turns set outcome = 'failed', updated_at = ${AFTER_NOW}::timestamptz where company_id = ${x.companyId} and external_id = 't-sk-b'`);
+      await runRollups(c);
+      expect((await totals()).map(({ users: _u, ...r }) => r)).toEqual(expected.map(({ users: _u, ...r }) => r));
+    });
+
     it('a failed slice makes the pass fail, keeps the watermark and never throws out of the scheduler contract', async (ctx) => {
       if (skip) return ctx.skip();
       const broken = makeCtx();

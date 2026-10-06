@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { checkKind, classify, type PhaseOrDelegating } from '../../analysis/phases.js';
+import { skillReadBy } from '../../analysis/usage.js';
 
 /**
  * Codex tool calls → phase / check / edit facts. Command lines and patch text are used ONLY here,
@@ -96,6 +97,8 @@ export interface ToolFacts {
   patch: PatchFacts | null;
   /** write_stdin: the exec process session it talks to */
   processId: string | null;
+  /** a shell command that reads a skill's SKILL.md: the skill's name (Codex skill use) */
+  skill?: string | null;
 }
 
 /** Classifies one Codex tool call. `processPhase` resolves write_stdin to its process's phase. */
@@ -122,7 +125,8 @@ export function toolFacts(
   }
   const cmd = commandOf(args);
   if (cmd && /^(exec_command|shell|local_shell|container\.exec|shell_command|unified_exec|bash)$/.test(name)) {
-    return { ...base, phase: classify('shell', { command: cmd }), check: checkKind(cmd), revert: isRevert(cmd) };
+    const skill = skillReadBy(typeof cmd === 'string' ? cmd : cmd.join(' '));
+    return { ...base, phase: classify('shell', { command: cmd }), check: checkKind(cmd), revert: isRevert(cmd), ...(skill ? { skill } : {}) };
   }
   if (name === 'view_image') return { ...base, phase: 'exploring' };
   return { ...base, phase: classify(name) };

@@ -3,6 +3,7 @@ import { looksLikeCorrection } from '../../analysis/corrections.js';
 import { detectRevert, finalOutcome, outcomeChanged, provisionalOutcome } from '../../analysis/outcome.js';
 import { attributeTime } from '../../analysis/phases.js';
 import { mergeUsage, primaryModel } from '../../analysis/tokens.js';
+import { mcpFromTools } from '../../analysis/usage.js';
 import { sessionEndEvent, sessionStartEvent, turnEvent, turnOutcomeEvent, type TurnInput } from '../../events.js';
 import type { IngestEvent, Outcome, ProjectRef, UsageEntry } from '../../protocol-types.js';
 import { addUsage, applyItem, newAcc, usageDelta, type RunAcc } from './accumulator.js';
@@ -121,6 +122,8 @@ function turnInputOf(state: CodexSessionState, acc: RunAcc & { turnId: string },
     usage: acc.usage,
     phases: attributeTime(acc.timeline, endAt),
     tools: toolCounts(acc.tools),
+    skills: acc.skills,
+    mcp: mcpFromTools(acc.tools),
     filesTouched: acc.files.length,
     linesAdded: acc.linesAdded,
     linesRemoved: acc.linesRemoved,

@@ -7,13 +7,14 @@ import { getBudgetProgress } from './budgets';
 import { getModelsEffort } from './models';
 import { getPhases, PHASES, type PhaseGroup, PHASE_GROUPS } from './phases';
 import { getProjects } from './projects';
-import { canSeeUsers, type QueryCtx } from './scope';
+import { canSeeUsers, isLead, type QueryCtx } from './scope';
+import { getSkillsMcp } from './skills-mcp';
 import type { TokenTotals } from './sqlutil';
 import { getTokenSeries } from './timeseries';
 import { exportTurns } from './turns';
 
 /** Table views that have a CSV export (BRIEF §8: every table view). */
-export const EXPORT_VIEWS = ['overview', 'projects', 'models', 'phases', 'agents', 'turns', 'budgets'] as const;
+export const EXPORT_VIEWS = ['overview', 'projects', 'models', 'phases', 'agents', 'skills-mcp', 'turns', 'budgets'] as const;
 export type ExportView = (typeof EXPORT_VIEWS)[number];
 
 export interface CsvTable {
@@ -101,6 +102,21 @@ export async function buildExportTable(ctx: QueryCtx, view: ExportView, f: Filte
           r.avgDepth === null ? '' : Math.round(r.avgDepth * 100) / 100,
           r.maxDepth,
         ]),
+      };
+    }
+    case 'skills-mcp': {
+      const r = await getSkillsMcp(ctx, f);
+      const withUsers = ctx.viewer.companyRole === 'admin' || isLead(ctx.viewer);
+      const users = (n: number): CsvCell[] => (withUsers ? [n] : []);
+      return {
+        headers: ['kind', 'name', 'tool', 'calls', 'model_calls', 'user_calls', 'turns', ...(withUsers ? ['users'] : [])],
+        rows: [
+          ...r.skills.map((s) => ['skill', s.name, '', s.calls, s.modelCalls, s.userCalls, s.turns, ...users(s.users)]),
+          ...r.servers.flatMap((s) => [
+            ['mcp', s.name, '', s.calls, s.calls, 0, s.turns, ...users(s.users)],
+            ...s.tools.map((t) => ['mcp', s.name, t.tool, t.calls, t.calls, 0, t.turns, ...users(t.users)]),
+          ]),
+        ],
       };
     }
     case 'turns': {

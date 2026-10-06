@@ -15,8 +15,11 @@ const PROMPT_KEEP = 1000;
 const MESSAGE_KEEP = 300;
 
 export type SlimEntry =
-  | { k: 'prompt'; at: number; uuid: string; text: string; human: boolean }
+  /** `command`: the typed slash command (`/name`, without the slash) when the prompt is one */
+  | { k: 'prompt'; at: number; uuid: string; text: string; human: boolean; command: string | null }
   | { k: 'interrupt'; at: number }
+  /** Meta entry that expands the typed slash command before it (a skill / custom command; built-ins have none) */
+  | { k: 'expansion'; at: number }
   | { k: 'assistant'; at: number; usage: UsageRecord | null; synthetic: boolean; blocks: AssistantBlock[] }
   | { k: 'tool_result'; at: number; results: ToolResultInfo[]; userInterrupt: boolean }
   /** Claude Code's own end-of-turn records (system stop_hook_summary / turn_duration) */
@@ -36,6 +39,8 @@ export type AssistantBlock =
       edit: EditStats | null;
       /** Agent / Task tool: `subagent_type` and whether it was launched in the background */
       agent: { type: string | null; background: boolean } | null;
+      /** Skill tool: the skill's name (`input.skill`) */
+      skill: string | null;
     };
 
 export interface EditStats {
@@ -200,6 +205,7 @@ function slimToolUse(c: Obj): AssistantBlock {
     filePath,
     edit: filePath ? estimateEdit(name, input, filePath) : null,
     agent: isAgent ? { type: str(input.subagent_type), background: input.run_in_background === true } : null,
+    skill: name === 'Skill' ? str(input.skill) : null,
   };
 }
 
@@ -241,6 +247,7 @@ export function lineDiff(a: readonly string[], b: readonly string[]): { added: s
 
 const INTERRUPT_RE = /^\[Request interrupted/;
 const NOT_A_PROMPT_RE = /^<(local-command-(stdout|stderr|caveat)|bash-(stdout|stderr))>/;
+const COMMAND_RE = /<command-name>\/([^<\s]{1,200})<\/command-name>/;
 
 function slimUser(o: Obj, m: Obj, at: number): SlimEntry | null {
   const content = m.content;
@@ -251,14 +258,28 @@ function slimUser(o: Obj, m: Obj, at: number): SlimEntry | null {
     const marker = parts.some((c) => c.type === 'text' && INTERRUPT_RE.test((str(c.text) ?? '').trimStart())) || infos.some((r) => r.userInterrupt);
     return { k: 'tool_result', at, results: infos, userInterrupt: marker };
   }
-  if (o.isMeta === true || o.isCompactSummary === true || o.isVisibleInTranscriptOnly === true) return null;
   const text = typeof content === 'string' ? content : parts.filter((c) => c.type === 'text').map((c) => str(c.text) ?? '').join('\n');
+  // Compaction summaries can be meta too: never an expansion (a typed `/compact` must not count as a skill).
+  if (o.isCompactSummary === true || o.isVisibleInTranscriptOnly === true) return null;
+  if (o.isMeta === true) return isCommandExpansion(o, text) ? { k: 'expansion', at } : null;
   if (INTERRUPT_RE.test(text.trimStart())) return { k: 'interrupt', at };
   if (!text.trim() && !parts.length) return null;
   if (NOT_A_PROMPT_RE.test(text.trimStart())) return null;
   const origin = isObj(o.origin) ? str(o.origin.kind) : null;
   const human = (origin === null || origin === 'human') && !/^<task-notification>/.test(text.trimStart());
-  return { k: 'prompt', at, uuid: str(o.uuid) ?? `${at}`, text: text.slice(0, PROMPT_KEEP), human };
+  const command = COMMAND_RE.exec(text.slice(0, 2000))?.[1] ?? null;
+  return { k: 'prompt', at, uuid: str(o.uuid) ?? `${at}`, text: text.slice(0, PROMPT_KEEP), human, command };
+}
+
+/**
+ * The meta entry Claude Code writes right after a typed `/skill` or custom command: the skill's body.
+ * Not one: a Skill tool's expansion (`sourceToolUseID`; counted from the tool call), local-command
+ * caveats / output, and skills the harness loads itself (the meta entry carries its own `<command-name>`).
+ */
+function isCommandExpansion(o: Obj, text: string): boolean {
+  if (typeof o.sourceToolUseID === 'string') return false;
+  const t = text.trimStart();
+  return Boolean(t) && !NOT_A_PROMPT_RE.test(t) && !/^<command-(name|message)>/.test(t);
 }
 
 function slimToolResult(r: Obj, toolUseResult: unknown): ToolResultInfo {
