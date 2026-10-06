@@ -13,6 +13,9 @@ x-app: &app
     # Inside the compose network the database host is `postgres`, not localhost.
     DATABASE_URL: postgres://${POSTGRES_USER:-ai_obs}:${POSTGRES_PASSWORD:-ai_obs}@postgres:5432/${POSTGRES_DB:-ai_obs}
     MIGRATE_DATABASE_URL: postgres://${POSTGRES_USER:-ai_obs}:${POSTGRES_PASSWORD:-ai_obs}@postgres:5432/${POSTGRES_DB:-ai_obs}
+    # Same for e-mail: an empty SMTP_HOST means Mailpit (`mailpit` service, dev profile) inside compose
+    # and localhost for `pnpm dev`. Set SMTP_HOST in .env to use a real SMTP server.
+    SMTP_HOST: ${SMTP_HOST:-mailpit}
 
 services:
   postgres:
@@ -62,8 +65,8 @@ services:
     image: axllent/mailpit:v1.31.3
     profiles: ["dev"]
     ports:
-      - "127.0.0.1:1025:1025" # SMTP
-      - "127.0.0.1:8025:8025" # web UI
+      - "127.0.0.1:${MAILPIT_SMTP_PORT:-1025}:1025" # SMTP (for `pnpm dev`)
+      - "127.0.0.1:${MAILPIT_UI_PORT:-8025}:8025" # web UI
     environment:
       MP_SMTP_AUTH_ACCEPT_ANY: "1"
       MP_SMTP_AUTH_ALLOW_INSECURE: "1"

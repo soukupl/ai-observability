@@ -26,9 +26,26 @@ pnpm dev                                              # web on http://localhost:
 ```
 
 `pnpm db:seed` also leaves `daily_rollups` filled (same fold as the worker). Run `RUN_ONCE=rollups pnpm --filter @ai-obs/worker once` to check them. `pnpm dev` builds the shared packages once and then watches them; the web app and worker read the
-repo-root `.env`. The seed creates the demo company "Acme" (about 300 turns over 60 days; users such as
-`alice@acme.example`) and a super admin (`admin@example.com`, from `SUPER_ADMIN_EMAILS`). Log in at
-`/login` with one of these e-mails: the magic link arrives in Mailpit (http://localhost:8025).
+repo-root `.env`.
+
+### Pre-seeded dev logins
+
+There are no passwords anywhere: sign-in is by magic link (or Google / GitHub OAuth when configured). `pnpm db:seed` creates
+the demo company **Acme** (Team plan, aggregates-only visibility, two teams, two projects, about 300 turns over 60 days) with
+these accounts. Enter an e-mail at `/login` and open the link that arrives in Mailpit.
+
+| E-mail | Role | What they see |
+|---|---|---|
+| `alice@acme.example` | Company admin (Platform team) | Whole company, every `/admin` page |
+| `bob@acme.example` | Lead of the Platform team | Platform aggregates, team tokens and budgets |
+| `carol@acme.example` | Member, Platform team | Only her own turns |
+| `dave@acme.example` | Member, Mobile team | Only his own turns |
+| `admin@example.com` | Super admin (listed in `SUPER_ADMIN_EMAILS`) | `/super` console only, no telemetry |
+
+Mailpit UI: http://localhost:8025 by default. If another mail catcher such as MailHog already uses ports 1025 / 8025, set
+`MAILPIT_SMTP_PORT` / `MAILPIT_UI_PORT` in `.env` (for example `MAILPIT_UI_PORT=8026`) before starting the stack. Inside
+Docker Compose the apps reach Mailpit by service name, so keep `SMTP_HOST` empty in dev. Magic links expire after 15 minutes.
+The Docker-only path (`docker compose up`) does not seed; run `pnpm db:seed` against it or create the first company via `/signup`.
 
 To try the collector against your dev server:
 
