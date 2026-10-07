@@ -419,6 +419,19 @@ describe('worker jobs against Postgres', () => {
       expect(await detectRunaways(makeCtx())).toBe(0); // one alert per turn
     });
 
+    it('the tokens rule ignores cache reads: a turn of mostly cache reads is not a runaway by tokens', async (ctx) => {
+      if (skip) return ctx.skip();
+      const x = await seedCompany(owner, { slug: 'run-cache', retentionDays: 90 });
+      await history(x, x.carol, x.teamA);
+      // 30 M cache reads (≈ $6 at $0.20 / Mtok, under $20) but only 1000 fresh input tokens: normal for carol
+      await addTurn(owner, x.companyId, { key: 'carol-cached', at: '2026-10-05T10:00:00Z', user: x.carol, team: x.teamA, usage: [[OPUS, 'high', 1000, 0, 30_000_000, 0]] });
+      // 5000 cache-write tokens are counted: 5 × her p99
+      await addTurn(owner, x.companyId, { key: 'carol-writes', at: '2026-10-05T10:30:00Z', user: x.carol, team: x.teamA, usage: [[OPUS, 'high', 1000, 0, 0, 5000]] });
+      expect(await detectRunaways(makeCtx())).toBe(1);
+      expect((await alerts(x.companyId)).map((a) => a.external_id)).toEqual(['t-carol-writes']);
+      await rows(sql`update runaway_alerts set notified_at = now() where company_id = ${x.companyId}`); // keep other tests' digests apart
+    });
+
     it('aggregates-only: each user gets their own turns, admins an anonymous digest; at most one digest per hour', async (ctx) => {
       if (skip) return ctx.skip();
       const [co] = await rows<{ id: string }>(sql`select id from companies where slug = 'run-agg'`);

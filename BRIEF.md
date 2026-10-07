@@ -289,7 +289,7 @@ turns. E-mail at 80 % and 100 % to company admins and the team's leads (user bud
 Never blocks the harness.
 
 **Runaway alerts** ([ADR-0018](docs/adr/0018-runaway-alerts.md)): after a turn ends, the worker flags it when its tokens
-exceed 3 × the user's own p99 (30 days; 20 M without enough history), its ≈ cost reaches the company threshold
+(input + output + cache writes; cache reads excluded) exceed 3 × the user's own p99 (30 days; 20 M without enough history), its ≈ cost reaches the company threshold
 (default $20), or it ran for the company's hours (default 2) with above-normal tokens. One alert per turn; at most one
 digest per company per hour to the user, the team's leads in full mode, or an anonymous digest to admins in
 aggregates-only mode. Thresholds in Admin → Settings. Never blocks.

@@ -1,6 +1,8 @@
 /*
  * Runaway rules (docs/briefs/runaway-alerts.md, ADR-0018). Pure, so the thresholds are unit-tested. A finished
- * turn is a runaway when any rule fires:
+ * turn is a runaway when any rule fires. "Tokens" here are input + output + cache writes: cache reads are left out
+ * (owner, 2026-10-07) because they dominate long agentic turns while costing little; the cost rule covers spend.
+ * The user's percentiles are computed on the same measure.
  *   tokens   - its tokens exceed 3 × the user's own p99 of the 30 days before it (with ≥ 50 turns of history),
  *              or the absolute floor while there is too little history (or no user: unverified turns);
  *   cost     - its ≈ cost reaches the company threshold (default $20);
@@ -20,6 +22,7 @@ export const RUNAWAY_RULES = {
 export type RunawayReason = 'tokens' | 'cost' | 'duration';
 
 export interface RunawayInput {
+  /** input + output + cache-write tokens of the turn (cache reads excluded) */
   tokens: number;
   durationMs: number;
   /** ≈ cost; null when a model had no price */

@@ -34,6 +34,14 @@ events from the collector.
   aggregates-only mode).
 - Alerts only notify. Nothing is ever blocked.
 
+## Amendment 2026-10-07: cache reads excluded from the tokens rules
+
+- **Decided by:** owner ("exclude cache reads from the tokens rule", 2026-10-07), after the first live pass flagged five
+  of the owner's own heavy agentic turns whose tokens were mostly cache reads.
+- The tokens and duration rules compare **input + output + cache-write** tokens, for the turn and for the user's 30-day
+  p95 / p99 alike. Cache reads dominate long agentic turns but cost little; the ≈ cost rule still covers what they
+  cost. Alerts and mails still show the turn's full token count. Alerts already recorded stay as they are.
+
 ## Consequences
 
 - A runaway inside one long turn is reported only after it ends. That is the accepted v1 limitation.

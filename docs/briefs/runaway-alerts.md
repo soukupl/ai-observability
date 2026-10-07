@@ -20,6 +20,7 @@ left running, and tell someone quickly. It notifies only and never blocks (same 
 **Detection runs after the turn ends**, with no collector change; live progress events are a follow-up. Because the
 ingest role cannot read token columns (ADR-0014), the worker evaluates finished turns (a `runaways` job), not
 ingest. Decisions 1 and 5 below are therefore deferred.
+Amended 2026-10-07 (owner): the tokens rules leave out cache reads (input + output + cache writes only); see ADR-0018.
 
 ## Decisions to confirm (recommended defaults)
 

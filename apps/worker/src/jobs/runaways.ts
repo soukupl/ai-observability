@@ -31,7 +31,10 @@ interface Candidate {
   model: string | null;
   startedAt: Date;
   durationMs: number;
+  /** all tokens, cache reads included: what the alert shows */
   tokens: number;
+  /** input + output + cache writes: what the rules compare (cache reads excluded) */
+  ruleTokens: number;
   costUsd: number | null;
   history: number;
   p95: number | null;
@@ -50,6 +53,7 @@ export async function detectRunaways(ctx: WorkerContext): Promise<number> {
       select t.id, t.company_id as "companyId", t.team_id as "teamId", t.user_id as "userId", t.project_id as "projectId",
         t.harness, t.model, t.started_at as "startedAt", t.duration_ms::float8 as "durationMs",
         (t.input_tokens + t.output_tokens + t.cache_read_tokens + t.cache_write_tokens)::float8 as tokens,
+        (t.input_tokens + t.output_tokens + t.cache_write_tokens)::float8 as "ruleTokens",
         cost.usd::float8 as "costUsd", coalesce(h.n, 0)::int as history, h.p95::float8 as p95, h.p99::float8 as p99,
         (c.settings->>'runawayCostUsd')::float8 as "costTh", (c.settings->>'runawayHours')::float8 as "hoursTh"
       from turns t
@@ -66,7 +70,7 @@ export async function detectRunaways(ctx: WorkerContext): Promise<number> {
         select count(*) as n,
           percentile_cont(0.95) within group (order by x.tok) as p95,
           percentile_cont(0.99) within group (order by x.tok) as p99
-        from (select p.input_tokens + p.output_tokens + p.cache_read_tokens + p.cache_write_tokens as tok
+        from (select p.input_tokens + p.output_tokens + p.cache_write_tokens as tok
               from turns p
               where p.company_id = t.company_id and p.user_id = t.user_id
                 and p.started_at >= t.started_at - interval '30 days' and p.started_at < t.started_at) x
@@ -78,7 +82,7 @@ export async function detectRunaways(ctx: WorkerContext): Promise<number> {
   let created = 0;
   for (const c of candidates) {
     const reasons = runawayReasons(
-      { tokens: c.tokens, durationMs: c.durationMs, costUsd: c.costUsd, history: c.history, p95: c.p95, p99: c.p99 },
+      { tokens: c.ruleTokens, durationMs: c.durationMs, costUsd: c.costUsd, history: c.history, p95: c.p95, p99: c.p99 },
       { costUsd: c.costTh ?? RUNAWAY_DEFAULTS.costUsd, hours: c.hoursTh ?? RUNAWAY_DEFAULTS.hours },
     );
     if (!reasons.length) continue;
