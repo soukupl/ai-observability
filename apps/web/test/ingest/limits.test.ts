@@ -8,7 +8,9 @@ import {
   MAX_MCP_MS,
   MAX_USAGE_CALLS,
   enforceLimits,
+  normalizeAgentGroup,
   normalizeAgentType,
+  normalizeOrchestrationId,
   normalizeTools,
 } from '../../src/lib/ingest/limits';
 import { batch, ev } from './fixtures';
@@ -104,5 +106,41 @@ describe('enforceLimits', () => {
     expect(normalizeAgentType('plugin:agent.v2')).toBe('plugin:agent.v2');
     expect(normalizeAgentType('has space')).toBe('other');
     expect(normalizeAgentType('a'.repeat(65))).toBe('other');
+  });
+
+  it('normalizeAgentGroup / normalizeOrchestrationId: absent → undefined, path-like group → other, ids clipped', () => {
+    expect(normalizeAgentGroup(undefined)).toBeUndefined();
+    expect(normalizeAgentGroup('   ')).toBeUndefined();
+    expect(normalizeAgentGroup(' workflow:verify ')).toBe('workflow:verify');
+    expect(normalizeAgentGroup('general-purpose')).toBe('general-purpose');
+    expect(normalizeAgentGroup('/Users/me/agents/x')).toBe('other');
+    expect(normalizeAgentGroup('C:\\agents')).toBe('other');
+    expect(normalizeAgentGroup('has space')).toBe('other');
+    expect(normalizeAgentGroup('g'.repeat(128))).toBe('g'.repeat(128));
+    expect(normalizeAgentGroup('g'.repeat(200))).toBe('g'.repeat(128));
+    // A group equal to the run's type is sanitised like the type, so the two columns agree.
+    const longType = `my-plugin:${'x'.repeat(60)}`; // 70 chars: valid characters, over the 64-char type limit
+    expect(normalizeAgentType(longType)).toBe('other');
+    expect(normalizeAgentGroup(longType, longType)).toBe('other');
+    expect(normalizeAgentGroup('Explore', 'Explore')).toBe('Explore');
+    expect(normalizeAgentGroup(longType, 'workflow:x')).toBe(longType);
+    expect(normalizeOrchestrationId(undefined)).toBeUndefined();
+    expect(normalizeOrchestrationId('wf_01J9ZQ8Y3N4X5V6W7Z8A9B0C')).toBe('wf_01J9ZQ8Y3N4X5V6W7Z8A9B0C');
+    expect(normalizeOrchestrationId('0b0a6a8e-7d4b-4c1a-9b5e-3f2d1c0b9a87')).toBe('0b0a6a8e-7d4b-4c1a-9b5e-3f2d1c0b9a87');
+    expect(normalizeOrchestrationId('/tmp/run')).toBeUndefined();
+    expect(normalizeOrchestrationId('i'.repeat(200))).toBe('i'.repeat(128));
+  });
+
+  it('enforceLimits normalises a run\'s agent_group / orchestration_id and drops them when unusable', () => {
+    const run = (extra: object) => parse({ ...ev.run('t', 'r', null, 1), ...extra } as never);
+    const a = enforceLimits(run({ agent_group: 'workflow:impl', orchestration_id: 'wf_1' }));
+    expect(a.ok && a.event.type === 'run' && [a.event.agent_group, a.event.orchestration_id]).toEqual(['workflow:impl', 'wf_1']);
+    const b = enforceLimits(run({ agent_group: '/x/y', orchestration_id: 'a b' }));
+    expect(b.ok && b.event.type === 'run' && [b.event.agent_group, 'orchestration_id' in b.event]).toEqual(['other', false]);
+    const c = enforceLimits(run({}));
+    expect(c.ok && c.event.type === 'run' && ['agent_group' in c.event, 'orchestration_id' in c.event]).toEqual([false, false]);
+    const longType = `my-plugin:${'x'.repeat(60)}`;
+    const d = enforceLimits(run({ agent_type: longType, agent_group: longType }));
+    expect(d.ok && d.event.type === 'run' && [d.event.agent_type, d.event.agent_group]).toEqual(['other', 'other']);
   });
 });

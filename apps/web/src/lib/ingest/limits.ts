@@ -150,6 +150,33 @@ export function normalizeAgentType(agentType: string): string {
   return AGENT_TYPE_RE.test(agentType) ? agentType : 'other';
 }
 
+/** Longest stored `runs.agent_group` / `runs.orchestration_id` (the protocol cap, ADR-0019). */
+export const MAX_AGENT_GROUP_LEN = 128;
+const AGENT_GROUP_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
+
+/**
+ * `agent_group` as stored: absent / blank → undefined (NULL); otherwise trimmed, clipped to 128 and, like
+ * normalizeAgentType, anything path-like or free-text (characters outside `[A-Za-z0-9_.:-]`) → 'other'.
+ * A group that is the run's agent type itself (Agent-tool sub-agents: group = type) goes through
+ * normalizeAgentType, so both columns agree (a 65..128-character type is 'other' in both, not only in agent_type).
+ */
+export function normalizeAgentGroup(group: string | null | undefined, agentType?: string): string | undefined {
+  const raw = group?.trim();
+  if (!raw) return undefined;
+  if (agentType !== undefined && raw === agentType.trim()) return normalizeAgentType(agentType);
+  const g = raw.slice(0, MAX_AGENT_GROUP_LEN);
+  return AGENT_GROUP_RE.test(g) ? g : 'other';
+}
+
+/**
+ * `orchestration_id` as stored: an opaque id (`wf_…`, a UUID). Trimmed and clipped to 128; absent, blank or not
+ * id-like (a path, free text) → undefined (NULL), since an id that is not an id carries no grouping value.
+ */
+export function normalizeOrchestrationId(id: string | null | undefined): string | undefined {
+  const v = id?.trim().slice(0, MAX_AGENT_GROUP_LEN);
+  return v && AGENT_GROUP_RE.test(v) ? v : undefined;
+}
+
 /** Known outcome signals only; unknown strings (possibly free text) are dropped, duplicates collapsed. */
 export function normalizeOutcome(o: Outcome): Outcome {
   return { ...o, signals: [...new Set(o.signals.filter((s) => KNOWN_SIGNALS.has(s)))] };
@@ -183,11 +210,16 @@ export function enforceLimits(event: IngestEvent, naming: ProjectNamingMode = 'p
       if (tools === null) return tooBig('tools');
       const used = usageFields(event, naming);
       if (typeof used === 'string') return tooBig(used);
+      const { agent_group: rawGroup, orchestration_id: rawOrch, ...rest } = event;
+      const agentGroup = normalizeAgentGroup(rawGroup, event.agent_type);
+      const orchestrationId = normalizeOrchestrationId(rawOrch);
       return {
         ok: true,
         event: {
-          ...event,
+          ...rest,
           agent_type: normalizeAgentType(event.agent_type),
+          ...(agentGroup ? { agent_group: agentGroup } : {}),
+          ...(orchestrationId ? { orchestration_id: orchestrationId } : {}),
           ...(tools ? { tools } : {}),
           ...used,
           outcome: normalizeOutcome(event.outcome),

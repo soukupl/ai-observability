@@ -99,9 +99,10 @@ export async function buildExportTable(ctx: QueryCtx, view: ExportView, f: Filte
     case 'agents': {
       const a = await getAgents(ctx, f);
       return {
-        headers: ['agent_type', 'spawns', ...TOKEN_HEADERS, 'token_share', 'success_rate', 'unknown_share', 'avg_depth', 'max_depth'],
+        headers: ['agent_type', 'agent_group', 'spawns', ...TOKEN_HEADERS, 'token_share', 'success_rate', 'unknown_share', 'avg_depth', 'max_depth'],
         rows: a.rows.map((r) => [
           r.agentType,
+          r.agentGroup,
           r.spawns,
           ...tokenCells(r.tokens),
           ratio(r.tokenShare),

@@ -48,6 +48,7 @@ The design is now being implemented; see README.md for the build.
 | 22 | Skills & MCP | Skill uses (model-invoked vs typed `/skill`) and MCP calls per server × tool, by name, plus MCP errors, denials and latency; names follow the project-naming mode (hashed on the machine) | [0016](docs/adr/0016-skill-and-mcp-usage.md) |
 | 23 | Insights | Wasted spend (≈ cost of failed / abandoned turns), skill impact (vs comparable turns), effort suggestions; rollups keep tokens and skill outcomes split by outcome | [0017](docs/adr/0017-outcome-insights.md) |
 | 24 | Runaway alerts | Turns far above the user's normal, over a ≈ cost or duration threshold, flagged by the worker after the turn ends; hourly digest to the user (+ leads in full mode, anonymous to admins otherwise); never blocks | [0018](docs/adr/0018-runaway-alerts.md) |
+| 25 | Agent groups & timeline | Sub-agent runs carry an optional `agent_group` and `orchestration_id`; the Agents view groups types by it and draws a git-graph timeline (one lane per session, coloured by project, one UTC day, hour zoom) | [0019](docs/adr/0019-agent-groups-and-timeline.md) |
 
 ## 3. Scope
 
@@ -220,6 +221,7 @@ provisional outcome and later sends a `turn_outcome` patch event.
       "phase_rules_version": 1 },
     { "event_id": "ulid", "type": "run", "turn_id": "…", "run_id": "agent-id", "parent_run_id": null,
       "agent_type": "Explore", "depth": 1, "started_at": "…", "ended_at": "…",
+      "agent_group": "Explore", "orchestration_id": "wf_…",              // optional (ADR-0019)
       "usage": [ … ], "phases_ms": { … }, "outcome": { … } },
     { "event_id": "ulid", "type": "turn_outcome", "turn_id": "…", "outcome": { "status": "failed", "signals": ["next_prompt_correction"] } },
     { "event_id": "ulid", "type": "turn_summary", "turn_id": "…", "summary": "Added JWT refresh to auth middleware" },
@@ -250,7 +252,7 @@ All tenant tables carry `company_id` and are protected by RLS.
 | `projects` | company_id, `key` (normalized remote or hash), display_name, mapped team_id |
 | `agent_sessions` | company_id, user_id, machine_id, project_id, harness, harness_version, started/ended, end_reason |
 | `turns` | company_id, team_id, user_id, `attribution` (verified/matched/unverified), session_id, project_id, harness, primary model, effort, timings, token totals, `phases_ms`, tool counts, `skills`, `mcp`, `mcp_stats`, files/lines, outcome + signals, summary, phase_rules_version |
-| `runs` | turn_id, parent_run_id, agent_type, depth, model, effort, timings, tokens, phases, `skills`, `mcp`, `mcp_stats`, outcome |
+| `runs` | turn_id, parent_run_id, agent_type, `agent_group`, `orchestration_id`, depth, model, effort, timings, tokens, phases, `skills`, `mcp`, `mcp_stats`, outcome |
 | `runaway_alerts` | company, turn, team, user, project, reasons (tokens / cost / duration), tokens, ≈ cost, duration, notified_at (ADR-0018) |
 | `usage` | per run × model × effort token counts (handles mixed-model turns) |
 | `ingest_events` | event_id (unique, for de-duplication), received_at — pruned after 30 days |
@@ -274,9 +276,9 @@ light / dark, responsive. Charts via Recharts, one clear chart per question.
 | **Projects** | Table: turns, tokens, ≈ cost, success rate, wasted ≈ cost and share, sparkline; drill into project page (with effort suggestions) | Sparklines in table |
 | **Models & effort** | Cost, tokens, success rate, median duration, wasted ≈ cost per model × effort; effort suggestions (lower effort, similar success, ≥ 20 % cheaper) | Horizontal bars |
 | **Phases** | Time split per team / project / model | 100 % stacked bars |
-| **Agents** | Sub-agent types: spawn count, token share, success rate; depth | Bars + parent → child tree on turn detail |
+| **Agents** | Sub-agent groups (expand to their types): spawn count, token share, success rate; depth; agent timeline of one UTC day — one lane per session, coloured by project, sub-agents branch off their parent (ADR-0019) | Bars + git-graph timeline; parent → child tree on turn detail |
 | **Skills & MCP** | Skills: uses, by the model vs typed by the user, turns, distinct users (leads / admins), success and cost Δ vs comparable turns (skill impact detail table); MCP servers that expand into their tools: calls, error rate, denied, median / p95 latency bucket, turns, distinct users. Turn detail lists a turn's skills and MCP calls | Stacked area: uses / calls per day |
-| **Turns explorer** | Filterable table (user*, project, model, effort, outcome, date); turn detail with run timeline and tree | Timeline (Gantt-style) |
+| **Turns explorer** | Filterable table (user*, project, model, effort, outcome, date); turn detail with run timeline and tree | Git-graph timeline of the turn (ADR-0019) |
 | **Admin** | Company: teams, members, roles, invitations, tokens, project mapping, settings, budgets, audit log. Super admin console: companies, plans, status, admin contacts only | – |
 
 \* user column only in full-detail mode or for the user's own data. Every table view has **CSV export**

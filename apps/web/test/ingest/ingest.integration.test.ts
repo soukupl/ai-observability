@@ -89,7 +89,10 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
       });
 
       const [r] = await q(sql`select *, input_tokens::int from runs where external_id = 'agent-a1'`);
-      expect(r).toMatchObject({ turn_id: t!.id, team_id: w.teams.mobile, user_id: w.users.alice, depth: 1, input_tokens: 300, skills: {} });
+      expect(r).toMatchObject({
+        turn_id: t!.id, team_id: w.teams.mobile, user_id: w.users.alice, depth: 1, input_tokens: 300, skills: {},
+        agent_group: 'Explore', orchestration_id: 'batch-1',
+      });
       expect(Object.keys(r!.mcp as object)).toHaveLength(1);
 
       const u = await q<{ turn_id: string | null; run_id: string | null; input_tokens: number }>(
@@ -559,6 +562,48 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
       expect(turn).toEqual({ tools: { edit: 2, other: 7, bash: 1 }, outcome_signals: ['tests_failed'] });
       const [run] = await q(sql`select agent_type, tools from runs where external_id = 'priv-r'`);
       expect(run).toEqual({ agent_type: 'other', tools: { other: 1 } });
+    });
+  });
+
+  describe('agent groups (ADR-0019)', () => {
+    const runRow = async (id: string) =>
+      (await q(sql`select agent_type, agent_group, orchestration_id from runs where external_id = ${id}`))[0];
+
+    it('stores agent_group / orchestration_id, NULLs without them, and sanitises a path-like group', async () => {
+      const t = ev.turn('grp-s', 'grp-t');
+      const withFields = {
+        ...ev.run('grp-t', 'grp-r1', null, 1),
+        agent_type: 'workflow:impl-m08-t02b',
+        agent_group: 'workflow:impl',
+        orchestration_id: 'wf_01J9ZQ8Y3N4X5V6W7Z8A9B0C',
+      } as IngestEventInput;
+      const without = ev.run('grp-t', 'grp-r2', null, 1);
+      const pathLike = {
+        ...ev.run('grp-t', 'grp-r3', null, 1),
+        agent_group: '/Users/me/agents/secret',
+        orchestration_id: 'C:\\runs\\x',
+      } as IngestEventInput;
+      expect((await post(w.tokens.alice, batch([t, withFields, without, pathLike]))).body).toMatchObject({
+        accepted: 4,
+        rejected: [],
+      });
+      expect(await runRow('grp-r1')).toEqual({
+        agent_type: 'workflow:impl-m08-t02b',
+        agent_group: 'workflow:impl',
+        orchestration_id: 'wf_01J9ZQ8Y3N4X5V6W7Z8A9B0C',
+      });
+      expect(await runRow('grp-r2')).toEqual({ agent_type: 'Explore', agent_group: null, orchestration_id: null });
+      expect(await runRow('grp-r3')).toEqual({ agent_type: 'Explore', agent_group: 'other', orchestration_id: null });
+    });
+
+    it('a re-sent run updates the group and clears it when the new event has none', async () => {
+      const t = ev.turn('grp2-s', 'grp2-t');
+      const first = { ...ev.run('grp2-t', 'grp2-r', null, 1), agent_group: 'Explore', orchestration_id: 'b-1' } as IngestEventInput;
+      expect((await post(w.tokens.alice, batch([t, first]))).body).toMatchObject({ accepted: 2, rejected: [] });
+      expect(await runRow('grp2-r')).toMatchObject({ agent_group: 'Explore', orchestration_id: 'b-1' });
+      const again = { ...ev.run('grp2-t', 'grp2-r', null, 1), agent_group: 'workflow:verify' } as IngestEventInput;
+      expect((await post(w.tokens.alice, batch([again]))).body).toMatchObject({ accepted: 1, rejected: [] });
+      expect(await runRow('grp2-r')).toMatchObject({ agent_group: 'workflow:verify', orchestration_id: null });
     });
   });
 

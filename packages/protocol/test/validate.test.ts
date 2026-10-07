@@ -110,6 +110,30 @@ describe('validateBatch', () => {
     expect(bad.rejected).toHaveLength(1);
   });
 
+  it('accepts a run with and without agent_group / orchestration_id and rejects empty or over-long values', () => {
+    const run = fixture().events.find((e) => e.type === 'run')! as Record<string, unknown>;
+    const id = (n: number) => `01J9ZQ8Y3N4X5V6W7Z8A9B0C${String(n).padStart(2, '0')}`;
+    const { agent_group: _g, orchestration_id: _o, ...bare } = run;
+    const res = validateBatch(
+      withEvents([
+        { ...run, event_id: id(60), agent_group: 'workflow:verify', orchestration_id: 'wf_01J9ZQ8Y3N4X5V6W7Z8A9B0C' },
+        { ...bare, event_id: id(61) },
+        { ...run, event_id: id(62), agent_group: '' },
+        { ...run, event_id: id(63), orchestration_id: 'x'.repeat(129) },
+        { ...run, event_id: id(64), agent_group: 'g'.repeat(129) },
+      ]),
+    );
+    if (!res.ok) throw new Error(res.error);
+    expect(res.events).toHaveLength(2);
+    const [withFields, without] = res.events;
+    expect(withFields?.type === 'run' && [withFields.agent_group, withFields.orchestration_id]).toEqual([
+      'workflow:verify',
+      'wf_01J9ZQ8Y3N4X5V6W7Z8A9B0C',
+    ]);
+    expect(without?.type === 'run' && [without.agent_group, without.orchestration_id]).toEqual([undefined, undefined]);
+    expect(res.rejected.map((r) => r.event_id)).toEqual([id(62), id(63), id(64)]);
+  });
+
   it('rejects skill / MCP names with whitespace and too many entries', () => {
     const turn = fixture().events[1]! as Record<string, unknown>;
     const id = (n: number) => `01J9ZQ8Y3N4X5V6W7Z8A9B0C${String(n).padStart(2, '0')}`;

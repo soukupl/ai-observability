@@ -323,10 +323,34 @@ Page helpers (`parseGroup`, hour/share formatting, chart rows) live in `src/app/
 
 ### Agents (`/agents`)
 
-KPI tiles (sub-agent spawns, spawns per turn, sub-agent tokens), an `HBarChart` of tokens by agent type, the depth histogram
-(a note when the aggregate path only has avg / max depth) and a table with spawns, tokens, token share, success, unknown share
-and depth. "Spawns per turn" is spawns / turns, not the share of turns that used a sub-agent (no such query exists).
-Workflow agents of Claude Code show up as `workflow:<label>`.
+KPI tiles (sub-agent spawns with the number of agent groups and types, spawns per turn, sub-agent tokens), the **agent
+timeline**, an `HBarChart` of tokens by agent group, the depth histogram (a note when the aggregate path only has avg / max
+depth) and `AgentGroupsTable`: one row per agent group (spawns, tokens, token share, success, unknown share, depth) that
+expands to its agent types. "Spawns per turn" is spawns / turns, not the share of turns that used a sub-agent (no such
+query exists). The CSV has one row per agent type with its `agent_group`.
+
+- **Agent groups (ADR-0019):** `agentGroupOf(agent_type, agent_group)` in `src/lib/queries/agent-groups.ts` is the only
+  grouping rule: the collector's stored group wins, else `workflow:<label>` becomes `workflow:<verb>` (first token of the
+  label, trailing digits stripped) and any other type is its own group. `getAgents` merges rows per type × resolved group;
+  `groupAgentRows` (`agents/agents-view.ts`) folds them into groups.
+- **Agent timeline (ADR-0019):** `getAgentTimeline` (`src/lib/queries/agent-timeline.ts`) reads the turns and runs that
+  overlap one UTC day window (at most 1,000 turns / 5,000 runs, flagged when cut); aggregates-only leads and admins read
+  through `agg_timeline_turns` / `agg_timeline_runs`. The window is in the URL: `day=YYYY-MM-DD`, `fromH` / `toH` as
+  `HH:MM` (`toH` may be `24:00`; `from` / `to` stay the filter bar's custom range). `agents/timeline-view.ts` maps it to
+  `AgentGraph` props: one lane per session, ordered by project name then first turn, labelled with the project and
+  harness and coloured by the project's index in the legend, so every sub-agent is drawn on its project's lane; a turn
+  links to its detail page; a run is labelled with its type (`workflow:` prefix dropped) and coloured by its group.
+  `TimelineWindowControls` steps to the previous / next day with turns; dragging on the time axis
+  (`AgentGraphWithZoom`) zooms to whole minutes. The graph (`components/charts/AgentGraph.tsx`, pure layout in
+  `agent-graph-layout.ts`) is a git graph over time: turns are the trunk, each run branches off its parent and merges back.
+  The parent turn of every run in the window is returned even when the turn ended earlier (background workflow agents),
+  and its tail is a dashed trunk. Sub-rows below the trunk are capped at six plus one shared overflow row ("+N more");
+  runs too short on screen are pills. Branch colours: the page passes its groups by spawns (`groupOrder`), the top
+  eight keep their colour in every window, other groups take the colours left free, and the rest are grey (no colour
+  twice in one view). Ticks go down to 1 s for short turns.
+  Lane sublabels are `harness · HH:MM` (start of the first turn in the window) so two sessions of one project differ. In
+  aggregates-only mode `sessionId` is a per-window pseudonym from `agg_timeline_turns`. The lane gutter is sticky
+  (narrower below 560 px).
 
 ### Insights on existing views (ADR-0017, ADR-0018)
 
@@ -355,8 +379,9 @@ over ≥ 20 calls); the CSV adds `errors`, `denied`, `latency_ms` and the five b
 
 `/turns` is a paged, filterable table (`?outcome=all|success|failed|abandoned|unknown&page=`; started, user (only when
 `canSeeUsers`), project, harness, model, effort, duration, tokens, ≈ cost, outcome, attribution, summary). `/turns/[id]?startedMs=…`
-shows facts (with a "provisional" badge), token breakdown, per-model usage, phases, tools, skills & MCP calls, outcome signals, summary, a Gantt
-`Timeline` and the `RunTree`. In aggregates-only mode someone else's turn shows only the facts that carry no person
+shows facts (with a "provisional" badge), token breakdown, per-model usage, phases, tools, skills & MCP calls, outcome signals, summary, the turn as
+a one-lane `AgentGraph` (`turnGraph` in `turns/_helpers.ts`: main agent as the trunk, runs as branches, no zoom) and the
+`RunTree`. In aggregates-only mode someone else's turn shows only the facts that carry no person
 information (`limited`). An unknown id returns a real 404: the detail pages have no `loading.tsx` (a Suspense boundary above `notFound()` would send the 200 status line first), so the list pages and their skeletons live in the `(list)` route groups of `projects/` and `turns/`.
 
 ## Admin console

@@ -76,6 +76,8 @@ describe('claude-code adapter: 3-turn session', () => {
       ['a1', null, 1, 'Explore', 'cc-fixture-turn-1'],
       ['a2', 'a1', 2, 'Explore', 'cc-fixture-turn-1'],
     ]);
+    expect(runs.map((r) => r.agent_group)).toEqual(['Explore', 'Explore']);
+    expect(runs[0]!.orchestration_id).toBeUndefined();
     expect(runs[0]).toMatchObject({
       model: HAIKU,
       effort: 'xhigh',

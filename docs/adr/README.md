@@ -18,3 +18,4 @@
 - [ADR-0016: Record skill and MCP usage by name, following the project-naming mode](0016-skill-and-mcp-usage.md)
 - [ADR-0017: Outcome-based insights (wasted spend, skill impact, effort advisor) and outcome-split rollups](0017-outcome-insights.md)
 - [ADR-0018: Runaway alerts after a turn ends, evaluated by the worker](0018-runaway-alerts.md)
+- [ADR-0019: Agent groups and orchestration ids on runs; git-graph agent timeline](0019-agent-groups-and-timeline.md)

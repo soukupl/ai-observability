@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { buildRunTree, buildTimeline, type RunRow } from '../../src/lib/queries/runs-tree';
+import { buildRunTree, type RunRow } from '../../src/lib/queries/runs-tree';
 
 const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, total: 0 };
 const run = (id: string, parent: string | null, startedMs: number, over: Partial<RunRow> = {}): RunRow => ({
-  id, parentRunId: parent, agentType: id, depth: parent ? 2 : 1, model: null, effort: null, startedMs, endedMs: startedMs + 1000,
+  id, parentRunId: parent, agentType: id, agentGroup: id, depth: parent ? 2 : 1, model: null, effort: null, startedMs, endedMs: startedMs + 1000,
   durationMs: 1000, tokens, phasesMs: {}, tools: {}, outcome: 'success', ...over,
 });
 
@@ -28,16 +28,5 @@ describe('buildRunTree', () => {
 
   it('clamps offsets before the turn start to 0', () => {
     expect(buildRunTree([run('a', null, 500)], 1000)[0]!.offsetMs).toBe(0);
-  });
-});
-
-describe('buildTimeline', () => {
-  it('puts the main agent first, then runs depth-first with their level', () => {
-    const tree = buildRunTree([run('a', null, 1000), run('a1', 'a', 1500), run('b', null, 4000)], 0);
-    const items = buildTimeline(tree, 6000);
-    expect(items.map((i) => [i.label, i.depth, i.offsetMs])).toEqual([
-      ['main agent', 0, 0], ['a', 1, 1000], ['a1', 2, 1500], ['b', 1, 4000],
-    ]);
-    expect(items[0]!.durationMs).toBe(6000);
   });
 });

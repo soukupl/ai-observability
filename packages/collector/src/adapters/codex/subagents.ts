@@ -129,6 +129,9 @@ export function resolveChildren(input: {
         runId: id,
         parentRunId,
         agentType: meta?.agentType ?? input.hints?.[id]?.agentType ?? 'default',
+        ...((meta?.agentType ?? input.hints?.[id]?.agentType) && (meta?.agentType ?? input.hints?.[id]?.agentType) !== 'default'
+          ? { agentGroup: (meta?.agentType ?? input.hints?.[id]?.agentType) as string }
+          : {}),
         depth,
         startedAt: acc.startedAt,
         endedAt: child.endedAt,

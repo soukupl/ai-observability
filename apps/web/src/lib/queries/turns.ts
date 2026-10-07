@@ -6,7 +6,8 @@ import type { Filters } from '../filters';
 import { listProjects, listTeams } from './lookups';
 import { aggArgs, dims, turnConds, type Dims } from './providers';
 import { addDays, dayString, rawRange, rangeFor, type ResolvedRange } from './range';
-import { buildRunTree, buildTimeline, type RunNode, type RunRow, type TimelineItem } from './runs-tree';
+import { agentGroupOf } from './agent-groups';
+import { buildRunTree, type RunNode, type RunRow } from './runs-tree';
 import { canSeeUsers, type QueryCtx } from './scope';
 import { addTokens, AGG_PAGE, costTokens, emptyTokens, num, rows, tokensOf, where, type TokenTotals } from './sqlutil';
 
@@ -369,8 +370,6 @@ export interface TurnDetail {
   runs: RunRow[];
   /** Parent -> child tree of the runs (the main agent is the implicit root). */
   tree: RunNode[];
-  /** Gantt-style bars: main agent first, then runs depth-first. */
-  timeline: TimelineItem[];
   /** Per model usage of the turn (direct path only; null when the viewer cannot read the usage rows). */
   usage: { model: string; effort: string | null; tokens: TokenTotals; cost: CostValue }[] | null;
   /** true = someone else's turn seen through the aggregate functions: no phases / tools / signals. */
@@ -399,7 +398,7 @@ export function mergeUses(uses: Array<{ skills: unknown; mcp: unknown }>): {
 }
 
 /**
- * One turn with its run tree and timeline, or null when it does not exist or the viewer may not see
+ * One turn with its runs and run tree, or null when it does not exist or the viewer may not see
  * it. `atMs` (the list row's startedMs) lets the aggregate path find someone else's turn without a
  * scan, because agg_turn_list can only be filtered by time.
  */
@@ -450,12 +449,13 @@ export async function getTurnDetail(ctx: QueryCtx, turnId: string, atMs?: number
     ctx.tx,
     sql`select id, parent_run_id, agent_type, depth, model, effort, (extract(epoch from started_at) * 1000)::bigint as started_ms,
           (extract(epoch from ended_at) * 1000)::bigint as ended_ms, duration_ms, input_tokens, output_tokens, cache_read_tokens,
-          cache_write_tokens, reasoning_tokens, phases_ms, tools, outcome from agg_turn_runs(${turnId}::uuid)`,
+          cache_write_tokens, reasoning_tokens, phases_ms, tools, outcome, agent_group from agg_turn_runs(${turnId}::uuid)`,
   );
   const runs: RunRow[] = runRows.map((r) => ({
     id: String(r.id),
     parentRunId: (r.parent_run_id as string | null) ?? null,
     agentType: String(r.agent_type),
+    agentGroup: agentGroupOf(String(r.agent_type), (r.agent_group as string | null) ?? null),
     depth: Number(r.depth),
     model: (r.model as string | null) ?? null,
     effort: (r.effort as string | null) ?? null,
@@ -497,7 +497,7 @@ export async function getTurnDetail(ctx: QueryCtx, turnId: string, atMs?: number
   }
 
   const turn = { ...base, ...extra } as TurnDetail['turn'];
-  return { turn, runs, tree, timeline: buildTimeline(tree, turn.durationMs), usage, limited };
+  return { turn, runs, tree, usage, limited };
 }
 
 async function findViaAgg(ctx: QueryCtx, turnId: string, atMs?: number): Promise<Record<string, unknown> | null> {

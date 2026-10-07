@@ -117,6 +117,10 @@ export const runs = pgTable(
     parentExternalId: text('parent_external_id'),
     externalId: text('external_id').notNull(),
     agentType: text('agent_type').notNull(),
+    /** Logical kind of agent (`Explore`, `workflow:verify`); null = derive from agent_type on read (ADR-0019). */
+    agentGroup: text('agent_group'),
+    /** Batch / workflow run that launched the agent (`wf_…`); null when unknown (ADR-0019). */
+    orchestrationId: text('orchestration_id'),
     depth: integer('depth').notNull().default(0),
     ...workColumns(),
     createdAt: createdAt(),

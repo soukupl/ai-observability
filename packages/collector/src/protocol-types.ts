@@ -123,6 +123,10 @@ export interface RunEvent extends EventBase {
   run_id: string;
   parent_run_id: string | null;
   agent_type: string;
+  /** logical kind of agent (e.g. `Explore`, `workflow:build`) */
+  agent_group?: string;
+  /** batch / workflow run that launched the agent */
+  orchestration_id?: string;
   depth: number;
   started_at: string;
   ended_at: string;

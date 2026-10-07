@@ -187,6 +187,10 @@ export interface RunInput extends Common {
   parentRunId: string | null;
   /** e.g. `Explore`, `general-purpose`; `main` for the main agent */
   agentType: string;
+  /** logical kind of agent; omitted when unknown */
+  agentGroup?: string | null;
+  /** workflow / batch run that launched the agent */
+  orchestrationId?: string | null;
   /** 1 = spawned by the main agent */
   depth: number;
   startedAt: TimeInput;
@@ -213,6 +217,8 @@ export function runEvent(i: RunInput): RunEvent {
     run_id: clip(i.runId, 256),
     parent_run_id: i.parentRunId ? clip(i.parentRunId, 256) : null,
     agent_type: clip(i.agentType || 'unknown', 128),
+    ...(i.agentGroup ? { agent_group: clip(i.agentGroup, 128) } : {}),
+    ...(i.orchestrationId ? { orchestration_id: clip(i.orchestrationId, 128) } : {}),
     depth: int(i.depth),
     started_at: iso(start),
     ended_at: iso(end),

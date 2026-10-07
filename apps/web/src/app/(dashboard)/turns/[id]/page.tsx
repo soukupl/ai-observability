@@ -3,14 +3,14 @@ import { notFound } from 'next/navigation';
 import { AttributionBadge, Badge, OutcomeBadge } from '@/components/Badge';
 import { Card } from '@/components/Card';
 import { StackedBar100 } from '@/components/charts/StackedBar100';
-import { Timeline } from '@/components/charts/Timeline';
+import { AgentGraph } from '@/components/charts/AgentGraph';
 import { formatCost, formatDateTime, formatDuration, formatInt, formatTokens, formatUsageName } from '@/components/format';
 import { PageHeader } from '@/components/PageHeader';
 import { RunTree } from '@/components/RunTree';
 import { requireUser } from '@/lib/auth/session';
 import { withDashboardContext } from '@/lib/queries/page';
 import { getTurnDetail } from '@/lib/queries/turns';
-import { parseStartedMs, phaseRow, toRunTree } from '../_helpers';
+import { parseStartedMs, phaseRow, toRunTree, turnGraph } from '../_helpers';
 
 export const metadata = { title: 'Turn' };
 
@@ -30,7 +30,7 @@ export default async function TurnDetailPage({ params, searchParams }: Props) {
   const [{ id }, sp] = await Promise.all([params, searchParams]);
   const detail = await withDashboardContext(user, (ctx) => getTurnDetail(ctx, id, parseStartedMs(sp.startedMs)));
   if (!detail) notFound();
-  const { turn, runs, timeline, usage, limited } = detail;
+  const { turn, runs, usage, limited } = detail;
   const phases = phaseRow(turn.phasesMs);
   const signals = turn.outcomeSignals ?? [];
   const tools = Object.entries(turn.tools ?? {}).sort((a, b) => b[1] - a[1]);
@@ -176,8 +176,11 @@ export default async function TurnDetailPage({ params, searchParams }: Props) {
           </Card>
         )}
 
-        <Card title="Timeline" description="Main agent and sub-agent runs on the turn's time axis.">
-          <Timeline items={timeline} totalMs={turn.durationMs} />
+        <Card
+          title="Timeline"
+          description="The turn is the trunk; each sub-agent branches off where it starts and merges back where it ends. Workflow agents can keep running after the turn has ended (dashed trunk). Times are UTC."
+        >
+          <AgentGraph {...turnGraph(detail)} />
         </Card>
 
         <Card title="Runs" description="Parent to child.">

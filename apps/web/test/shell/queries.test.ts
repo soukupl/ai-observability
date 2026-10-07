@@ -355,7 +355,7 @@ describe.skipIf(skipReason !== null)(skipReason ? `dashboard queries - SKIPPED: 
       expect(member.rows.every((r) => r.userName === undefined && r.userId === undefined && r.isMine)).toBe(true);
     });
 
-    it('turn detail: run tree, timeline and per-model usage', async () => {
+    it('turn detail: run tree, agent groups and per-model usage', async () => {
       const list = await run(B, 'admin', (ctx) => listTurns(ctx, R30, { pageSize: 50 }));
       const row = list.rows.find((r) => r.tokens.total > 0 && r.id)!;
       // a turn with a nested run: every third turn
@@ -373,7 +373,7 @@ describe.skipIf(skipReason !== null)(skipReason ? `dashboard queries - SKIPPED: 
       expect(d!.tree).toHaveLength(1);
       expect(d!.tree[0]!.agentType).toBe('Explore');
       expect(d!.tree[0]!.children[0]!.agentType).toBe('general-purpose');
-      expect(d!.timeline.map((t) => [t.label, t.depth])).toEqual([['main agent', 0], ['Explore', 1], ['general-purpose', 2]]);
+      expect(d!.runs.map((r) => [r.agentType, r.agentGroup, r.depth]).sort()).toEqual([['Explore', 'Explore', 1], ['general-purpose', 'general-purpose', 2]]);
       expect(d!.turn.phasesMs?.thinking).toBeGreaterThan(0);
       expect(d!.usage!.length).toBe(1);
       expect(d!.usage!.reduce((s, u) => s + u.tokens.total, 0)).toBe(d!.turn.tokens.total);

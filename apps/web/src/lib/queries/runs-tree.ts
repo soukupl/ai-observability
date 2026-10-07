@@ -5,6 +5,8 @@ export interface RunRow {
   id: string;
   parentRunId: string | null;
   agentType: string;
+  /** agentGroupOf(agent_type, stored agent_group) — the same group as on the Agents page. */
+  agentGroup: string;
   depth: number;
   model: string | null;
   effort: string | null;
@@ -21,16 +23,6 @@ export interface RunNode extends RunRow {
   /** Start relative to the start of the turn (ms). */
   offsetMs: number;
   children: RunNode[];
-}
-
-/** One bar of the Gantt-style timeline. */
-export interface TimelineItem {
-  id: string;
-  label: string;
-  depth: number;
-  offsetMs: number;
-  durationMs: number;
-  outcome: Outcome | null;
 }
 
 /**
@@ -60,17 +52,4 @@ function isAncestor(nodes: Map<string, RunNode>, candidate: RunNode, of: RunNode
     cur = cur.parentRunId ? nodes.get(cur.parentRunId) : undefined;
   }
   return false;
-}
-
-/** Depth-first flat list (tree order), with the turn's main agent first. */
-export function buildTimeline(tree: RunNode[], turnDurationMs: number, mainLabel = 'main agent'): TimelineItem[] {
-  const items: TimelineItem[] = [{ id: 'main', label: mainLabel, depth: 0, offsetMs: 0, durationMs: turnDurationMs, outcome: null }];
-  const walk = (nodes: RunNode[], level: number) => {
-    for (const n of nodes) {
-      items.push({ id: n.id, label: n.agentType, depth: level, offsetMs: n.offsetMs, durationMs: n.durationMs, outcome: n.outcome });
-      walk(n.children, level + 1);
-    }
-  };
-  walk(tree, 1);
-  return items;
 }

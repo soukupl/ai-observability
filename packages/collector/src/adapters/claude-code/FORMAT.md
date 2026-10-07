@@ -129,3 +129,15 @@ multiset line diff of the input. Files touched is the number of distinct, succes
   (no `stop_hook_summary` since the prompt). It does not start a new turn.
 - **Large files:** transcripts reach 90 MB. The reader works from a byte cursor in 4 MB chunks and
   slims every line straight away.
+
+## Run grouping fields (`agent_group`, `orchestration_id`)
+
+Both are optional `run` fields derived from the meta file, never from content.
+
+- Workflow agent: `agent_group` = `workflow:<slug of workflowPhase>` (for example `workflow:build`),
+  else the group the dashboard derives from the stored `agent_type` (`workflow:<verb>`: first token of the
+  description's slug split on `[-:._/ ]`, lower-cased, trailing digits stripped, so `fix1-m8-brief` and
+  `Fix(m8) brief` both give `workflow:fix`; `workflow` when there is none; `workflow-subagent` without a
+  description). `orchestration_id` = the `wf_…` id.
+- Agent-tool sub-agent: `agent_group` = the agent type (`Explore`, `general-purpose`, ...), omitted when
+  unknown. No `orchestration_id`.

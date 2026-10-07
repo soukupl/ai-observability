@@ -6,6 +6,8 @@ export * from './projects';
 export * from './models';
 export * from './phases';
 export * from './agents';
+export * from './agent-groups';
+export * from './agent-timeline';
 export * from './effort';
 export * from './wasted';
 export * from './skill-impact';

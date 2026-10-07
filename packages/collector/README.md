@@ -200,7 +200,7 @@ How the adapter works:
   through `meta.toolUseId` → the `Agent` tool_use.
   - **Fields:** `parent_run_id` is the parent agent's id for nested agents and null for agents the
     main agent spawned. `depth` follows the nesting, and `agent_type` comes from the meta file (or
-    the tool's `subagent_type`).
+    the tool's `subagent_type`). `agent_group` is the same agent type (omitted when it is unknown).
   - **No `main` run:** the main agent is not sent as a run, because the protocol defines
     `parent_run_id: null` / `depth: 1` as "spawned by the main agent".
   - **Delegating time:** the parent's time waiting for a sub-agent is `delegating`, which is not
@@ -213,7 +213,11 @@ How the adapter works:
     the turn that launched it. Each agent becomes a `run` with `parent_run_id: null` and `depth: 1`
     (spawned by the main agent), and its usage is added to that turn, which is re-sent.
   - **Fields:** `agent_type` is `workflow:<label>` (a slug of the meta `description`, ≤ 48 chars;
-    `workflow-subagent` when there is no label). `ext` has `workflow_id`, `workflow_phase` and
+    `workflow-subagent` when there is no label). `agent_group` is `workflow:<phase slug>` when the
+    workflow phase is known, else `workflow:<label verb>` (first token of the label's slug, i.e. of
+    the stored `agent_type`, split on `[-:._/ ]`, lower-cased, trailing digits stripped; plain
+    `workflow` when empty; the same rule the dashboard applies to rows without a group), and
+    `orchestration_id` is the workflow run id (`wf_…`). `ext` has `workflow_id`, `workflow_phase` and
     `workflow_label`. The script, the journal's results and the workflow `.json` are never read
     beyond the agent ids and the final `status`.
   - **When:** an agent is sent when the workflow journal (`journal.jsonl`) says it returned or

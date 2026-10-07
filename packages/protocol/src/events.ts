@@ -75,6 +75,10 @@ export const runEvent = z
     run_id: nonEmptyId,
     parent_run_id: nonEmptyId.nullable(),
     agent_type: z.string().min(1).max(128),
+    /** Logical kind of agent (`Explore`, `workflow:verify`); optional, additive to v1 (ADR-0019). */
+    agent_group: z.string().min(1).max(128).optional(),
+    /** Batch / workflow run that launched the agent (`wf_…`); optional, additive to v1 (ADR-0019). */
+    orchestration_id: z.string().min(1).max(128).optional(),
     depth: count,
     started_at: timestamp,
     ended_at: timestamp,

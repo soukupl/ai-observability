@@ -50,7 +50,7 @@ const EXPECTED = [
     outcome: { status: 'unknown', signals: [], provisional: true }, phase_rules_version: 1,
   },
   {
-    type: 'run', turn_id: T1, run_id: CHILD, parent_run_id: null, agent_type: 'explorer', depth: 1,
+    type: 'run', turn_id: T1, run_id: CHILD, parent_run_id: null, agent_type: 'explorer', agent_group: 'explorer', depth: 1,
     started_at: '2026-10-05T10:00:09.000Z', ended_at: '2026-10-05T10:00:39.000Z', model: 'gpt-5.6-luna', effort: 'low',
     usage: [CHILD_USAGE], phases_ms: { thinking: 27000, exploring: 3000 }, tools: { exec_command: 1 },
     outcome: { status: 'unknown', signals: [], provisional: true },

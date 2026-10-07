@@ -4,6 +4,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { cleanupHomes } from '../helpers.js';
 import { at, SESSION, threeTurnSession, TranscriptBuilder, text, toolUse } from './fixture.js';
 import { assertValid, byType, setup, type Harness } from './helpers.js';
+import { workflowAgentGroup, workflowAgentType, type AgentMeta } from '../../src/adapters/claude-code/subagents.js';
+// The dashboard's grouping rule (pure, dependency-free): the collector must produce the same groups (ADR-0019).
+import { agentGroupOf } from '../../../../apps/web/src/lib/queries/agent-groups.js';
 
 afterEach(cleanupHomes);
 
@@ -77,6 +80,7 @@ describe('claude-code adapter: Workflow sub-agents', () => {
     await h.hook('UserPromptSubmit', at(100), { prompt: 'next thing' });
     const runs = byType(h.events, 'run');
     expect(runs.map((r) => [r.run_id, r.parent_run_id, r.depth, r.agent_type, r.turn_id])).toEqual([['a1aaa', null, 1, 'workflow:impl-api', 'tw']]);
+    expect(runs[0]).toMatchObject({ agent_group: 'workflow:build', orchestration_id: WF });
     expect(runs[0]).toMatchObject({ ext: { workflow_id: WF, workflow_phase: 'build', workflow_label: 'impl-api' }, outcome: { status: 'success' } });
     expect(runs[0]!.usage).toEqual([u(SONNET, 'high', 100, 400, 0, 0, 0, 1)]);
     const turns = byType(h.events, 'turn');
@@ -99,6 +103,44 @@ describe('claude-code adapter: Workflow sub-agents', () => {
     await h.hook('Stop', at(121));
     expect(h.events).toHaveLength(n);
     assertValid(h.events);
+  });
+
+  it('without a phase the agent_group is workflow:<label verb>', async () => {
+    const h = setup();
+    launchTurn(h);
+    await h.hook('Stop', at(4));
+    writeWfAgent(h, 'p1eee', 'fix1-m8-brief', { in: 5, out: 5 }, SONNET, { workflowPhase: undefined });
+    writeWfAgent(h, 'p2fff', '___', { in: 5, out: 5 }, SONNET, { workflowPhase: undefined });
+    journal(h, [{ type: 'result', agentId: 'p1eee' }, { type: 'result', agentId: 'p2fff' }]);
+    wfStatus(h, 'completed');
+    await h.hook('Stop', at(30));
+    expect(byType(h.events, 'run').map((r) => [r.agent_group, r.orchestration_id])).toEqual([['workflow:fix', WF], ['workflow', WF]]);
+    assertValid(h.events);
+  });
+
+  it('without a phase the group matches what the dashboard derives from the stored agent type (parity)', () => {
+    const meta = (label: string | null, agentType: string | null = null): AgentMeta => ({
+      agentId: 'x', agentType, toolUseId: null, parentAgentId: null, spawnDepth: null, file: '', workflowId: WF,
+      label, workflowPhase: null, finished: false, failed: false,
+    });
+    const cases: [string | null, string][] = [
+      ['Fix(m8) brief', 'workflow:fix'],
+      ['impl2(x) task', 'workflow:impl'],
+      ['review+fix docs', 'workflow:review'],
+      ['-fix', 'workflow:fix'],
+      [' fix it', 'workflow:fix'],
+      ['impl-m08-t02b', 'workflow:impl'],
+      ['fix1-m8-brief', 'workflow:fix'],
+      ['skeptic-battle-rules', 'workflow:skeptic'],
+      ['___', 'workflow'],
+      [null, 'workflow-subagent'],
+    ];
+    for (const [label, group] of cases) {
+      const a = meta(label);
+      expect(workflowAgentGroup(a), String(label)).toBe(group);
+      expect(agentGroupOf(workflowAgentType(a)), String(label)).toBe(group);
+    }
+    expect(workflowAgentGroup({ ...meta('Fix(m8) brief'), workflowPhase: 'Verify' })).toBe('workflow:verify');
   });
 
   it('a failed agent is a failed run; a killed workflow flushes its agents; session end sends the rest', async () => {

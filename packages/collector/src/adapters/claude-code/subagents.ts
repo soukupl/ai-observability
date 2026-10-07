@@ -159,6 +159,30 @@ export function workflowAgentType(a: AgentMeta): string {
   return l ? `workflow:${l}` : (a.agentType ?? 'workflow-subagent');
 }
 
+/**
+ * The dashboard's read-time grouping rule for a stored `agent_type` (agentGroupOf in
+ * apps/web/src/lib/queries/agent-groups.ts, ADR-0019): `workflow:<label>` → `workflow:<verb>` (first token
+ * split on `[-:._/ ]`, lower-cased, trailing digits stripped; `workflow` without one), anything else → itself.
+ * Kept identical so rows with and without a stored group land in the same group (parity test in workflows.test.ts).
+ */
+export function groupOfAgentType(agentType: string): string {
+  const m = /^workflow:(.*)$/s.exec(agentType);
+  if (!m) return agentType;
+  const verb = (m[1]!.split(/[-:._/\s]+/)[0] ?? '').toLowerCase().replace(/\d+$/, '');
+  return verb ? `workflow:${verb}` : 'workflow';
+}
+
+/**
+ * `agent_group` of a workflow agent: `workflow:<phase slug>` when the phase is known, else the group the
+ * dashboard derives from the stored agent type (`workflow:<verb of the label slug>`). The verb comes from the
+ * slug, not the raw label, because the server only ever sees the slug (`Fix(m8) brief` → `workflow:fix`).
+ */
+export function workflowAgentGroup(a: AgentMeta): string {
+  const phase = a.workflowPhase ? slug(a.workflowPhase, 48) : '';
+  if (phase) return `workflow:${phase}`;
+  return groupOfAgentType(workflowAgentType(a));
+}
+
 /** Agents spawned by these tool_use ids, plus all their descendants (nested sub-agents). */
 export function agentsOfToolUses(agents: ReadonlyMap<string, AgentMeta>, toolUseIds: Iterable<string>): AgentMeta[] {
   const ids = new Set(toolUseIds);
@@ -212,6 +236,12 @@ export function buildRun(
     runId: a.agentId,
     parentRunId: a.parentAgentId,
     agentType: a.workflowId ? workflowAgentType(a) : (a.agentType ?? input.agentTypeHint ?? 'unknown'),
+    ...(a.workflowId
+      ? { agentGroup: workflowAgentGroup(a), orchestrationId: a.workflowId }
+      : (() => {
+          const t = a.agentType ?? input.agentTypeHint ?? null;
+          return t && t !== 'unknown' ? { agentGroup: t } : {};
+        })()),
     depth: depthOf(a, agents),
     startedAt: agg.startedAt,
     endedAt: agg.endedAt,

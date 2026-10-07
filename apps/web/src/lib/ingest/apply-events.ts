@@ -221,22 +221,25 @@ export async function applyRun(tx: Tx, ctx: BatchContext, e: RunEvent, eventId: 
   const mcp = json(e.mcp);
   const mcpStats = json(e.mcp_stats);
   const dur = durationMs(e.started_at, e.ended_at);
+  // Already sanitised / clipped by enforceLimits (normalizeAgentGroup / normalizeOrchestrationId); NULL when absent.
+  const agentGroup = e.agent_group ?? null;
+  const orchestrationId = e.orchestration_id ?? null;
 
   const [run] = await rows<{ id: string }>(
     tx,
     sql`insert into runs (company_id, team_id, user_id, turn_id, turn_external_id, parent_run_id, parent_external_id,
-          external_id, agent_type, depth, model, effort, started_at, ended_at, duration_ms, input_tokens, output_tokens,
+          external_id, agent_type, agent_group, orchestration_id, depth, model, effort, started_at, ended_at, duration_ms, input_tokens, output_tokens,
           cache_read_tokens, cache_write_tokens, reasoning_tokens, requests, phases_ms, tools, skills, mcp, mcp_stats, outcome,
           outcome_signals, outcome_provisional, source_event_id)
         values (${ctx.companyId}::uuid, ${teamId}::uuid, ${userId}::uuid, ${turnId}::uuid, ${key}, ${parentId}::uuid,
-          ${e.parent_run_id}, ${e.run_id}, ${e.agent_type}, ${e.depth}, ${model}, ${effort},
+          ${e.parent_run_id}, ${e.run_id}, ${e.agent_type}, ${agentGroup}, ${orchestrationId}, ${e.depth}, ${model}, ${effort},
           ${e.started_at}::timestamptz, ${e.ended_at}::timestamptz, ${dur}, ${t.input}, ${t.output}, ${t.cacheRead},
           ${t.cacheWrite}, ${t.reasoning}, ${t.requests}, ${phases}::jsonb, ${tools}::jsonb, ${skills}::jsonb,
           ${mcp}::jsonb, ${mcpStats}::jsonb, ${e.outcome.status}::outcome, ${signals}::jsonb, ${e.outcome.provisional}, ${eventId})
         on conflict on constraint runs_company_turn_external_uq do update set
           team_id = ${teamId}::uuid, user_id = ${userId}::uuid, turn_id = coalesce(${turnId}::uuid, runs.turn_id),
           parent_run_id = coalesce(${parentId}::uuid, runs.parent_run_id), parent_external_id = ${e.parent_run_id},
-          agent_type = ${e.agent_type}, depth = ${e.depth}, model = ${model}, effort = ${effort},
+          agent_type = ${e.agent_type}, agent_group = ${agentGroup}, orchestration_id = ${orchestrationId}, depth = ${e.depth}, model = ${model}, effort = ${effort},
           started_at = ${e.started_at}::timestamptz, ended_at = ${e.ended_at}::timestamptz, duration_ms = ${dur},
           input_tokens = ${t.input}, output_tokens = ${t.output}, cache_read_tokens = ${t.cacheRead},
           cache_write_tokens = ${t.cacheWrite}, reasoning_tokens = ${t.reasoning}, requests = ${t.requests},

@@ -160,7 +160,8 @@ describe.skipIf(skipReason !== null)(skipReason ? `RLS — SKIPPED: ${skipReason
       expect(list.length).toBe(ownedBy(A, (u) => u !== A.people.m2!.id));
       expect(list.filter((x) => x.is_mine)).toHaveLength(1);
       const userIds = new Set(Object.values(A.people).map((p) => p.id));
-      for (const fn of ['agg_turn_list', 'agg_turns_daily', 'agg_usage_daily', 'agg_turns_by_project', 'agg_turns_by_model', 'agg_agents']) {
+      for (const fn of ['agg_turn_list', 'agg_turns_daily', 'agg_usage_daily', 'agg_turns_by_project', 'agg_turns_by_model', 'agg_agents',
+        'agg_timeline_turns', 'agg_timeline_runs']) {
         const out = await rows(lead, sql`select * from ${sql.identifier(fn)}(${FROM}, ${TO})`);
         for (const row of out) {
           expect(Object.keys(row)).not.toContain('user_id');
@@ -170,6 +171,65 @@ describe.skipIf(skipReason !== null)(skipReason ? `RLS — SKIPPED: ${skipReason
       const runs = await rows(lead, sql`select * from agg_turn_runs(${list[0]!.id as string}::uuid)`);
       expect(runs).toHaveLength(1);
       expect(Object.keys(runs[0]!)).not.toContain('user_id');
+    });
+
+    it('timeline functions: same scope as the turn list, overlap window, limit, member sees only own (ADR-0019)', async () => {
+      const lead = A.people.lead!;
+      const visible = ownedBy(A, (u) => u !== A.people.m2!.id);
+      const turns = await rows(lead, sql`select * from agg_timeline_turns(${FROM}, ${TO})`);
+      expect(turns).toHaveLength(visible);
+      expect(turns.filter((x) => x.is_mine)).toHaveLength(1);
+      const runs = await rows(lead, sql`select * from agg_timeline_runs(${FROM}, ${TO})`);
+      expect(runs).toHaveLength(visible);
+      expect(runs[0]).toMatchObject({ agent_type: 'Explore', agent_group: null, orchestration_id: null, depth: 1 });
+      expect(await rows(lead, sql`select * from agg_timeline_turns(${FROM}, ${TO}, p_limit => 1)`)).toHaveLength(1);
+      // A window that starts inside a turn (started before p_from, ended after) still returns it; one that starts at
+      // its end does not. The look-back is one day, the fixture turns are a day apart.
+      const t = turns[0]!;
+      const inside = new Date(new Date(t.started_at as string).getTime() + 30_000).toISOString();
+      const after = new Date(new Date(inside).getTime() + 60_000).toISOString();
+      const hit = await rows(lead, sql`select id from agg_timeline_turns(${inside}::timestamptz, ${after}::timestamptz)`);
+      expect(hit.map((x) => x.id)).toEqual([t.id]);
+      const endIso = new Date(t.ended_at as string).toISOString();
+      const later = new Date(new Date(endIso).getTime() + 60_000).toISOString();
+      expect(await rows(lead, sql`select id from agg_timeline_turns(${endIso}::timestamptz, ${later}::timestamptz)`)).toEqual([]);
+      const m1 = A.people.m1!;
+      const own = await rows(m1, sql`select is_mine from agg_timeline_turns(${FROM}, ${TO})`);
+      expect(own).toEqual([{ is_mine: true }]);
+    });
+
+    it('timeline turns: session ids are per-window pseudonyms; parents of runs that outlive their turn are kept', async () => {
+      const lead = A.people.lead!;
+      const owner = connectOwner();
+      const turns = await rows(lead, sql`select id, session_id, started_at, ended_at from agg_timeline_turns(${FROM}, ${TO})`);
+      const t = turns[0]!;
+      const stored = await owner.execute(sql`select session_id from turns where id = ${t.id as string}::uuid`);
+      const storedSession = String((stored as unknown as { session_id: string }[])[0]!.session_id);
+      expect(t.session_id).toBeTruthy();
+      expect(t.session_id).not.toBe(storedSession);
+      // Stable inside one window, different in another.
+      const again = await rows(lead, sql`select session_id from agg_timeline_turns(${FROM}, ${TO}) where id = ${t.id as string}::uuid`);
+      expect(again[0]!.session_id).toBe(t.session_id);
+      const shifted = new Date(new Date(FROM).getTime() - 60_000).toISOString();
+      const other = await rows(lead, sql`select session_id from agg_timeline_turns(${shifted}, ${TO}) where id = ${t.id as string}::uuid`);
+      expect(other[0]!.session_id).not.toBe(t.session_id);
+
+      // A background run that keeps going two hours after its turn ended: a window inside that tail returns the run and
+      // its parent turn (the turn itself does not overlap the window).
+      const endMs = new Date(t.ended_at as string).getTime();
+      const tailFrom = new Date(endMs + 3_600_000).toISOString();
+      const tailTo = new Date(endMs + 3_660_000).toISOString();
+      const before = await owner.execute(sql`select id, ended_at from runs where turn_id = ${t.id as string}::uuid`);
+      const run = (before as unknown as { id: string; ended_at: Date | string }[])[0]!;
+      await owner.execute(sql`update runs set ended_at = ${new Date(endMs + 7_200_000).toISOString()}::timestamptz where id = ${run.id}::uuid`);
+      try {
+        const tailTurns = await rows(lead, sql`select id from agg_timeline_turns(${tailFrom}::timestamptz, ${tailTo}::timestamptz)`);
+        const tailRuns = await rows(lead, sql`select id, turn_id from agg_timeline_runs(${tailFrom}::timestamptz, ${tailTo}::timestamptz)`);
+        expect(tailRuns).toEqual([{ id: run.id, turn_id: t.id }]);
+        expect(tailTurns).toEqual([{ id: t.id }]);
+      } finally {
+        await owner.execute(sql`update runs set ended_at = ${new Date(run.ended_at).toISOString()}::timestamptz where id = ${run.id}::uuid`);
+      }
     });
 
     it('the internal scope function is not callable by app_web', async () => {
