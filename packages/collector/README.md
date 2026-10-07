@@ -325,6 +325,8 @@ How the adapter works:
 - **Skill and MCP names** (ADR-0016) follow the same mode: plain skill, MCP server and tool names in `plain`, `sha256:` +
   HMAC-SHA256 under the company salt (plain sha256 without one) of `skill:<name>`, `mcp:<server>`, `mcp:<server>/<tool>` in
   `hashed`, applied in `ctx.queue` before an event reaches the queue. Skill arguments and MCP inputs / outputs are never read.
+  MCP reliability (`mcp_stats`: errors, refused calls, latency histogram) comes from pairing each call with its result;
+  error texts are only matched locally (to tell a refusal from an error) and never sent.
 - **Hook job files** keep only harness-related env vars (`CLAUDE_*`, `CODEX_*`, `AI_OBS_*`) and drop
   any whose name suggests a secret. Job files are deleted after processing.
 - **Local only:** prompt digests for summaries, edit fingerprints for revert detection (hashes only)

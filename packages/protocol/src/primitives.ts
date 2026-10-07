@@ -5,6 +5,7 @@ import {
   MAX_SKILLS_PER_EVENT,
   MAX_SUMMARY_LENGTH,
   MAX_USAGE_NAME_LENGTH,
+  MCP_LATENCY_BUCKETS_MS,
   OUTCOME_STATUSES,
   PHASES,
 } from './constants.js';
@@ -96,3 +97,23 @@ export const outcome = z.object({
 });
 
 export const summary = z.string().min(1).max(MAX_SUMMARY_LENGTH);
+
+/**
+ * Reliability of MCP calls per server × tool (docs/briefs/mcp-reliability.md): `errors` (the harness marked the
+ * result as failed), `denied` (the user refused the call), and for calls that got a result their total wall time
+ * `ms` and a latency histogram over MCP_LATENCY_BUCKETS_MS (`buckets[i]` = calls in bucket i; 5 buckets). Calls
+ * still open when the turn ended are in neither. Error texts and payloads are never sent.
+ */
+export const mcpToolStats = z.object({
+  errors: count.default(0),
+  denied: count.default(0),
+  ms: count.default(0),
+  buckets: z.array(count).length(MCP_LATENCY_BUCKETS_MS.length + 1),
+});
+
+export const mcpStats = z
+  .record(
+    usageName,
+    z.record(usageName, mcpToolStats).refine(maxKeys(MAX_MCP_TOOLS_PER_SERVER), { message: `at most ${MAX_MCP_TOOLS_PER_SERVER} tools per server` }),
+  )
+  .refine(maxKeys(MAX_MCP_SERVERS_PER_EVENT), { message: `at most ${MAX_MCP_SERVERS_PER_EVENT} MCP servers` });

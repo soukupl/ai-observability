@@ -132,6 +132,7 @@ they are ignored.
 | `send_message`, `send_input`, `close_agent`, `list_agents`, `update_plan`, `request_permissions`, `tool_search` | other |
 | `web_search`, `view_image` | exploring |
 | MCP (`namespace mcp__…`) | other, counted as tool `mcp` and per server × tool in `mcp` (ADR-0016) |
+| `event_msg` `item_completed` with `item.type = "McpToolCall"` `{server, tool, status: "completed" \| "failed", result: {isError}, duration: {secs, nanos}}` | MCP reliability (`mcp_stats`): `failed` or `isError` → error; `duration` → latency. Arguments and result content are not read. Codex writes no refusal marker, so `denied` stays 0 |
 | `exec_command` / `shell` that reads `…/<name>/SKILL.md` (`cat`, `sed`, `head`, …) | Codex has no skill tool: the model opens a skill by reading its SKILL.md (the `<skills_instructions>` developer message lists them). Counted as one `model` use of skill `<name>` (the directory). Codex writes no marker for a skill the user names in a prompt, so `user` uses are never recorded for Codex |
 
 `git checkout -- / restore / reset --hard / revert / stash` in the next turn, or removing at least 80 %

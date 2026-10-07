@@ -9,7 +9,7 @@ import type {
   turnOutcomeEvent,
   turnSummaryEvent,
 } from './events.js';
-import type { mcp, outcome, phasesMs, project, skills, usageEntry } from './primitives.js';
+import type { mcp, mcpStats, outcome, phasesMs, project, skills, usageEntry } from './primitives.js';
 
 export type UsageEntry = z.infer<typeof usageEntry>;
 export type PhasesMs = z.infer<typeof phasesMs>;
@@ -17,6 +17,7 @@ export type Outcome = z.infer<typeof outcome>;
 export type ProjectRef = z.infer<typeof project>;
 export type SkillCounts = z.infer<typeof skills>;
 export type McpCounts = z.infer<typeof mcp>;
+export type McpStats = z.infer<typeof mcpStats>;
 
 export type SessionStartEvent = z.infer<typeof sessionStartEvent>;
 export type TurnEvent = z.infer<typeof turnEvent>;

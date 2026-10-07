@@ -3,6 +3,7 @@ import type { ModelRow } from '../../../lib/queries/models';
 import type { PhaseRow } from '../../../lib/queries/phases';
 import { PHASES } from '../../../lib/queries/phases';
 import type { ProjectRow } from '../../../lib/queries/projects';
+import { wastedShare, type WastedPart } from '../../../lib/queries/wasted';
 import type { ProjectRef } from '../../../lib/queries/lookups';
 import { projectLabel } from '../../../lib/queries/lookups';
 import type { StackedRow } from '../../../components/charts/StackedBar100';
@@ -34,10 +35,12 @@ export const PROJECT_COLUMNS: Column[] = [
   { key: 'cost', header: '≈ Cost', kind: 'cost', hint: '≈ at API list prices; n/a when no price is known' },
   { key: 'successRate', header: 'Success', kind: 'percent', hint: 'success / turns with a known outcome' },
   { key: 'unknownShare', header: 'Unknown', kind: 'percent', hint: 'Share of turns whose outcome is unknown' },
+  { key: 'wasted', header: 'Wasted ≈', kind: 'cost', hint: '≈ Cost of failed and abandoned turns' },
+  { key: 'wastedShare', header: 'Wasted share', kind: 'percent', hint: 'Wasted ≈ cost / ≈ cost' },
   { key: 'spark', header: 'Tokens, 14 days', kind: 'sparkline' },
 ];
 
-export function projectTableRows(rows: ProjectRow[], f: Filters): Row[] {
+export function projectTableRows(rows: ProjectRow[], f: Filters, wasted?: ReadonlyMap<string, WastedPart>): Row[] {
   return rows.map((r) => ({
     id: r.projectId ?? 'none',
     name: r.name,
@@ -48,6 +51,8 @@ export function projectTableRows(rows: ProjectRow[], f: Filters): Row[] {
     cost: r.costSkipped ? { usd: null, partial: false } : r.cost,
     successRate: r.successRate,
     unknownShare: r.unknownShare,
+    wasted: wasted?.get(r.projectId ?? '')?.wasted ?? null,
+    wastedShare: wastedShare(wasted?.get(r.projectId ?? '')),
     spark: r.spark,
   }));
 }

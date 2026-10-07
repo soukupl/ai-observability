@@ -247,6 +247,13 @@ outcomes and token totals agree exactly between the two (tested). Differences:
   model for turn counts).
 - **Zero-token usage rows** (a model that was only mentioned) are dropped from usage queries and never priced (DP-10).
 - **Phases, agents and the turns explorer** have no rollup form and always read raw rows (empty beyond retention).
+- **Wasted spend** (`getWastedSpend`, ADR-0017) reads usage rows joined to their turns' outcome on raw ranges and the
+  outcome-split columns of `daily_rollups` on long ones (`agg_wasted` / `agg_wasted_rollups`); both agree exactly
+  (tested, mixed-model too). Rollup days written before the split are counted in the total but not in wasted
+  (`unsplitDays`).
+- **Skill impact** (`getSkillImpact`) compares cells (project × primary model) from raw turns, or success only from the
+  split rollups on long ranges. **Effort suggestions** (`getEffortAdvice`) need raw turns (medians) and ignore the
+  effort filter. **Runaways** (`getRunaways`) read `runaway_alerts` (`agg_runaways` on the aggregate path).
 - **Skills & MCP** reads `turns.skills` / `turns.mcp` plus the turns' runs on raw ranges and `daily_skill_mcp_rollups` on
   long ones (`agg_skill_mcp` / `agg_skill_mcp_rollups` on the aggregate path); both give the same rows (tested). Effort
   is not a dimension there, so the effort filter is ignored except on the direct raw path.
@@ -321,6 +328,16 @@ KPI tiles (sub-agent spawns, spawns per turn, sub-agent tokens), an `HBarChart` 
 and depth. "Spawns per turn" is spawns / turns, not the share of turns that used a sub-agent (no such query exists).
 Workflow agents of Claude Code show up as `workflow:<label>`.
 
+### Insights on existing views (ADR-0017, ADR-0018)
+
+- **Overview:** a "Wasted ≈ cost" tile (share of ≈ cost, unclassified ≈ cost, 7-day line in `KpiTile`'s `spark`) and a
+  "Runaway turns" card (`overview/RunawayList.tsx`) when there are any in range.
+- **Projects / Models & effort:** "Wasted ≈" and "Wasted share" columns (`projectTableRows(…, wasted.byProject)`,
+  `withWasted(rows, wasted.byModel, group)`), also in the CSV exports (`wasted_est_cost_usd`, `wasted_share`).
+- **Effort suggestions** (`components/EffortSuggestions.tsx`, pure rules in `src/lib/effort-advisor.ts`) on Models &
+  effort and the project page.
+- **Admin → Settings:** runaway thresholds (≈ cost per turn, hours).
+
 ### Skills & MCP (`/skills-mcp`)
 
 `getSkillsMcp` (`src/lib/queries/skills-mcp.ts`) returns skills (uses, by the model vs typed by the user, turns, distinct
@@ -328,7 +345,10 @@ users), MCP servers with their tools (calls, turns, distinct users) and calls pe
 a server counts each turn once. The page shows KPI tiles (skill uses, share typed by users, MCP calls), the skills table with
 CSV (`/api/export?view=skills-mcp`: one row per skill, server and server × tool), a `<details>` list of servers that open into
 their tools, and stacked areas of uses / calls per day (top 6 + other; `skills-mcp-view.ts`, tests in `test/views/skills-mcp`).
-The users column is shown to leads and admins only. Hashed names (company project-naming mode) are shortened to
+The users column is shown to leads and admins only. The skills table also shows success and cost Δ against comparable
+turns, with a "Skill impact" detail table (pure math in `src/lib/skill-impact.ts`). Each MCP server and tool shows its
+error rate (errors / calls not refused), denied calls and the latency bucket of the median and p95 (red: ≥ 10 % errors
+over ≥ 20 calls); the CSV adds `errors`, `denied`, `latency_ms` and the five bucket counts. Hashed names (company project-naming mode) are shortened to
 `sha256:12345678…` (`formatUsageName`). Turn detail lists the turn's skills (typed / by the model) and MCP calls per server.
 
 ### Turns explorer (`/turns`, `/turns/[id]`)

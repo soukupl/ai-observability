@@ -3,6 +3,7 @@ import {
   OUTCOME_SIGNALS,
   type IngestEvent,
   type McpCounts,
+  type McpStats,
   type Outcome,
   type ProjectNamingMode,
   type SkillCounts,
@@ -33,6 +34,8 @@ export const MAX_TOOL_CALLS = 1_000_000_000;
 export const MAX_RUN_DEPTH = 1_000;
 /** One skill or MCP tool in one turn / run. */
 export const MAX_USAGE_CALLS = 1_000_000;
+/** Total MCP latency of one tool in one turn / run: 1e12 ms (~31 years) keeps sums far below bigint. */
+export const MAX_MCP_MS = 1_000_000_000_000;
 
 export const TOOL_KEY_RE = /^[a-z0-9_]{1,64}$/;
 export const AGENT_TYPE_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
@@ -110,13 +113,37 @@ export function normalizeMcp(mcp: McpCounts, naming: ProjectNamingMode): McpCoun
   return out;
 }
 
-/** `skills` / `mcp` of a turn or run event, normalised; a string = the field that is out of range. */
-function usageFields(e: { skills?: SkillCounts; mcp?: McpCounts }, naming: ProjectNamingMode): { skills?: SkillCounts; mcp?: McpCounts } | string {
+/** Null when a count is out of range. Names hashed like {@link normalizeMcp}. */
+export function normalizeMcpStats(stats: McpStats, naming: ProjectNamingMode): McpStats | null {
+  const out: McpStats = {};
+  for (const [server, tools] of Object.entries(stats)) {
+    const s = usageKey(server, `mcp:${server}`, naming);
+    const dst = (out[s] ??= {});
+    for (const [tool, x] of Object.entries(tools)) {
+      if (x.errors > MAX_USAGE_CALLS || x.denied > MAX_USAGE_CALLS || x.ms > MAX_MCP_MS || x.buckets.some((b) => b > MAX_USAGE_CALLS)) return null;
+      const t = usageKey(tool, `mcp:${server}/${tool}`, naming);
+      const cur = (dst[t] ??= { errors: 0, denied: 0, ms: 0, buckets: [0, 0, 0, 0, 0] });
+      cur.errors += x.errors;
+      cur.denied += x.denied;
+      cur.ms += x.ms;
+      x.buckets.forEach((b, i) => (cur.buckets[i] = (cur.buckets[i] ?? 0) + b));
+    }
+  }
+  return out;
+}
+
+/** `skills` / `mcp` / `mcp_stats` of a turn or run event, normalised; a string = the field that is out of range. */
+function usageFields(
+  e: { skills?: SkillCounts; mcp?: McpCounts; mcp_stats?: McpStats },
+  naming: ProjectNamingMode,
+): { skills?: SkillCounts; mcp?: McpCounts; mcp_stats?: McpStats } | string {
   const skills = e.skills ? normalizeSkills(e.skills, naming) : undefined;
   if (skills === null) return 'skills';
   const mcp = e.mcp ? normalizeMcp(e.mcp, naming) : undefined;
   if (mcp === null) return 'mcp';
-  return { ...(skills ? { skills } : {}), ...(mcp ? { mcp } : {}) };
+  const stats = e.mcp_stats ? normalizeMcpStats(e.mcp_stats, naming) : undefined;
+  if (stats === null) return 'mcp_stats';
+  return { ...(skills ? { skills } : {}), ...(mcp ? { mcp } : {}), ...(stats ? { mcp_stats: stats } : {}) };
 }
 
 export function normalizeAgentType(agentType: string): string {

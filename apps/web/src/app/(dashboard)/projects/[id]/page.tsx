@@ -3,6 +3,7 @@ import { notFound } from 'next/navigation';
 import { Badge } from '@/components/Badge';
 import { Card } from '@/components/Card';
 import { DataTable } from '@/components/DataTable';
+import { EffortSuggestions } from '@/components/EffortSuggestions';
 import { exportUrl } from '@/components/export-url';
 import { FilterBar } from '@/components/FilterBar';
 import { KpiTile } from '@/components/KpiTile';
@@ -12,6 +13,7 @@ import { TokensAreaChart } from '@/components/charts/TokensAreaChart';
 import { formatCost, formatDuration, formatInt, formatPercent, formatTokens } from '@/components/format';
 import { requireUser } from '@/lib/auth/session';
 import { parseFilters } from '@/lib/filters';
+import { getEffortAdvice } from '@/lib/queries/effort';
 import { getKpis } from '@/lib/queries/kpis';
 import { listProjects, loadFilterOptions, listTeams } from '@/lib/queries/lookups';
 import { getModelsEffort } from '@/lib/queries/models';
@@ -46,12 +48,13 @@ export default async function ProjectDetailPage({ params, searchParams }: { para
       kpis: await getKpis(ctx, f),
       series: await getTokenSeries(ctx, f),
       models: await getModelsEffort(ctx, f),
+      advice: await getEffortAdvice(ctx, f),
       phases: await getPhases(ctx, f, 'project'),
       turns: await listTurns(ctx, f, { page: 1, pageSize: 10 }),
     };
   });
   if (!data) notFound();
-  const { project, kpis, series, models, phases, turns } = data;
+  const { project, kpis, series, models, advice, phases, turns } = data;
   const team = data.teams.find((t) => t.id === project.teamId);
   const unnamed = isUnnamedHash(project);
   const stack = phaseStackRows(phases.rows);
@@ -98,6 +101,7 @@ export default async function ProjectDetailPage({ params, searchParams }: { para
         <Card title="Models and effort" description="A turn counts for its primary model. Cost is ≈ at API list prices.">
           <DataTable caption="Models and effort" columns={MODEL_COLUMNS} rows={modelTableRows(models.rows)} defaultSort={{ key: 'tokens', dir: 'desc' }} exportHref={exportUrl('models', f)} emptyMessage="No turns for this project in this range." />
         </Card>
+        <EffortSuggestions advice={advice} showProject={false} />
         <Card title="Time by phase" description="Share of turn time per phase (raw turns only).">
           {stack.rows.length === 0 ? <Empty text="No phase data in this range." /> : <StackedBar100 rows={stack.rows} keys={stack.keys} valueFormat="duration" ariaLabel="Time by phase" />}
         </Card>

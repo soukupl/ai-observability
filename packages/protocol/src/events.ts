@@ -5,6 +5,7 @@ import {
   ext,
   harness,
   mcp,
+  mcpStats,
   model,
   nonEmptyId,
   outcome,
@@ -56,6 +57,8 @@ export const turnEvent = z
     skills: skills.optional(),
     /** MCP calls of the main agent (optional: older collectors omit it) */
     mcp: mcp.optional(),
+    /** MCP errors and latency of the main agent (optional) */
+    mcp_stats: mcpStats.optional(),
     files_touched: count.default(0),
     lines_added: count.default(0),
     lines_removed: count.default(0),
@@ -82,6 +85,7 @@ export const runEvent = z
     tools: tools.optional(),
     skills: skills.optional(),
     mcp: mcp.optional(),
+    mcp_stats: mcpStats.optional(),
     outcome,
   })
   .refine(endsAfterStart, endsAfterStartMsg);

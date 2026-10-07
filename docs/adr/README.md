@@ -16,3 +16,5 @@
 - [ADR-0014: DB roles as NOLOGIN roles reached via SET ROLE, optional per-service logins](0014-db-roles-and-connections.md)
 - [ADR-0015: Usage rows are summed by turn_id; ingest stores the turn usage as given](0015-usage-rows-sum-by-turn.md)
 - [ADR-0016: Record skill and MCP usage by name, following the project-naming mode](0016-skill-and-mcp-usage.md)
+- [ADR-0017: Outcome-based insights (wasted spend, skill impact, effort advisor) and outcome-split rollups](0017-outcome-insights.md)
+- [ADR-0018: Runaway alerts after a turn ends, evaluated by the worker](0018-runaway-alerts.md)

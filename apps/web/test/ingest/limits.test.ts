@@ -5,6 +5,7 @@ import {
   INT4_MAX,
   MAX_PHASE_MS,
   MAX_TOKENS_PER_ENTRY,
+  MAX_MCP_MS,
   MAX_USAGE_CALLS,
   enforceLimits,
   normalizeAgentType,
@@ -73,6 +74,8 @@ describe('enforceLimits', () => {
     expect(enforceLimits(skill)).toEqual({ ok: false, reason: 'skills is out of range' });
     const mcp = parse({ ...ev.run('t', 'r', null, 1), mcp: { s: { t: MAX_USAGE_CALLS + 1 } } } as never);
     expect(enforceLimits(mcp)).toEqual({ ok: false, reason: 'mcp is out of range' });
+    const stats = parse({ ...ev.turn('s', 't'), mcp_stats: { s: { t: { errors: 1, ms: MAX_MCP_MS + 1, buckets: [1, 0, 0, 0, 0] } } } } as never);
+    expect(enforceLimits(stats)).toEqual({ ok: false, reason: 'mcp_stats is out of range' });
   });
 
   it('hashed mode: plain skill / MCP names are hashed like an unsalted collector, hashed ones kept', () => {
@@ -88,6 +91,9 @@ describe('enforceLimits', () => {
     const hashed = enforceLimits(turn, 'hashed');
     expect(hashed.ok && hashed.event.type === 'turn' && hashed.event.skills).toEqual({ [sha('skill:code-review')]: { model: 1, user: 2 }, [pre]: { model: 1, user: 0 } });
     expect(hashed.ok && hashed.event.type === 'turn' && hashed.event.mcp).toEqual({ [sha('mcp:github')]: { [sha('mcp:github/search_code')]: 3 } });
+    const withStats = parse({ ...ev.turn('s', 't'), mcp_stats: { github: { search_code: { errors: 1, ms: 5, buckets: [1, 0, 0, 0, 0] } } } } as never);
+    const h2 = enforceLimits(withStats, 'hashed');
+    expect(h2.ok && h2.event.type === 'turn' && Object.keys(h2.event.mcp_stats![sha('mcp:github')]!)).toEqual([sha('mcp:github/search_code')]);
   });
 
   it('normalizeTools / normalizeAgentType edge cases', () => {

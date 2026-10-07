@@ -3,6 +3,7 @@ import { Card } from '@/components/Card';
 import { PageHeader } from '@/components/PageHeader';
 import { updateSettingsAction } from '@/lib/admin/actions/company';
 import { loadCompany } from '@/lib/admin/company';
+import { RUNAWAY_BOUNDS, RUNAWAY_DEFAULTS } from '@ai-obs/db';
 import { requireAdminPage } from '@/lib/admin/guard';
 import { retentionBounds } from '@/lib/admin/plans';
 import { withUserDb } from '@/lib/auth/rls';
@@ -70,6 +71,30 @@ export default async function SettingsPage() {
               Sessions, turns, runs and usage older than this are deleted nightly. Daily rollups (no summaries) are kept indefinitely. Default 395 days (13 months).
               {s.retentionDays > max && ` The stored value (${s.retentionDays}) is above the plan maximum.`}
             </p>
+          </fieldset>
+          <fieldset>
+            <legend className="mb-1 text-sm font-semibold">Runaway alerts</legend>
+            <p className={noteCls}>
+              After a turn ends, it is flagged when it used far more tokens than its user usually does, when its ≈ cost reaches the
+              limit below, or when it ran at least the hours below with above-normal tokens. The user is e-mailed (leads too in full
+              mode; admins get an anonymous digest in aggregates-only mode), at most one digest per hour. Nothing is blocked.
+            </p>
+            <div className="mt-2 flex flex-wrap gap-4">
+              <label className={`${labelCls} max-w-48`}>
+                ≈ Cost per turn (USD)
+                <input
+                  type="number" name="runawayCostUsd" min={RUNAWAY_BOUNDS.costUsd[0]} max={RUNAWAY_BOUNDS.costUsd[1]} step="any"
+                  defaultValue={s.runawayCostUsd ?? RUNAWAY_DEFAULTS.costUsd} className={inputCls}
+                />
+              </label>
+              <label className={`${labelCls} max-w-48`}>
+                Turn duration (hours)
+                <input
+                  type="number" name="runawayHours" min={RUNAWAY_BOUNDS.hours[0]} max={RUNAWAY_BOUNDS.hours[1]} step="0.5"
+                  defaultValue={s.runawayHours ?? RUNAWAY_DEFAULTS.hours} className={inputCls}
+                />
+              </label>
+            </div>
           </fieldset>
         </ActionForm>
       </Card>

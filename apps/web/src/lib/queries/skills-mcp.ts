@@ -25,14 +25,24 @@ export interface SkillRow {
   users: number;
 }
 
-export interface McpToolRow {
+/** MCP errors, denials and latency (docs/briefs/mcp-reliability.md). */
+export interface McpReliability {
+  errors: number;
+  denied: number;
+  /** total ms of the calls with a timed result */
+  latencyMs: number;
+  /** timed results per latency bucket: < 1 s, 1–5 s, 5–30 s, 30–120 s, > 120 s */
+  buckets: number[];
+}
+
+export interface McpToolRow extends McpReliability {
   tool: string;
   calls: number;
   turns: number;
   users: number;
 }
 
-export interface McpServerRow {
+export interface McpServerRow extends McpReliability {
   name: string;
   calls: number;
   turns: number;
@@ -116,6 +126,51 @@ function directRollup(ctx: QueryCtx, d: Dims): SQL {
     select 'day', day::text, kind, name, '', ${sums} from d where tool = '' group by day, kind, name`;
 }
 
+/** Errors / denials / latency per server ('' tool) and server × tool, from raw rows or rollups. */
+async function reliability(ctx: QueryCtx, d: Dims, rollup: boolean): Promise<Map<string, McpReliability>> {
+  const cols = sql.raw('level, name, tool, errors, denied, latency_ms, lat0, lat1, lat2, lat3, lat4');
+  let q: SQL;
+  if (ctx.agg) {
+    q = rollup
+      ? sql`select ${cols} from agg_mcp_reliability_rollups(${aggArgs(d, 'date')})`
+      : sql`select ${cols} from agg_mcp_reliability(${aggArgs(d, 'ts')})`;
+  } else if (rollup) {
+    const c: SQL[] = [sql`d.company_id = ${ctx.viewer.companyId}::uuid`, sql`d.kind = 'mcp'`, sql`d.day >= ${d.fromDay}::date`, sql`d.day < ${d.toDay}::date`];
+    if (d.teamId) c.push(sql`d.team_id = ${d.teamId}::uuid`);
+    if (d.projectId) c.push(sql`d.project_id = ${d.projectId}::uuid`);
+    if (d.userId) c.push(sql`d.user_id = ${d.userId}::uuid`);
+    if (d.harness) c.push(sql`d.harness = ${d.harness}`);
+    if (d.model) c.push(sql`d.model = ${d.model}`);
+    q = sql`select case when d.tool = '' then 'name' else 'tool' end as level, d.name, d.tool, sum(d.errors) as errors,
+          sum(d.denied) as denied, sum(d.latency_ms) as latency_ms, sum(d.lat0) as lat0, sum(d.lat1) as lat1, sum(d.lat2) as lat2,
+          sum(d.lat3) as lat3, sum(d.lat4) as lat4
+        from daily_skill_mcp_rollups d ${where(c)} group by 1, 2, 3`;
+  } else {
+    const flat = (k: string) => sql.raw(k === 'ms' ? `(tl.value->>'ms')::bigint` : `(tl.value->>'${k}')::bigint`);
+    const b = (i: number) => sql.raw(`(tl.value->'buckets'->>${i})::bigint`);
+    q = sql`with uses as (
+          select u.mcp_stats from turns t
+          cross join lateral (select t.mcp_stats union all select r.mcp_stats from runs r where r.turn_id = t.id and r.company_id = t.company_id) u
+          ${where(turnConds(ctx, d))}
+        ), flat as (
+          select m.key as name, tl.key as tool, ${flat('errors')} as errors, ${flat('denied')} as denied, ${flat('ms')} as ms,
+            ${b(0)} as b0, ${b(1)} as b1, ${b(2)} as b2, ${b(3)} as b3, ${b(4)} as b4
+          from uses x cross join lateral jsonb_each(x.mcp_stats) m cross join lateral jsonb_each(m.value) tl
+        )
+        select 'name' as level, name, '' as tool, sum(errors) as errors, sum(denied) as denied, sum(ms) as latency_ms, sum(b0) as lat0,
+          sum(b1) as lat1, sum(b2) as lat2, sum(b3) as lat3, sum(b4) as lat4 from flat group by name
+        union all
+        select 'tool', name, tool, sum(errors), sum(denied), sum(ms), sum(b0), sum(b1), sum(b2), sum(b3), sum(b4) from flat group by name, tool`;
+  }
+  const out = await rows<Record<string, unknown>>(ctx.tx, q);
+  return new Map(
+    out.map((r) => [
+      `${String(r.name)}\u0000${r.level === 'name' ? '' : String(r.tool)}`,
+      { errors: num(r.errors), denied: num(r.denied), latencyMs: num(r.latency_ms), buckets: [num(r.lat0), num(r.lat1), num(r.lat2), num(r.lat3), num(r.lat4)] },
+    ]),
+  );
+}
+
 export async function getSkillsMcp(ctx: QueryCtx, f: Filters): Promise<SkillsMcpResult> {
   const range = rangeFor(ctx, f);
   const d = dims(ctx, f, range);
@@ -129,6 +184,8 @@ export async function getSkillsMcp(ctx: QueryCtx, f: Filters): Promise<SkillsMcp
       : directRaw(ctx, d);
   const out = await rows<Record<string, unknown>>(ctx.tx, q);
 
+  const rel = await reliability(ctx, d, rollup);
+  const relOf = (name: string, tool: string): McpReliability => rel.get(`${name}\u0000${tool}`) ?? { errors: 0, denied: 0, latencyMs: 0, buckets: [0, 0, 0, 0, 0] };
   const skills: SkillRow[] = [];
   const servers = new Map<string, McpServerRow>();
   const tools: Array<{ name: string } & McpToolRow> = [];
@@ -138,11 +195,14 @@ export async function getSkillsMcp(ctx: QueryCtx, f: Filters): Promise<SkillsMcp
     const name = String(r.name);
     const base = { calls: num(r.calls), turns: num(r.turns), users: num(r.users) };
     if (r.level === 'day') days.push({ day: String(r.day), kind, name, calls: base.calls });
-    else if (r.level === 'tool') tools.push({ name, tool: String(r.tool), ...base });
+    else if (r.level === 'tool') tools.push({ name, tool: String(r.tool), ...base, ...relOf(name, String(r.tool)) });
     else if (kind === 'skill') skills.push({ name, ...base, modelCalls: num(r.model_calls), userCalls: num(r.user_calls) });
-    else servers.set(name, { name, ...base, tools: [] });
+    else servers.set(name, { name, ...base, ...relOf(name, ''), tools: [] });
   }
-  for (const t of tools) servers.get(t.name)?.tools.push({ tool: t.tool, calls: t.calls, turns: t.turns, users: t.users });
+  for (const t of tools) {
+    const { name: _n, ...row } = t;
+    servers.get(t.name)?.tools.push(row);
+  }
   const byCalls = <T extends { calls: number }>(key: (x: T) => string) => (a: T, b: T) => b.calls - a.calls || key(a).localeCompare(key(b));
   for (const s of servers.values()) s.tools.sort(byCalls((x) => x.tool));
   days.sort((a, b) => a.day.localeCompare(b.day) || a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name));

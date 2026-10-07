@@ -8,7 +8,8 @@ import { getModelsEffort } from './models';
 import { getPhases, PHASES, type PhaseGroup, PHASE_GROUPS } from './phases';
 import { getProjects } from './projects';
 import { canSeeUsers, isLead, type QueryCtx } from './scope';
-import { getSkillsMcp } from './skills-mcp';
+import { getSkillsMcp, type McpReliability } from './skills-mcp';
+import { getWastedSpend, modelKey, wastedShare } from './wasted';
 import type { TokenTotals } from './sqlutil';
 import { getTokenSeries } from './timeseries';
 import { exportTurns } from './turns';
@@ -58,15 +59,20 @@ export async function buildExportTable(ctx: QueryCtx, view: ExportView, f: Filte
     }
     case 'projects': {
       const p = await getProjects(ctx, f);
+      const w = (await getWastedSpend(ctx, f)).byProject;
       return {
-        headers: ['project', 'team', 'turns', ...TOKEN_HEADERS, 'est_cost_usd', 'success_rate', 'unknown_share'],
-        rows: p.rows.map((r) => [r.name, r.teamName, r.turns, ...tokenCells(r.tokens), usd(r.cost), ratio(r.successRate), ratio(r.unknownShare)]),
+        headers: ['project', 'team', 'turns', ...TOKEN_HEADERS, 'est_cost_usd', 'success_rate', 'unknown_share', 'wasted_est_cost_usd', 'wasted_share'],
+        rows: p.rows.map((r) => {
+          const part = w.get(r.projectId ?? '');
+          return [r.name, r.teamName, r.turns, ...tokenCells(r.tokens), usd(r.cost), ratio(r.successRate), ratio(r.unknownShare), part ? usd(part.wasted) : '', ratio(wastedShare(part))];
+        }),
       };
     }
     case 'models': {
       const m = await getModelsEffort(ctx, f);
+      const w = (await getWastedSpend(ctx, f)).byModel;
       return {
-        headers: ['model', 'effort', 'primary_turns', ...TOKEN_HEADERS, 'est_cost_usd', 'success_rate', 'unknown_share', 'median_duration_ms', 'avg_duration_ms'],
+        headers: ['model', 'effort', 'primary_turns', ...TOKEN_HEADERS, 'est_cost_usd', 'success_rate', 'unknown_share', 'median_duration_ms', 'avg_duration_ms', 'wasted_est_cost_usd', 'wasted_share'],
         rows: m.rows.map((r) => [
           r.model,
           r.effort,
@@ -77,6 +83,8 @@ export async function buildExportTable(ctx: QueryCtx, view: ExportView, f: Filte
           ratio(r.unknownShare),
           r.medianDurationMs === null ? '' : Math.round(r.medianDurationMs),
           r.avgDurationMs === null ? '' : Math.round(r.avgDurationMs),
+          w.get(modelKey(r.model, r.effort)) ? usd(w.get(modelKey(r.model, r.effort))!.wasted) : '',
+          ratio(wastedShare(w.get(modelKey(r.model, r.effort)))),
         ]),
       };
     }
@@ -108,13 +116,18 @@ export async function buildExportTable(ctx: QueryCtx, view: ExportView, f: Filte
       const r = await getSkillsMcp(ctx, f);
       const withUsers = ctx.viewer.companyRole === 'admin' || isLead(ctx.viewer);
       const users = (n: number): CsvCell[] => (withUsers ? [n] : []);
+      const rel = (x: McpReliability): CsvCell[] => [x.errors, x.denied, x.latencyMs, ...x.buckets];
+      const noRel: CsvCell[] = ['', '', '', '', '', '', '', ''];
       return {
-        headers: ['kind', 'name', 'tool', 'calls', 'model_calls', 'user_calls', 'turns', ...(withUsers ? ['users'] : [])],
+        headers: [
+          'kind', 'name', 'tool', 'calls', 'model_calls', 'user_calls', 'turns', ...(withUsers ? ['users'] : []),
+          'errors', 'denied', 'latency_ms', 'lat_lt_1s', 'lat_1_5s', 'lat_5_30s', 'lat_30_120s', 'lat_gt_120s',
+        ],
         rows: [
-          ...r.skills.map((s) => ['skill', s.name, '', s.calls, s.modelCalls, s.userCalls, s.turns, ...users(s.users)]),
+          ...r.skills.map((s) => ['skill', s.name, '', s.calls, s.modelCalls, s.userCalls, s.turns, ...users(s.users), ...noRel]),
           ...r.servers.flatMap((s) => [
-            ['mcp', s.name, '', s.calls, s.calls, 0, s.turns, ...users(s.users)],
-            ...s.tools.map((t) => ['mcp', s.name, t.tool, t.calls, t.calls, 0, t.turns, ...users(t.users)]),
+            ['mcp', s.name, '', s.calls, s.calls, 0, s.turns, ...users(s.users), ...rel(s)],
+            ...s.tools.map((t) => ['mcp', s.name, t.tool, t.calls, t.calls, 0, t.turns, ...users(t.users), ...rel(t)]),
           ]),
         ],
       };

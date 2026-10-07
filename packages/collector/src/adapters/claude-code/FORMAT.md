@@ -82,7 +82,7 @@ The file is append-only JSONL with one entry per line. Every message entry has `
 | `Write` | `file_path`, `content` | `{type: "create"\|"update", filePath, content, structuredPatch, originalFile}`. `create` has an empty patch, so its lines are the content's lines. |
 | `MultiEdit` / `NotebookEdit` | `edits[]` / `notebook_path`, `new_source` | Counts are estimated from the input. |
 | `Skill` | `skill` (e.g. `code-review`, `plugin:skill`), `args?` | `Launching skill: <name>`. Counts one `model` use of `input.skill`; the args are not read. |
-| `mcp__<server>__<tool>` | (not read) | Counted per server × tool (`<server>` up to the first `__` after the prefix). |
+| `mcp__<server>__<tool>` | (not read) | Counted per server × tool (`<server>` up to the first `__` after the prefix). Paired with its `tool_result` by `tool_use_id`: `is_error` → error; a refusal (`The user doesn't want to proceed with this tool use…`, `Permission for this tool use was denied…`, `[Request interrupted by user for tool use]`; from Claude Code's known texts, not yet in a recorded fixture) → `denied`; result time − call time → latency. A call without a result at turn end counts in neither. |
 | `Agent` (formerly `Task`) | `description`, `prompt`, `subagent_type`, `model?`, `run_in_background?` | Sync: `{status:"completed", agentId, agentType, totalTokens, usage, …}`. Background: `{status:"async_launched", agentId, isAsync:true, outputFile}`. |
 
 Lines added and removed come from `structuredPatch` when it is present, and otherwise from a

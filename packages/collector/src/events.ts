@@ -1,8 +1,9 @@
 import { PHASE_RULES_VERSION, toPhasesMs, type PhaseTotals } from './analysis/phases.js';
-import { normalizeMcp, normalizeSkills } from './analysis/usage.js';
+import { normalizeMcp, normalizeMcpStats, normalizeSkills } from './analysis/usage.js';
 import {
   MAX_SUMMARY_LENGTH,
   type McpCounts,
+  type McpStats,
   type Outcome,
   type PhasesMs,
   type ProjectRef,
@@ -97,10 +98,11 @@ function normalizeTools(tools: Record<string, number> | undefined): Record<strin
 }
 
 /** `skills` / `mcp` wire fields, omitted when empty (older servers and collectors never see them). */
-function usageOf(i: { skills?: SkillCounts; mcp?: McpCounts }): { skills?: SkillCounts; mcp?: McpCounts } {
+function usageOf(i: { skills?: SkillCounts; mcp?: McpCounts; mcpStats?: McpStats }): { skills?: SkillCounts; mcp?: McpCounts; mcp_stats?: McpStats } {
   const skills = normalizeSkills(i.skills);
   const mcp = normalizeMcp(i.mcp);
-  return { ...(skills ? { skills } : {}), ...(mcp ? { mcp } : {}) };
+  const stats = normalizeMcpStats(i.mcpStats);
+  return { ...(skills ? { skills } : {}), ...(mcp ? { mcp } : {}), ...(stats ? { mcp_stats: stats } : {}) };
 }
 
 const phasesOf = (p: Partial<PhaseTotals> | PhasesMs): PhasesMs => toPhasesMs(p);
@@ -143,6 +145,8 @@ export interface TurnInput extends Common {
   /** plain names; the context's queue hashes them in hashed mode */
   skills?: SkillCounts;
   mcp?: McpCounts;
+  /** MCP errors / denials / latency (plain names) */
+  mcpStats?: McpStats;
   filesTouched?: number;
   linesAdded?: number;
   linesRemoved?: number;
@@ -194,6 +198,7 @@ export interface RunInput extends Common {
   tools?: Record<string, number>;
   skills?: SkillCounts;
   mcp?: McpCounts;
+  mcpStats?: McpStats;
   outcome: Outcome;
 }
 

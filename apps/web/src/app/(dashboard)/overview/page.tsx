@@ -14,6 +14,9 @@ import { addDays } from '@/lib/queries/range';
 import { loadFilterOptions } from '@/lib/queries/lookups';
 import { withDashboardContext } from '@/lib/queries/page';
 import { canSeeUsers } from '@/lib/queries/scope';
+import { getRunaways } from '@/lib/queries/runaways';
+import { getWastedSpend } from '@/lib/queries/wasted';
+import { RunawayList } from './RunawayList';
 import { BudgetBars } from './BudgetBars';
 import { zeroFilledChartRows } from './helpers';
 import { OutcomeMix } from './OutcomeMix';
@@ -25,12 +28,15 @@ type SearchParams = Promise<Record<string, string | string[] | undefined>>;
 export default async function OverviewPage({ searchParams }: { searchParams: SearchParams }) {
   const user = await requireUser();
   const filters = parseFilters(await searchParams, { allowUser: canSeeUsers(user) });
-  const { options, kpis, series, budgets } = await withDashboardContext(user, async (ctx) => ({
+  const { options, kpis, series, budgets, wasted, runaways } = await withDashboardContext(user, async (ctx) => ({
     options: await loadFilterOptions(ctx),
     kpis: await getKpis(ctx, filters),
     series: await getTokenSeries(ctx, filters),
     budgets: await getBudgetProgress(ctx),
+    wasted: await getWastedSpend(ctx, filters),
+    runaways: await getRunaways(ctx, filters),
   }));
+  const last7 = wasted.daily.slice(-7);
   const rollup = kpis.range.source === 'rollup';
   const success = kpis.successRate;
   const empty = kpis.turns === 0;
@@ -43,7 +49,7 @@ export default async function OverviewPage({ searchParams }: { searchParams: Sea
         description={`${kpis.range.fromDay} to ${addDays(kpis.range.toDay, -1)} (UTC). ${rollup ? 'Long range: read from daily rollups.' : 'Read from raw turns.'}`}
       />
       <FilterBar filters={filters} options={options} />
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <KpiTile label="Turns" value={formatInt(kpis.turns)} />
         <KpiTile
           label="Tokens"
@@ -69,11 +75,19 @@ export default async function OverviewPage({ searchParams }: { searchParams: Sea
           value={kpis.medianAvailable ? formatDuration(kpis.medianDurationMs) : 'n/a'}
           sub={kpis.medianAvailable ? (kpis.medianApproximate ? 'from a sample of recent turns' : undefined) : 'needs raw turns (older than your retention window are gone)'}
         />
+        <KpiTile
+          label="Wasted ≈ cost"
+          value={formatCost(wasted.wasted)}
+          sub={`${formatPercent(wasted.share)} of ≈ cost · ${formatCost(wasted.unclassified)} unclassified${wasted.unsplitDays ? ` · ${wasted.unsplitDays} older days not split` : ''}`}
+          spark={last7.map((d) => d.usd)}
+          title="≈ Cost of failed and abandoned turns (incl. turns later marked failed by a correction or a revert). Unclassified = turns with an unknown outcome. The line shows the last 7 days."
+        />
       </div>
       {kpis.ignoredFilters.length > 0 && (
         <p className="text-xs text-zinc-500 dark:text-zinc-400">Not applied to every figure: {kpis.ignoredFilters.join(', ')} (aggregates-only mode).</p>
       )}
       <BudgetBars budgets={budgets} />
+      {runaways.rows.length > 0 && <RunawayList rows={runaways.rows} />}
       <Card
         title="Tokens over time by model"
         description={rollup ? 'Daily rollups: attributed to each turn’s primary model.' : 'Tokens per day and model.'}

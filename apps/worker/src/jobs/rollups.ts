@@ -55,7 +55,7 @@ export async function recomputeDay(db: Database, companyId: string, day: string)
       .select({
         id: turns.id, teamId: turns.teamId, userId: turns.userId, projectId: turns.projectId, harness: turns.harness,
         model: turns.model, effort: turns.effort, durationMs: turns.durationMs, phasesMs: turns.phasesMs, outcome: turns.outcome,
-        skills: turns.skills, mcp: turns.mcp,
+        skills: turns.skills, mcp: turns.mcp, mcpStats: turns.mcpStats,
         known: sql<boolean>`coalesce(${turns.createdAt} <= ${lastWrite}, false)`,
       })
       .from(turns)
@@ -88,13 +88,13 @@ export async function recomputeDay(db: Database, companyId: string, day: string)
 
     // Skill / MCP use: the turn's own counts plus those of its runs.
     const runUses = await tx
-      .select({ turnId: runs.turnId, skills: runs.skills, mcp: runs.mcp })
+      .select({ turnId: runs.turnId, skills: runs.skills, mcp: runs.mcp, mcpStats: runs.mcpStats })
       .from(runs)
       .innerJoin(turns, and(eq(runs.turnId, turns.id), eq(runs.companyId, turns.companyId)))
       .where(and(inDay, sql`(${runs.skills} <> '{}'::jsonb or ${runs.mcp} <> '{}'::jsonb)`));
     const uses: SkillMcpUse[] = [
-      ...picked.map((t) => ({ turnId: t.id, skills: t.skills, mcp: t.mcp })),
-      ...runUses.flatMap((r) => (r.turnId ? [{ turnId: r.turnId, skills: r.skills, mcp: r.mcp }] : [])),
+      ...picked.map((t) => ({ turnId: t.id, skills: t.skills, mcp: t.mcp, mcpStats: t.mcpStats })),
+      ...runUses.flatMap((r) => (r.turnId ? [{ turnId: r.turnId, skills: r.skills, mcp: r.mcp, mcpStats: r.mcpStats }] : [])),
     ];
 
     // aggregateDay / aggregateSkillMcp ignore rows of turns that were not picked.

@@ -1,5 +1,6 @@
 import type { CostValue } from '@/lib/cost';
 import type { ModelRow } from '@/lib/queries/models';
+import { modelKey, sumParts, wastedShare, type WastedPart } from '../../../lib/queries/wasted';
 
 export type Grouping = 'model' | 'effort';
 
@@ -25,6 +26,9 @@ export type TableRow = {
   successRate: number | null;
   unknownShare: number | null;
   medianDurationMs: number | null;
+  /** ≈ cost of failed / abandoned turns (null when unknown) and its share of the row's ≈ cost */
+  wasted?: CostValue | null;
+  wastedShare?: number | null;
 };
 
 /** 0 primary turns next to tokens reads as a contradiction; show "no value" instead (review V2). */
@@ -107,4 +111,15 @@ export function chartData(rows: TableRow[], group: Grouping, pick: (r: TableRow)
     .filter((d): d is { label: string; value: number } => d.value !== null && d.value > 0)
     .sort((a, b) => b.value - a.value)
     .slice(0, limit);
+}
+
+/** Adds wasted ≈ cost per row: by model × effort, or summed over a model's efforts (group = 'model'). */
+export function withWasted(rows: TableRow[], byModel: ReadonlyMap<string, WastedPart>, group: Grouping): TableRow[] {
+  return rows.map((r) => {
+    const part =
+      group === 'effort'
+        ? byModel.get(r.key)
+        : sumParts([...byModel].filter(([k]) => k.slice(0, k.lastIndexOf('|')) === (r.model === UNKNOWN_LABEL ? '' : r.model)).map(([, v]) => v));
+    return { ...r, wasted: part?.wasted ?? null, wastedShare: wastedShare(part) };
+  });
 }

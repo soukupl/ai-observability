@@ -1,9 +1,11 @@
 import { sql } from 'drizzle-orm';
-import { bigint, check, date, foreignKey, index, jsonb, numeric, pgTable, text, unique, uuid } from 'drizzle-orm/pg-core';
+import { bigint, boolean, check, date, foreignKey, index, jsonb, numeric, pgTable, text, unique, uuid } from 'drizzle-orm/pg-core';
 import { count, createdAt, pk, tokenColumns, tstz, updatedAt, type PhasesMs } from './columns.js';
 import { budgetKindEnum } from './enums.js';
 import { projects } from './ingest.js';
 import { companies, teams, users } from './tenancy.js';
+
+const big = (name: string) => bigint(name, { mode: 'number' }).notNull().default(0);
 
 /**
  * API list prices in USD per million tokens, effective from a date (global, not tenant data).
@@ -54,6 +56,20 @@ export const dailyRollups = pgTable(
     failed: count('failed'),
     abandoned: count('abandoned'),
     unknown: count('unknown'),
+    /**
+     * Tokens of turns whose outcome is failed or abandoned ("wasted", docs/briefs/wasted-spend.md) and of turns
+     * with an unknown outcome, by the usage row's model × effort like the token columns above. Meaningful only
+     * when outcome_split is true: rows written before migration 0007 have no split.
+     */
+    wastedInputTokens: big('wasted_input_tokens'),
+    wastedOutputTokens: big('wasted_output_tokens'),
+    wastedCacheReadTokens: big('wasted_cache_read_tokens'),
+    wastedCacheWriteTokens: big('wasted_cache_write_tokens'),
+    unknownInputTokens: big('unknown_input_tokens'),
+    unknownOutputTokens: big('unknown_output_tokens'),
+    unknownCacheReadTokens: big('unknown_cache_read_tokens'),
+    unknownCacheWriteTokens: big('unknown_cache_write_tokens'),
+    outcomeSplit: boolean('outcome_split').notNull().default(false),
     updatedAt: updatedAt(),
   },
   (t) => [
@@ -92,6 +108,24 @@ export const dailySkillMcpRollups = pgTable(
     modelCalls: bigint('model_calls', { mode: 'number' }).notNull().default(0),
     userCalls: bigint('user_calls', { mode: 'number' }).notNull().default(0),
     turns: count('turns'),
+    /** outcome counts of those turns (skill impact, docs/briefs/skill-impact.md); valid when outcome_split */
+    success: count('success'),
+    failed: count('failed'),
+    abandoned: count('abandoned'),
+    unknown: count('unknown'),
+    outcomeSplit: boolean('outcome_split').notNull().default(false),
+    /**
+     * MCP reliability (docs/briefs/mcp-reliability.md): errors, denied calls, and for calls with a timed result
+     * their total ms and a histogram over < 1 s, 1–5 s, 5–30 s, 30–120 s, > 120 s (lat0 … lat4). 0 for skills.
+     */
+    errors: big('errors'),
+    denied: big('denied'),
+    latencyMs: big('latency_ms'),
+    lat0: big('lat0'),
+    lat1: big('lat1'),
+    lat2: big('lat2'),
+    lat3: big('lat3'),
+    lat4: big('lat4'),
     updatedAt: updatedAt(),
   },
   (t) => [

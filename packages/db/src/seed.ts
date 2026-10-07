@@ -166,6 +166,7 @@ async function insertTurn(tx: Tx, c: Ctx, sessionIds: Map<string, string>, t: Se
       tools: t.tools,
       skills: t.skills,
       mcp: t.mcp,
+      mcpStats: t.mcpStats,
       filesTouched: t.filesTouched,
       linesAdded: t.linesAdded,
       linesRemoved: t.linesRemoved,
@@ -198,6 +199,7 @@ async function insertTurn(tx: Tx, c: Ctx, sessionIds: Map<string, string>, t: Se
         ...tok(r),
         phasesMs: r.phasesMs,
         mcp: r.mcp,
+        mcpStats: r.mcpStats,
         outcome: r.outcome,
         outcomeProvisional: false,
       })
@@ -225,6 +227,8 @@ async function insertRollups(tx: Tx, c: Ctx, all: SeedTurn[]) {
         harness: t.harness, model, effort, turns: 0, runs: 0, inputTokens: 0, outputTokens: 0,
         cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, requests: 0, durationMs: 0, phasesMs: {},
         success: 0, failed: 0, abandoned: 0, unknown: 0,
+        wastedInputTokens: 0, wastedOutputTokens: 0, wastedCacheReadTokens: 0, wastedCacheWriteTokens: 0,
+        unknownInputTokens: 0, unknownOutputTokens: 0, unknownCacheReadTokens: 0, unknownCacheWriteTokens: 0, outcomeSplit: true,
       };
       groups.set(k, g);
     }
@@ -245,6 +249,17 @@ async function insertRollups(tx: Tx, c: Ctx, all: SeedTurn[]) {
       ug.cacheWriteTokens! += u.cacheWrite;
       ug.reasoningTokens! += u.reasoning;
       ug.requests! += u.requests;
+      if (t.outcome === 'failed' || t.outcome === 'abandoned') {
+        ug.wastedInputTokens! += u.input;
+        ug.wastedOutputTokens! += u.output;
+        ug.wastedCacheReadTokens! += u.cacheRead;
+        ug.wastedCacheWriteTokens! += u.cacheWrite;
+      } else if (t.outcome === 'unknown') {
+        ug.unknownInputTokens! += u.input;
+        ug.unknownOutputTokens! += u.output;
+        ug.unknownCacheReadTokens! += u.cacheRead;
+        ug.unknownCacheWriteTokens! += u.cacheWrite;
+      }
     }
   }
   await tx.insert(dailyRollups).values([...groups.values()]);
@@ -254,7 +269,8 @@ async function insertRollups(tx: Tx, c: Ctx, all: SeedTurn[]) {
 /** Same fold as the worker's aggregateSkillMcp: per turn (main agent + runs) one row per skill, MCP server and tool. */
 async function insertSkillMcpRollups(tx: Tx, c: Ctx, all: SeedTurn[]) {
   const groups = new Map<string, typeof dailySkillMcpRollups.$inferInsert>();
-  const add = (t: SeedTurn, kind: 'skill' | 'mcp', name: string, tool: string, model: number, user: number) => {
+  type Rel = { errors: number; denied: number; ms: number; buckets: number[] };
+  const add = (t: SeedTurn, kind: 'skill' | 'mcp', name: string, tool: string, model: number, user: number, rel: Rel | null = null) => {
     const teamId = c.teamIds[t.project.team]!;
     const k = [day(t.startedAt), teamId, t.actor.key, t.project.key, t.harness, t.model, kind, name, tool].join('|');
     let g = groups.get(k);
@@ -262,31 +278,57 @@ async function insertSkillMcpRollups(tx: Tx, c: Ctx, all: SeedTurn[]) {
       g = {
         companyId: c.companyId, day: day(t.startedAt), teamId, userId: c.userIds[t.actor.key], projectId: c.projectIds[t.project.key],
         harness: t.harness, model: t.model, kind, name, tool, calls: 0, modelCalls: 0, userCalls: 0, turns: 0,
+        success: 0, failed: 0, abandoned: 0, unknown: 0, outcomeSplit: true,
+        errors: 0, denied: 0, latencyMs: 0, lat0: 0, lat1: 0, lat2: 0, lat3: 0, lat4: 0,
       };
       groups.set(k, g);
+    }
+    if (rel) {
+      g.errors! += rel.errors;
+      g.denied! += rel.denied;
+      g.latencyMs! += rel.ms;
+      g.lat0! += rel.buckets[0]!;
+      g.lat1! += rel.buckets[1]!;
+      g.lat2! += rel.buckets[2]!;
+      g.lat3! += rel.buckets[3]!;
+      g.lat4! += rel.buckets[4]!;
     }
     g.calls! += model + user;
     g.modelCalls! += model;
     g.userCalls! += user;
     g.turns! += 1;
+    g[t.outcome]! += 1;
   };
   for (const t of all) {
     for (const [name, s] of Object.entries(t.skills)) add(t, 'skill', name, '', s.model, s.user);
     const mcp = new Map<string, Map<string, number>>();
-    for (const calls of [t.mcp, ...t.runs.map((r) => r.mcp)]) {
+    const rels = new Map<string, Rel>();
+    const relOf = (key: string) => rels.get(key) ?? (rels.set(key, { errors: 0, denied: 0, ms: 0, buckets: [0, 0, 0, 0, 0] }), rels.get(key)!);
+    for (const [calls, stats] of [[t.mcp, t.mcpStats], ...t.runs.map((r) => [r.mcp, r.mcpStats] as const)] as const) {
       for (const [server, tools] of Object.entries(calls)) {
         const m = mcp.get(server) ?? new Map<string, number>();
         for (const [tool, n] of Object.entries(tools)) m.set(tool, (m.get(tool) ?? 0) + n);
         mcp.set(server, m);
       }
+      for (const [server, tools] of Object.entries(stats)) {
+        for (const [tool, x] of Object.entries(tools)) {
+          for (const key of [`${server}\u0000${tool}`, `${server}\u0000`]) {
+            const r = relOf(key);
+            r.errors += x.errors;
+            r.denied += x.denied;
+            r.ms += x.ms;
+            x.buckets.forEach((b, i) => (r.buckets[i]! += b));
+          }
+        }
+      }
     }
     for (const [server, tools] of mcp) {
       let total = 0;
       for (const [tool, n] of tools) {
-        add(t, 'mcp', server, tool, n, 0);
+        add(t, 'mcp', server, tool, n, 0, rels.get(`${server}\u0000${tool}`) ?? null);
         total += n;
       }
-      add(t, 'mcp', server, '', total, 0);
+      add(t, 'mcp', server, '', total, 0, rels.get(`${server}\u0000`) ?? null);
     }
   }
   if (groups.size) await tx.insert(dailySkillMcpRollups).values([...groups.values()]);

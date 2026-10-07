@@ -9,6 +9,7 @@ import { loadFilterOptions } from '@/lib/queries/lookups';
 import { withDashboardContext } from '@/lib/queries/page';
 import { getProjects } from '@/lib/queries/projects';
 import { canSeeUsers } from '@/lib/queries/scope';
+import { getWastedSpend } from '@/lib/queries/wasted';
 import { PROJECT_COLUMNS, projectTableRows } from '../helpers';
 
 export const metadata = { title: 'Projects' };
@@ -18,9 +19,10 @@ type SearchParams = Promise<Record<string, string | string[] | undefined>>;
 export default async function ProjectsPage({ searchParams }: { searchParams: SearchParams }) {
   const user = await requireUser();
   const f = parseFilters(await searchParams, { allowUser: canSeeUsers(user) });
-  const { options, result } = await withDashboardContext(user, async (ctx) => ({
+  const { options, result, wasted } = await withDashboardContext(user, async (ctx) => ({
     options: await loadFilterOptions(ctx),
     result: await getProjects(ctx, f),
+    wasted: await getWastedSpend(ctx, f),
   }));
   const unnamed = options.projects.some((p) => p.name.startsWith('sha256:'));
   const skipped = result.rows.some((r) => r.costSkipped && r.projectId);
@@ -40,14 +42,15 @@ export default async function ProjectsPage({ searchParams }: { searchParams: Sea
         <DataTable
           caption="Projects"
           columns={PROJECT_COLUMNS}
-          rows={projectTableRows(result.rows, f)}
+          rows={projectTableRows(result.rows, f, wasted.byProject)}
           rowKey="id"
           defaultSort={{ key: 'tokens', dir: 'desc' }}
           exportHref={exportUrl('projects', f)}
           emptyMessage="No projects have reported turns in this range. Try a longer range, or check that the collector is installed."
         />
         <p className="mt-3 text-xs text-zinc-500 dark:text-zinc-400">
-          Success = successful / turns with a known outcome; the unknown share is shown beside it. Cost is ≈ at API list prices.
+          Success = successful / turns with a known outcome; the unknown share is shown beside it. Cost is ≈ at API list prices. Wasted =
+          ≈ cost of failed and abandoned turns.{wasted.unsplitDays > 0 && ` ${wasted.unsplitDays} older days were rolled up before outcomes were split and are not in it.`}
         </p>
       </Card>
     </>

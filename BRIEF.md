@@ -45,7 +45,9 @@ The design is now being implemented; see README.md for the build.
 | 19 | Billing | Plans + limits (Free / Team / Business) set by super admin; no payments | brief only |
 | 20 | Hosting | All backend services **provisioned with Docker** (Compose: web, worker, migrate, postgres); official SaaS in the **EU**; self-hostable | [0010](docs/adr/0010-portable-eu-hosting.md) |
 | 21 | Data access | CSV export of every telemetry table view (RLS-scoped, audit-logged; admin tables are administration data, not telemetry, and have no CSV; the audit log has its own export); no public read API | brief only |
-| 22 | Skills & MCP | Skill uses (model-invoked vs typed `/skill`) and MCP calls per server × tool, by name; names follow the project-naming mode (hashed on the machine) | [0016](docs/adr/0016-skill-and-mcp-usage.md) |
+| 22 | Skills & MCP | Skill uses (model-invoked vs typed `/skill`) and MCP calls per server × tool, by name, plus MCP errors, denials and latency; names follow the project-naming mode (hashed on the machine) | [0016](docs/adr/0016-skill-and-mcp-usage.md) |
+| 23 | Insights | Wasted spend (≈ cost of failed / abandoned turns), skill impact (vs comparable turns), effort suggestions; rollups keep tokens and skill outcomes split by outcome | [0017](docs/adr/0017-outcome-insights.md) |
+| 24 | Runaway alerts | Turns far above the user's normal, over a ≈ cost or duration threshold, flagged by the worker after the turn ends; hourly digest to the user (+ leads in full mode, anonymous to admins otherwise); never blocks | [0018](docs/adr/0018-runaway-alerts.md) |
 
 ## 3. Scope
 
@@ -141,7 +143,9 @@ Per turn and per run: model(s), effort level, input / output / cache-read / cach
 touched (count only), lines added / removed, phase durations, outcome, summary. Also skill uses by skill
 name (split into started by the model and typed by the user as `/name`) and MCP calls by server × tool; in
 `hashed` project-naming mode these names are hashed on the machine
-([ADR-0016](docs/adr/0016-skill-and-mcp-usage.md), [brief](docs/briefs/skills-and-mcp-stats.md)).
+([ADR-0016](docs/adr/0016-skill-and-mcp-usage.md), [brief](docs/briefs/skills-and-mcp-stats.md)). Per MCP tool also
+errors, calls the user refused, and latency (total and a 5-bucket histogram); never error texts
+([brief](docs/briefs/mcp-reliability.md)).
 
 ### 5.4 Phase classification (no LLM)
 
@@ -211,6 +215,7 @@ provisional outcome and later sends a `turn_outcome` patch event.
       "tools": { "edit": 0, "bash": 0, "read": 0 }, "files_touched": 0, "lines_added": 0, "lines_removed": 0,
       "skills": { "code-review": { "model": 1, "user": 0 } },            // optional (ADR-0016)
       "mcp": { "github": { "search_code": 3 } },                         // optional (ADR-0016)
+      "mcp_stats": { "github": { "search_code": { "errors": 1, "denied": 0, "ms": 1500, "buckets": [3, 0, 0, 0, 0] } } },
       "outcome": { "status": "success", "signals": ["tests_passed"], "provisional": true },
       "phase_rules_version": 1 },
     { "event_id": "ulid", "type": "run", "turn_id": "…", "run_id": "agent-id", "parent_run_id": null,
@@ -244,13 +249,14 @@ All tenant tables carry `company_id` and are protected by RLS.
 | `machines` | company_id, user_id, machine_id, os, first/last seen |
 | `projects` | company_id, `key` (normalized remote or hash), display_name, mapped team_id |
 | `agent_sessions` | company_id, user_id, machine_id, project_id, harness, harness_version, started/ended, end_reason |
-| `turns` | company_id, team_id, user_id, `attribution` (verified/matched/unverified), session_id, project_id, harness, primary model, effort, timings, token totals, `phases_ms`, tool counts, `skills`, `mcp`, files/lines, outcome + signals, summary, phase_rules_version |
-| `runs` | turn_id, parent_run_id, agent_type, depth, model, effort, timings, tokens, phases, `skills`, `mcp`, outcome |
+| `turns` | company_id, team_id, user_id, `attribution` (verified/matched/unverified), session_id, project_id, harness, primary model, effort, timings, token totals, `phases_ms`, tool counts, `skills`, `mcp`, `mcp_stats`, files/lines, outcome + signals, summary, phase_rules_version |
+| `runs` | turn_id, parent_run_id, agent_type, depth, model, effort, timings, tokens, phases, `skills`, `mcp`, `mcp_stats`, outcome |
+| `runaway_alerts` | company, turn, team, user, project, reasons (tokens / cost / duration), tokens, ≈ cost, duration, notified_at (ADR-0018) |
 | `usage` | per run × model × effort token counts (handles mixed-model turns) |
 | `ingest_events` | event_id (unique, for de-duplication), received_at — pruned after 30 days |
 | `model_prices` | model, effective_from, input / output / cache-read / cache-write price per MTok |
 | `daily_rollups` | company, team, user (nullable after anonymization), project, harness, model, effort, day → counts, tokens, duration, phase ms, outcome counts |
-| `daily_skill_mcp_rollups` | company, team, user (nullable after anonymization), project, harness, primary model, day, kind (skill / mcp), name, tool (`''` = skill or server total) → calls, model / user calls, turns (ADR-0016) |
+| `daily_skill_mcp_rollups` | company, team, user (nullable after anonymization), project, harness, primary model, day, kind (skill / mcp), name, tool (`''` = skill or server total) → calls, model / user calls, turns, their outcome counts, MCP errors / denied / latency (ADR-0016, 0017) |
 | `budgets` | company_id, team_id / user_id, period (month), kind (tokens / cost), limit, notified_80_at, notified_100_at |
 | `audit_log` | company_id, actor, action, target, meta, at (logins, token changes, settings, exports) |
 
@@ -264,12 +270,12 @@ light / dark, responsive. Charts via Recharts, one clear chart per question.
 
 | View | Content | Chart |
 |---|---|---|
-| **Overview** | KPI tiles: turns, tokens, ≈ cost, success rate, median turn duration; budget progress bars | Stacked area: tokens over time by model |
-| **Projects** | Table: turns, tokens, ≈ cost, success rate, sparkline; drill into project page | Sparklines in table |
-| **Models & effort** | Cost, tokens, success rate, median duration per model × effort | Horizontal bars |
+| **Overview** | KPI tiles: turns, tokens, ≈ cost, success rate, median turn duration, wasted ≈ cost (share, 7-day line); budget progress bars; runaway turns | Stacked area: tokens over time by model |
+| **Projects** | Table: turns, tokens, ≈ cost, success rate, wasted ≈ cost and share, sparkline; drill into project page (with effort suggestions) | Sparklines in table |
+| **Models & effort** | Cost, tokens, success rate, median duration, wasted ≈ cost per model × effort; effort suggestions (lower effort, similar success, ≥ 20 % cheaper) | Horizontal bars |
 | **Phases** | Time split per team / project / model | 100 % stacked bars |
 | **Agents** | Sub-agent types: spawn count, token share, success rate; depth | Bars + parent → child tree on turn detail |
-| **Skills & MCP** | Skills: uses, by the model vs typed by the user, turns, distinct users (leads / admins); MCP servers that expand into their tools: calls, turns, distinct users. Turn detail lists a turn's skills and MCP calls | Stacked area: uses / calls per day |
+| **Skills & MCP** | Skills: uses, by the model vs typed by the user, turns, distinct users (leads / admins), success and cost Δ vs comparable turns (skill impact detail table); MCP servers that expand into their tools: calls, error rate, denied, median / p95 latency bucket, turns, distinct users. Turn detail lists a turn's skills and MCP calls | Stacked area: uses / calls per day |
 | **Turns explorer** | Filterable table (user*, project, model, effort, outcome, date); turn detail with run timeline and tree | Timeline (Gantt-style) |
 | **Admin** | Company: teams, members, roles, invitations, tokens, project mapping, settings, budgets, audit log. Super admin console: companies, plans, status, admin contacts only | – |
 
@@ -281,6 +287,12 @@ light / dark, responsive. Charts via Recharts, one clear chart per question.
 Monthly token or ≈cost limit per team and optionally per user. Evaluated hourly from rollups + today's
 turns. E-mail at 80 % and 100 % to company admins and the team's leads (user budgets: also the user).
 Never blocks the harness.
+
+**Runaway alerts** ([ADR-0018](docs/adr/0018-runaway-alerts.md)): after a turn ends, the worker flags it when its tokens
+exceed 3 × the user's own p99 (30 days; 20 M without enough history), its ≈ cost reaches the company threshold
+(default $20), or it ran for the company's hours (default 2) with above-normal tokens. One alert per turn; at most one
+digest per company per hour to the user, the team's leads in full mode, or an anonymous digest to admins in
+aggregates-only mode. Thresholds in Admin → Settings. Never blocks.
 
 ## 10. Plans (no payments)
 

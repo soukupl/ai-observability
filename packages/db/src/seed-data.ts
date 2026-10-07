@@ -57,6 +57,8 @@ export interface SeedTurn extends Tokens {
   skills: Record<string, { model: number; user: number }>;
   /** MCP server → tool → calls (main agent) */
   mcp: Record<string, Record<string, number>>;
+  /** MCP errors / latency per server → tool (main agent) */
+  mcpStats: McpStatsSeed;
   filesTouched: number;
   linesAdded: number;
   linesRemoved: number;
@@ -64,8 +66,10 @@ export interface SeedTurn extends Tokens {
   signals: string[];
   summary: string;
   usage: SeedUsage[];
-  runs: Array<SeedRun & { usage: SeedUsage; mcp: Record<string, Record<string, number>> }>;
+  runs: Array<SeedRun & { usage: SeedUsage; mcp: Record<string, Record<string, number>>; mcpStats: McpStatsSeed }>;
 }
+
+export type McpStatsSeed = Record<string, Record<string, { errors: number; denied: number; ms: number; buckets: number[] }>>;
 
 const SKILLS = ['code-review', 'ship-check', 'bug-fixing', 'keep-documentation', 'tdd'];
 const MCP: Record<string, string[]> = {
@@ -177,6 +181,23 @@ export function generateTurns(opts: {
     }
     return calls;
   };
+  /** Errors and latency for generated MCP calls: chrome is slow, atlassian fails now and then. */
+  const statsFor = (calls: Record<string, Record<string, number>>): McpStatsSeed => {
+    const out: McpStatsSeed = {};
+    for (const [server, tools] of Object.entries(calls)) {
+      for (const [tool, n] of Object.entries(tools)) {
+        const st = { errors: 0, denied: 0, ms: 0, buckets: [0, 0, 0, 0, 0] };
+        for (let k = 0; k < n; k++) {
+          if (su.next() < (server === 'atlassian' ? 0.15 : 0.03)) st.errors += 1;
+          const ms = server === 'claude-in-chrome' ? su.int(800, 40_000) : su.int(150, 3_000);
+          st.ms += ms;
+          st.buckets[ms < 1_000 ? 0 : ms < 5_000 ? 1 : ms < 30_000 ? 2 : ms < 120_000 ? 3 : 4]! += 1;
+        }
+        (out[server] ??= {})[tool] = st;
+      }
+    }
+    return out;
+  };
   const skillUses = (harness: string): SeedTurn['skills'] => {
     if (su.next() >= 0.35) return {};
     // Typed `/skill` commands are a Claude Code thing; Codex only records skills the agent opens.
@@ -217,7 +238,10 @@ export function generateTurns(opts: {
         phasesMs: splitPhases(r, runMs),
         outcome: r.next() < 0.85 ? 'success' : 'failed',
         usage: u,
-        mcp: mcpCalls(0.15),
+        ...(() => {
+          const mcp = mcpCalls(0.15);
+          return { mcp, mcpStats: statsFor(mcp) };
+        })(),
         ...t,
       });
     }
@@ -237,7 +261,10 @@ export function generateTurns(opts: {
       phasesMs: splitPhases(r, durationMs - runs.reduce((a, x) => a + (x.depth === 1 ? x.durationMs : 0), 0)),
       tools: { edit: r.int(0, 20), bash: r.int(0, 15), read: r.int(0, 40) },
       skills: skillUses(harness),
-      mcp: mcpCalls(0.3),
+      ...(() => {
+        const mcp = mcpCalls(0.3);
+        return { mcp, mcpStats: statsFor(mcp) };
+      })(),
       filesTouched: r.int(0, 12),
       linesAdded: added,
       linesRemoved: r.int(0, added),

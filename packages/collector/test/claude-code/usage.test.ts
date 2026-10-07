@@ -27,7 +27,11 @@ function skillSession() {
   b.toolResult(5, 'g2', '[]');
   b.assistant(6, 'm3', OPUS, u, [toolUse('k1', 'mcp__claude_ai_Slack__slack_send_message', { text: 'hi' })]);
   b.toolResult(7, 'k1', 'ok');
-  b.assistant(8, 'm4', OPUS, u, [text('done')]);
+  // a failing call (error after 40 s) and one the user refused
+  b.assistant(7.5, 'm3b', OPUS, u, [toolUse('g3', 'mcp__github__search_code', { q: 'z' }), toolUse('g4', 'mcp__github__create_pull_request', {})]);
+  b.toolResult(47.5, 'g3', 'Error: rate limited', true);
+  b.toolResult(48, 'g4', "The user doesn't want to proceed with this tool use. The tool use was rejected.", true);
+  b.assistant(49, 'm4', OPUS, u, [text('done')]);
   b.prompt(20, 't-model', '<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args></command-args>');
   b.prompt(20, 't-model-out', '<local-command-stdout>Set model to Opus</local-command-stdout>');
   b.prompt(30, 't2', 'thanks, now add a test');
@@ -49,10 +53,17 @@ describe('claude-code skill and MCP usage', () => {
     const turns = await run();
     const t1 = turns.find((t) => t.turn_id === 't1')!;
     expect(t1.skills).toEqual({ 'code-review': { model: 0, user: 1 }, 'ship-check': { model: 1, user: 0 } });
-    expect(t1.mcp).toEqual({ github: { search_code: 2 }, claude_ai_Slack: { slack_send_message: 1 } });
-    expect(t1.tools).toMatchObject({ skill: 1, mcp: 3 });
+    expect(t1.mcp).toEqual({ github: { search_code: 3, create_pull_request: 1 }, claude_ai_Slack: { slack_send_message: 1 } });
+    expect(t1.tools).toMatchObject({ skill: 1, mcp: 5 });
+    expect(t1.mcp_stats).toEqual({
+      github: {
+        search_code: { errors: 1, denied: 0, ms: 42_000, buckets: [0, 2, 0, 1, 0] }, // 1 s, 1 s, 40 s (error)
+        create_pull_request: { errors: 0, denied: 1, ms: 0, buckets: [0, 0, 0, 0, 0] },
+      },
+      claude_ai_Slack: { slack_send_message: { errors: 0, denied: 0, ms: 1000, buckets: [0, 1, 0, 0, 0] } },
+    });
     // the expansions are not activity: the turn still ends at its last assistant entry
-    expect(t1.ended_at).toBe(new Date(at(8)).toISOString());
+    expect(t1.ended_at).toBe(new Date(at(49)).toISOString());
     expect(turns.map((t) => t.turn_id)).toEqual(['t1', 't2']);
     const t2 = turns.find((t) => t.turn_id === 't2')!;
     expect(t2.skills).toBeUndefined();
@@ -64,7 +75,8 @@ describe('claude-code skill and MCP usage', () => {
     const [t1] = await run({ projectNaming: 'hashed', projectSalt: salt });
     expect(Object.keys(t1!.skills!).sort()).toEqual([hashUsageName('skill:code-review', salt), hashUsageName('skill:ship-check', salt)].sort());
     const gh = hashUsageName('mcp:github', salt);
-    expect(t1!.mcp![gh]).toEqual({ [hashUsageName('mcp:github/search_code', salt)]: 2 });
+    expect(t1!.mcp![gh]).toEqual({ [hashUsageName('mcp:github/search_code', salt)]: 3, [hashUsageName('mcp:github/create_pull_request', salt)]: 1 });
+    expect(t1!.mcp_stats![gh]![hashUsageName('mcp:github/search_code', salt)]).toMatchObject({ errors: 1 });
     expect(JSON.stringify(t1)).not.toMatch(/code-review|ship-check|github|Slack/);
   });
 });

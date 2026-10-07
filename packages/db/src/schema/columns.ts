@@ -29,6 +29,8 @@ export type ToolCounts = Partial<Record<string, number>>;
 export type SkillCounts = Record<string, { model: number; user: number }>;
 /** MCP server → tool → calls (plain or `sha256:` names). */
 export type McpCounts = Record<string, Record<string, number>>;
+/** MCP server → tool → errors / denied / latency (ms total and 5 histogram buckets). */
+export type McpStats = Record<string, Record<string, { errors: number; denied: number; ms: number; buckets: number[] }>>;
 
 /** Timing, phase, tool and outcome columns shared by turns and runs. No paths, prompts or code. */
 export const workColumns = () => ({
@@ -42,6 +44,7 @@ export const workColumns = () => ({
   tools: jsonb('tools').$type<ToolCounts>().notNull().default({}),
   skills: jsonb('skills').$type<SkillCounts>().notNull().default({}),
   mcp: jsonb('mcp').$type<McpCounts>().notNull().default({}),
+  mcpStats: jsonb('mcp_stats').$type<McpStats>().notNull().default({}),
   outcome: outcomeEnum('outcome').notNull().default('unknown'),
   outcomeSignals: jsonb('outcome_signals').$type<string[]>().notNull().default([]),
   outcomeProvisional: boolean('outcome_provisional').notNull().default(true),

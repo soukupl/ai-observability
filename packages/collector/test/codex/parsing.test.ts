@@ -169,3 +169,17 @@ describe('skill and MCP usage', () => {
     expect(acc.skills).toEqual({ 'release-notes': { model: 1, user: 0 } });
   });
 });
+
+describe('MCP results', () => {
+  it('reads McpToolCall items: error flag and exact duration, never arguments or content', () => {
+    const line = (status: string, isError: boolean, secs: number, nanos: number) =>
+      JSON.stringify({
+        timestamp: '2026-10-05T10:00:04.000Z', type: 'event_msg',
+        payload: { type: 'item_completed', item: { type: 'McpToolCall', id: 'c', server: 'github', tool: 'search_code', arguments: { q: 'secret' }, status, result: { content: [{ text: 'x' }], isError }, duration: { secs, nanos } } },
+      });
+    expect(parseRolloutLine(line('completed', false, 0, 400_000_000))).toMatchObject({ kind: 'mcp_result', server: 'github', tool: 'search_code', error: false, ms: 400 });
+    const acc = newAcc(0, 'm', 'medium');
+    for (const l of [line('completed', false, 0, 400_000_000), line('failed', true, 9, 500_000_000)]) applyItem(acc, parseRolloutLine(l)!);
+    expect(acc.mcpStats).toEqual({ github: { search_code: { errors: 1, denied: 0, ms: 9900, buckets: [1, 0, 1, 0, 0] } } });
+  });
+});

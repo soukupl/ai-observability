@@ -266,6 +266,20 @@ describe.skipIf(skipReason !== null)(skipReason ? `admin console — SKIPPED: ${
       expect(row.meta).toMatchObject({ changed: ['individualVisibility', 'projectNaming', 'retentionDays'], before: { individualVisibility: 'aggregates-only' }, after: { retentionDays: 200 } });
       await as(a, (tx) => updateSettings(tx, a, { individualVisibility: 'aggregates-only', projectNaming: 'plain', retentionDays: 395 }));
     });
+
+    it('runaway thresholds: saved within bounds, empty keeps the value, out of range refused (CHECK too)', async () => {
+      const a = acme.people.admin!;
+      const base = { individualVisibility: 'aggregates-only', projectNaming: 'plain', retentionDays: 395 };
+      expect(await as(a, (tx) => updateSettings(tx, a, { ...base, runawayCostUsd: '50', runawayHours: '3.5' }))).toMatch(/Saved: runawayCostUsd, runawayHours/);
+      expect(await as(a, (tx) => updateSettings(tx, a, { ...base, runawayCostUsd: '', runawayHours: '' }))).toBe('No changes.');
+      const [c] = await asOwner((tx) => q<{ settings: Record<string, unknown> }>(tx, sql`select settings from companies where id = ${acme.id}`));
+      expect(c!.settings).toMatchObject({ runawayCostUsd: 50, runawayHours: 3.5 });
+      await expectAdminError(as(a, (tx) => updateSettings(tx, a, { ...base, runawayCostUsd: 0.5 })), /at least \$1/);
+      await expectAdminError(as(a, (tx) => updateSettings(tx, a, { ...base, runawayHours: 100 })), /at most 72 hours/);
+      await expect(
+        asOwner((tx) => tx.execute(sql`update companies set settings = settings || '{"runawayHours": 0.1}'::jsonb where id = ${acme.id}`)),
+      ).rejects.toThrow();
+    });
   });
 
   describe('projects and budgets', () => {

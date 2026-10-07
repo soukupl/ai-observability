@@ -4,6 +4,7 @@ import type { WorkerContext } from './context.js';
 import { createBudgetsJob } from './jobs/budgets.js';
 import { createRetentionJob } from './jobs/retention.js';
 import { createRollupsJob } from './jobs/rollups.js';
+import { createRunawaysJob } from './jobs/runaways.js';
 import { loadConfig } from './lib/config.js';
 import { createSmtpMailer } from './lib/mailer.js';
 import { fileStateStore } from './lib/state.js';
@@ -27,7 +28,7 @@ const ctx: WorkerContext = {
   mailer: createSmtpMailer(config.smtp),
   now: () => new Date(),
 };
-const jobs = [createRollupsJob(ctx), createBudgetsJob(ctx), createRetentionJob(ctx)];
+const jobs = [createRollupsJob(ctx), createBudgetsJob(ctx), createRetentionJob(ctx), createRunawaysJob(ctx)];
 
 const once = parseRunOnce(process.argv.slice(2));
 if (once) {

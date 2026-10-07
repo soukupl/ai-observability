@@ -2,9 +2,9 @@ import { createHash } from 'node:crypto';
 import type { EditFingerprint } from '../../analysis/outcome.js';
 import { addPhaseTotals, attributeTime, emptyPhaseTotals, type PhaseTotals, type TimelineEntry } from '../../analysis/phases.js';
 import { mergeUsage, sumUsage, type UsageRecord } from '../../analysis/tokens.js';
-import { addMcp, addSkill, mergeMcp, mergeSkills, parseMcpTool } from '../../analysis/usage.js';
+import { addMcp, addMcpResult, addSkill, mergeMcp, mergeMcpStats, mergeSkills, parseMcpTool } from '../../analysis/usage.js';
 import { toolKey } from '../../events.js';
-import type { McpCounts, SkillCounts, UsageEntry } from '../../protocol-types.js';
+import type { McpCounts, McpStats, SkillCounts, UsageEntry } from '../../protocol-types.js';
 import type { SlimEntry, ToolResultInfo } from './transcript.js';
 
 /** Stored caps: state files stay small even for very long sessions. */
@@ -46,6 +46,8 @@ export interface Agg {
   skills: SkillCounts;
   /** MCP calls by plain server → tool name. Absent in older state. */
   mcp: McpCounts;
+  /** MCP errors / denials / latency by plain server → tool name. Absent in older state. */
+  mcpStats: McpStats;
   /** distinct raw tool names in first-use order (digest input) */
   toolNames: string[];
   /** hashed paths of successfully edited files */
@@ -76,6 +78,7 @@ export function emptyAgg(at: number): Agg {
     tools: {},
     skills: {},
     mcp: {},
+    mcpStats: {},
     toolNames: [],
     fileKeys: [],
     linesAdded: 0,
@@ -111,6 +114,8 @@ export function analyzeEntries(entries: readonly SlimEntry[], opts: AnalyzeOptio
   const toolCalls: string[] = [];
   const pendingEdits = new Map<string, { filePath: string; estimate: Agg['fp'] | null; added: number; removed: number }>();
   const checks = new Map<string, CheckResult['kind']>();
+  /** open MCP calls by tool_use id, paired with their result for errors and latency */
+  const mcpCalls = new Map<string, { server: string; tool: string; at: number }>();
   const files = new Set<string>();
   const fpAdded: string[] = [];
   const fpRemoved: string[] = [];
@@ -152,7 +157,10 @@ export function analyzeEntries(entries: readonly SlimEntry[], opts: AnalyzeOptio
         toolNames.push(b.name);
         if (b.skill) addSkill(agg.skills, b.skill, 'model');
         const mcp = parseMcpTool(b.name);
-        if (mcp) addMcp(agg.mcp, mcp.server, mcp.tool);
+        if (mcp) {
+          addMcp(agg.mcp, mcp.server, mcp.tool);
+          if (b.id) mcpCalls.set(b.id, { ...mcp, at: e.at });
+        }
         if (b.edit && b.filePath) pendingEdits.set(b.id, { filePath: b.filePath, estimate: b.edit.fp, added: b.edit.added, removed: b.edit.removed });
         if (b.phase === 'testing' || b.phase === 'validating') checks.set(b.id, b.phase);
         if (b.agent) agg.agentCalls[b.id] = { type: b.agent.type, background: b.agent.background, completed: false };
@@ -162,11 +170,16 @@ export function analyzeEntries(entries: readonly SlimEntry[], opts: AnalyzeOptio
     if (e.userInterrupt) agg.interrupted = true;
     for (const r of e.results) {
       timeline.push({ at: e.at, type: 'tool_result', id: r.id });
-      applyResult(r);
+      applyResult(r, e.at);
     }
   }
 
-  function applyResult(r: ToolResultInfo) {
+  function applyResult(r: ToolResultInfo, at: number) {
+    const call = mcpCalls.get(r.id);
+    if (call) {
+      addMcpResult(agg.mcpStats, call.server, call.tool, { error: r.isError, denied: r.denied, ms: at - call.at });
+      mcpCalls.delete(r.id);
+    }
     const edit = pendingEdits.get(r.id);
     if (edit && !r.isError) {
       const exact = r.edit;
@@ -183,8 +196,8 @@ export function analyzeEntries(entries: readonly SlimEntry[], opts: AnalyzeOptio
     const kind = checks.get(r.id);
     if (kind && r.exitCode !== null && !r.interrupted) agg.lastCheck = { kind, exitCode: r.exitCode };
     if (r.workflowRunId) agg.agentCalls[workflowKey(r.workflowRunId)] = { type: 'workflow', background: true, completed: false };
-    const call = agg.agentCalls[r.id];
-    if (call) call.completed = !r.isError && r.agentStatus !== 'async_launched' && !call.background;
+    const agent = agg.agentCalls[r.id];
+    if (agent) agent.completed = !r.isError && r.agentStatus !== 'async_launched' && !agent.background;
   }
 
   agg.endedAt = end;
@@ -212,6 +225,7 @@ export function mergeAgg(a: Agg, b: Agg): Agg {
     tools,
     skills: mergeSkills(a.skills, b.skills),
     mcp: mergeMcp(a.mcp, b.mcp),
+    mcpStats: mergeMcpStats(a.mcpStats, b.mcpStats),
     toolNames: [...new Set([...a.toolNames, ...b.toolNames])].slice(0, 30),
     fileKeys: uniqCap([...a.fileKeys, ...b.fileKeys], MAX_FILE_KEYS),
     linesAdded: a.linesAdded + b.linesAdded,

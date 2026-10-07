@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { companies, DEFAULT_COMPANY_SETTINGS, type CompanySettings, type Plan, type Tx } from '@ai-obs/db';
+import { companies, DEFAULT_COMPANY_SETTINGS, RUNAWAY_BOUNDS, type CompanySettings, type Plan, type Tx } from '@ai-obs/db';
 import { z } from 'zod';
 import { rows } from '../queries/sqlutil';
 import { audit } from './audit';
@@ -54,16 +54,33 @@ export async function companyCounts(tx: Tx, companyId: string): Promise<CompanyC
   };
 }
 
+/** An optional numeric form field: empty or missing = not changed. */
+const optionalNumber = (n: z.ZodType<number, unknown>) => z.preprocess((v) => (v === '' || v === null ? undefined : v), n.optional());
+
 export const settingsInput = z.object({
   individualVisibility: z.enum(['aggregates-only', 'full']),
   projectNaming: z.enum(['plain', 'hashed']),
   retentionDays: z.coerce.number().int('whole days only'),
+  /** runaway alert thresholds (docs/briefs/runaway-alerts.md) */
+  runawayCostUsd: optionalNumber(
+    z.coerce
+      .number()
+      .min(RUNAWAY_BOUNDS.costUsd[0], `at least $${RUNAWAY_BOUNDS.costUsd[0]}`)
+      .max(RUNAWAY_BOUNDS.costUsd[1], `at most $${RUNAWAY_BOUNDS.costUsd[1]}`),
+  ),
+  runawayHours: optionalNumber(
+    z.coerce
+      .number()
+      .min(RUNAWAY_BOUNDS.hours[0], `at least ${RUNAWAY_BOUNDS.hours[0]} hours`)
+      .max(RUNAWAY_BOUNDS.hours[1], `at most ${RUNAWAY_BOUNDS.hours[1]} hours`),
+  ),
 });
 
 /** Company settings (BRIEF §4, ADR-0008, ADR-0012). Audit meta records old and new values. */
 export async function updateSettings(tx: Tx, actor: Actor, input: unknown): Promise<string> {
   ensure(isAdmin(actor), 'Only company admins can change settings.');
-  const next = parse(settingsInput, input);
+  const parsed = parse(settingsInput, input);
+  const next = Object.fromEntries(Object.entries(parsed).filter(([, v]) => v !== undefined)) as Partial<CompanySettings> & typeof parsed;
   const company = await loadCompany(tx, actor.companyId, true);
   const err = retentionError(company.plan, next.retentionDays);
   if (err) throw new AdminError(err);

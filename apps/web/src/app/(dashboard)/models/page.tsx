@@ -1,18 +1,21 @@
 import Link from 'next/link';
 import { Card } from '@/components/Card';
 import { DataTable, type Column } from '@/components/DataTable';
+import { EffortSuggestions } from '@/components/EffortSuggestions';
 import { HBarChart } from '@/components/charts/HBarChart';
 import { exportUrl } from '@/components/export-url';
 import { FilterBar } from '@/components/FilterBar';
 import { PageHeader } from '@/components/PageHeader';
 import { requireUser } from '@/lib/auth/session';
 import { parseFilters } from '@/lib/filters';
+import { getEffortAdvice } from '@/lib/queries/effort';
 import { loadFilterOptions } from '@/lib/queries/lookups';
 import { getModelsEffort } from '@/lib/queries/models';
 import { withDashboardContext } from '@/lib/queries/page';
 import { addDays } from '@/lib/queries/range';
 import { canSeeUsers } from '@/lib/queries/scope';
-import { chartData, parseGrouping, PRIMARY_TURNS_HINT, toTableRows, type Grouping } from './group';
+import { getWastedSpend } from '@/lib/queries/wasted';
+import { chartData, parseGrouping, PRIMARY_TURNS_HINT, toTableRows, withWasted, type Grouping } from './group';
 
 export const metadata = { title: 'Models & effort' };
 
@@ -40,11 +43,13 @@ export default async function ModelsPage({ searchParams }: { searchParams: Searc
   const sp = await searchParams;
   const filters = parseFilters(sp, { allowUser: canSeeUsers(user) });
   const group = parseGrouping(sp.group);
-  const { options, result } = await withDashboardContext(user, async (ctx) => ({
+  const { options, result, advice, wasted } = await withDashboardContext(user, async (ctx) => ({
     options: await loadFilterOptions(ctx),
     result: await getModelsEffort(ctx, filters),
+    advice: await getEffortAdvice(ctx, filters),
+    wasted: await getWastedSpend(ctx, filters),
   }));
-  const rows = toTableRows(result.rows, group);
+  const rows = withWasted(toTableRows(result.rows, group), wasted.byModel, group);
 
   const columns: Column[] = [
     { key: 'model', header: 'Model', kind: 'text' },
@@ -56,6 +61,8 @@ export default async function ModelsPage({ searchParams }: { searchParams: Searc
     { key: 'cacheWrite', header: 'Cache write', kind: 'tokens', align: 'right' },
     { key: 'total', header: 'Total', kind: 'tokens', align: 'right' },
     { key: 'cost', header: '≈ Cost', kind: 'cost', align: 'right', hint: '≈ at API list prices; n/a when the model has no price.' },
+    { key: 'wasted', header: 'Wasted ≈', kind: 'cost', align: 'right', hint: '≈ Cost of failed and abandoned turns (tokens of this model × effort).' },
+    { key: 'wastedShare', header: 'Wasted share', kind: 'percent', align: 'right', hint: 'Wasted ≈ cost / ≈ cost.' },
     { key: 'successRate', header: 'Success', kind: 'percent', align: 'right', hint: 'Successful / turns with a known outcome.' },
     { key: 'unknownShare', header: 'Unknown', kind: 'percent', align: 'right', hint: 'Share of turns with unknown outcome (not counted as failures).' },
     { key: 'medianDurationMs', header: 'Median time', kind: 'duration', align: 'right', hint: result.medianAvailable ? 'Median turn duration.' : 'Median needs raw turns (older than your retention window are gone).' },
@@ -80,6 +87,7 @@ export default async function ModelsPage({ searchParams }: { searchParams: Searc
           {tokenBars.length ? <HBarChart data={tokenBars} valueFormat="tokens" labelWidth={group === 'model' ? 130 : 170} ariaLabel="Tokens by model" /> : <p className="py-6 text-center text-sm text-zinc-500">No usage.</p>}
         </Card>
       </div>
+      <EffortSuggestions advice={advice} />
       <Card title={group === 'model' ? 'By model' : 'By model × effort'}>
         <DataTable
           columns={columns}

@@ -88,6 +88,7 @@ export interface TurnSpec {
   skills?: Record<string, { model: number; user: number }>;
   mcp?: Record<string, Record<string, number>>;
   runMcp?: Record<string, Record<string, number>>;
+  mcpStats?: Record<string, Record<string, { errors: number; denied: number; ms: number; buckets: number[] }>>;
 }
 
 /** Inserts a turn with one session, one run per extra usage entry and matching usage rows. */
@@ -116,7 +117,7 @@ export async function addTurn(db: Database, companyId: string, s: TurnSpec): Pro
         startedAt: started, endedAt: new Date(started.getTime() + 60_000), durationMs: 60_000,
         inputTokens: sum(2), outputTokens: sum(3), cacheReadTokens: sum(4), cacheWriteTokens: sum(5), requests: s.usage.length,
         phasesMs: { thinking: 40_000, coding: 20_000 }, outcome: s.outcome ?? 'success', createdAt: stamp, updatedAt: stamp,
-        skills: s.skills ?? {}, mcp: s.mcp ?? {},
+        skills: s.skills ?? {}, mcp: s.mcp ?? {}, mcpStats: s.mcpStats ?? {},
       })
       .returning({ id: turns.id });
     for (const [i, u] of s.usage.entries()) {

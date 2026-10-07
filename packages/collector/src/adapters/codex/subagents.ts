@@ -139,6 +139,7 @@ export function resolveChildren(input: {
         tools: toolCounts(acc.tools),
         skills: acc.skills,
         mcp: mcpFromTools(acc.tools),
+        mcpStats: acc.mcpStats,
         outcome: provisionalOutcome({ stopFailure: acc.error, interrupted: acc.interrupted, lastCheck: acc.lastCheck }),
       }),
     );

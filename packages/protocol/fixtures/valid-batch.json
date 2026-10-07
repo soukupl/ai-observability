@@ -31,6 +31,7 @@
       "tools": { "edit": 6, "bash": 4, "read": 11, "skill": 1, "mcp": 4 },
       "skills": { "code-review": { "model": 1, "user": 0 }, "ship-check": { "model": 0, "user": 1 } },
       "mcp": { "github": { "create_pull_request": 1, "search_code": 3 } },
+      "mcp_stats": { "github": { "create_pull_request": { "errors": 0, "denied": 0, "ms": 2300, "buckets": [0, 1, 0, 0, 0] }, "search_code": { "errors": 1, "denied": 0, "ms": 1500, "buckets": [3, 0, 0, 0, 0] } } },
       "files_touched": 4,
       "lines_added": 120,
       "lines_removed": 18,

@@ -185,6 +185,8 @@ export async function seedCompany(owner: Database, slug: string, mode: Fixture['
           // skill / MCP use: code-review every 4th turn (typed every 8th), github MCP every 3rd
           skills: n % 4 === 0 ? { 'code-review': { model: 1, user: n % 8 === 0 ? 1 : 0 } } : {},
           mcp: n % 3 === 0 ? { github: { search_code: 2 } } : {},
+          // one of the two search_code calls fails every 6th turn; both timed (0.5 s and 2 s)
+          mcpStats: n % 3 === 0 ? { github: { search_code: { errors: n % 6 === 0 ? 1 : 0, denied: 0, ms: 2500, buckets: [1, 1, 0, 0, 0] } } } : {},
         });
         const runModel = opts.mixed ? SUB_AGENT_MODEL : model;
         const runEffort = opts.mixed ? null : effort;
@@ -201,6 +203,7 @@ export async function seedCompany(owner: Database, slug: string, mode: Fixture['
           inputTokens: sub.input, outputTokens: sub.output, cacheReadTokens: sub.cacheRead, reasoningTokens: sub.reasoning,
           phasesMs: { exploring: durationMs / 2 }, outcome: 'success',
           mcp: n % 2 === 0 ? { github: { get_file: 1 }, docs: { search: 1 } } : {},
+          mcpStats: n % 2 === 0 ? { github: { get_file: { errors: 0, denied: 1, ms: 0, buckets: [0, 0, 0, 0, 0] } }, docs: { search: { errors: 0, denied: 0, ms: 40_000, buckets: [0, 0, 0, 1, 0] } } } : {},
         });
         usageOf(sub, { turnId, runId });
         if (deep) {
@@ -221,6 +224,11 @@ export async function seedCompany(owner: Database, slug: string, mode: Fixture['
       await tx.insert(runs).values(runRows.slice(i, i + 200));
     }
     for (let i = 0; i < usageRows.length; i += 200) await tx.insert(usage).values(usageRows.slice(i, i + 200));
+    // every 5th turn was flagged as a runaway (written by the worker in real life)
+    await tx.execute(sql`insert into runaway_alerts (company_id, turn_id, team_id, user_id, project_id, harness, model, started_at, reasons, tokens, cost_usd, duration_ms)
+      select t.company_id, t.id, t.team_id, t.user_id, t.project_id, t.harness, t.model, t.started_at, '["tokens"]'::jsonb,
+        t.input_tokens + t.output_tokens + t.cache_read_tokens + t.cache_write_tokens, 1.5, t.duration_ms
+      from turns t where t.company_id = ${companyId}::uuid and (substring(t.external_id from 3))::int % 5 = 0`);
     // Budgets: a team token budget and a per-user budget for m1.
     await tx.insert(budgets).values([
       { companyId, teamId: fx.teams.t1!, kind: 'tokens', limitValue: '500000' },

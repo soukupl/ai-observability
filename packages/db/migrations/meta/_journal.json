@@ -43,6 +43,41 @@
       "when": 1791326330236,
       "tag": "0005_skills_mcp",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1791331269866,
+      "tag": "0006_effort_advisor",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1791331431813,
+      "tag": "0007_outcome_split_rollups",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1791331681418,
+      "tag": "0008_skill_impact",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1791331992605,
+      "tag": "0009_mcp_reliability",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1791332252769,
+      "tag": "0010_runaway_alerts",
+      "breakpoints": true
     }
   ]
 }

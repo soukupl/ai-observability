@@ -85,6 +85,7 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
         summary: 'Added JWT refresh to auth middleware',
         skills: { 'code-review': { model: 1, user: 0 }, 'ship-check': { model: 0, user: 1 } },
         mcp: { github: { create_pull_request: 1, search_code: 3 } },
+        mcp_stats: { github: { search_code: { errors: 1, denied: 0, ms: 1500, buckets: [3, 0, 0, 0, 0] }, create_pull_request: { errors: 0, denied: 0, ms: 2300, buckets: [0, 1, 0, 0, 0] } } },
       });
 
       const [r] = await q(sql`select *, input_tokens::int from runs where external_id = 'agent-a1'`);

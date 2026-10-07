@@ -99,4 +99,15 @@ describe.skipIf(skip !== null)(skip ? `seed rollups - SKIPPED: ${skip}` : 'seed 
     expect(raw.length).toBeGreaterThan(0);
     expect(roll).toEqual(raw);
   });
+
+  it('wasted / unknown tokens per day × usage model equal the usage rows of failed / abandoned / unknown turns', async () => {
+    const raw = await q(sql`select ${dayOf} as day, u.model,
+        coalesce(sum(u.input_tokens) filter (where t.outcome in ('failed', 'abandoned')), 0)::bigint::text w,
+        coalesce(sum(u.input_tokens) filter (where t.outcome = 'unknown'), 0)::bigint::text unk
+      from usage u join turns t on t.id = u.turn_id group by 1, 2 order by 1, 2`);
+    const roll = await q(sql`select day::text as day, model, sum(wasted_input_tokens)::bigint::text w, sum(unknown_input_tokens)::bigint::text unk
+      from daily_rollups group by 1, 2 having sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens + requests) > 0
+      order by 1, 2`);
+    expect(roll).toEqual(raw);
+  });
 });

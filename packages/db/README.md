@@ -15,6 +15,11 @@ Design: [BRIEF §7](../../BRIEF.md), [ADR-0006](../../docs/adr/0006-tenant-isola
 | `migrations/0003_price_fallback_turn_list_order.sql` | Hand-written: `estimate_cost_usd()` earliest-price fallback; `agg_turn_list()` ordered by `started_at desc, id` |
 | `migrations/0004_auth_invites_salt_hardening.sql` | Generated `companies.project_salt`, `pending_turn_patches.user_id`; hand-written review fixes: `auth_pending_invitations`, `auth_accept_invitation(email, name, invitation_id)` (old 2-arg form dropped, plan capacity checked), `lookup_ingest_token` needs a live membership for user tokens, `ingest_match_user_by_email(email, team)`, parked-patch ownership in `ingest_apply_pending_patch`, `ingest_project_salt()`, `platform_email_in_use()`, platform audit policy narrowed to `platform.%` |
 | `migrations/0005_skills_mcp.sql` | Generated `turns.skills` / `turns.mcp`, `runs.skills` / `runs.mcp`, `daily_skill_mcp_rollups`; hand-written: its RLS (same policies as `daily_rollups`), `GRANT UPDATE (skills, mcp)` to `app_ingest`, `agg_skill_mcp()` and `agg_skill_mcp_rollups()` (ADR-0016) |
+| `migrations/0006_effort_advisor.sql` | Hand-written `agg_effort_cells()` (ADR-0017) |
+| `migrations/0007_outcome_split_rollups.sql` | Generated `wasted_*` / `unknown_*` token columns + `outcome_split` on `daily_rollups`, outcome counts + `outcome_split` on `daily_skill_mcp_rollups`; hand-written re-queue of every retained day (`turns.updated_at`), `agg_wasted()`, `agg_wasted_rollups()` |
+| `migrations/0008_skill_impact.sql` | Hand-written `agg_skill_impact()`, `agg_skill_impact_rollups()` |
+| `migrations/0009_mcp_reliability.sql` | Generated `turns.mcp_stats` / `runs.mcp_stats`, `errors` / `denied` / `latency_ms` / `lat0…lat4` on `daily_skill_mcp_rollups`; hand-written `GRANT UPDATE (mcp_stats)` to `app_ingest`, `agg_mcp_reliability()`, `agg_mcp_reliability_rollups()` |
+| `migrations/0010_runaway_alerts.sql` | Generated `runaway_alerts` and the runaway keys in `companies_settings_valid`; hand-written RLS (like turns), worker grants, `agg_runaways()` (ADR-0018) |
 | `src/connections.ts` | `dbFor(kind)` — one pool per service role |
 | `src/rls.ts` | `withRlsContext()` (dashboard), `withIngestContext()` (ingest) |
 | `src/migrate.ts` | Migrate entry point (Docker `migrate` service, `pnpm db:migrate`) |
@@ -75,6 +80,15 @@ Design: [BRIEF §7](../../BRIEF.md), [ADR-0006](../../docs/adr/0006-tenant-isola
   runs**: a skill has one row (`tool = ''`); an MCP server has a total row (`tool = ''`) plus one row per tool. `turns` is
   the number of distinct turns in the group, so summing it over groups stays exact, but a server row is not the sum of its
   tool rows. Names are as ingested (plain or `sha256:`).
+- **Outcome split (ADR-0017, migration 0007).** `daily_rollups` also keeps the tokens of turns whose outcome is failed
+  / abandoned (`wasted_*`) or unknown (`unknown_*`), by the usage row's model × effort like the other token columns;
+  `daily_skill_mcp_rollups` keeps the outcome counts of the turns in each row. Rows the worker (or seed) writes have
+  `outcome_split = true`; rows from before 0007 on days whose raw turns are gone stay `false`, and the views exclude
+  them from wasted spend and skill impact (and say so). MCP rows also carry `errors`, `denied`, `latency_ms` and the
+  latency histogram `lat0`…`lat4` (migration 0009).
+- **Runaway alerts (ADR-0018)** are rows of `runaway_alerts`, one per turn (unique per company × turn), written by
+  the worker's `runaways` job and deleted with their turn or user. Thresholds come from `companies.settings`
+  (`runawayCostUsd`, `runawayHours`; CHECK-constrained, defaults `RUNAWAY_DEFAULTS`).
 - Privacy: there are no columns for prompts, code, diffs or file paths. A CHECK constraint rejects
   project keys that look like local paths. Summaries are at most 140 characters.
 - Timestamps are `timestamptz`. The aggregate functions group by UTC day.

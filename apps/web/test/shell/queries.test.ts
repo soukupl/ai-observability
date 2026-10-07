@@ -5,14 +5,19 @@ import {
   buildExportTable,
   canSeeUsers,
   getAgents,
+  getEffortAdvice,
+  getEffortCells,
   getBudgetProgress,
   getKpis,
   getModelsEffort,
   getPhases,
   getProjects,
+  getRunaways,
+  getSkillImpact,
   getSkillsMcp,
   getTokenSeries,
   getTurnDetail,
+  getWastedSpend,
   listTurns,
   loadFilterOptions,
   usesAggregateFunctions,
@@ -400,6 +405,79 @@ describe.skipIf(skipReason !== null)(skipReason ? `dashboard queries - SKIPPED: 
     });
   });
 
+  describe('wasted spend', () => {
+    const usd = (v: { usd: number | null }) => Math.round((v.usd ?? 0) * 1e6) / 1e6;
+
+    it('equals the ≈ cost of failed and abandoned turns; parts add up to the total', async () => {
+      const w = await run(B, 'admin', (ctx) => getWastedSpend({ ...ctx, forceSource: 'raw' }, R30));
+      const listed = await run(B, 'admin', async (ctx) => {
+        const failed = await listTurns(ctx, R30, { outcome: 'failed', pageSize: 500 });
+        const abandoned = await listTurns(ctx, R30, { outcome: 'abandoned', pageSize: 500 });
+        return [...failed.rows, ...abandoned.rows].reduce((a, r) => a + (r.cost.usd ?? 0), 0);
+      });
+      expect(usd(w.wasted)).toBeCloseTo(listed, 4);
+      expect(w.wasted.usd).toBeGreaterThan(0);
+      expect(w.share).toBeGreaterThan(0);
+      expect(w.share).toBeLessThan(1);
+      const sum = (m: typeof w.byProject) => [...m.values()].reduce((a, p) => a + (p.wasted.usd ?? 0), 0);
+      expect(sum(w.byProject)).toBeCloseTo(w.wasted.usd!, 6);
+      expect(sum(w.byModel)).toBeCloseTo(w.wasted.usd!, 6);
+      expect(w.daily.reduce((a, d) => a + d.usd, 0)).toBeCloseTo(w.wasted.usd!, 6);
+      expect(w.unclassified.usd).toBeGreaterThan(0);
+    });
+
+    it('raw = rollup = aggregate path, mixed-model turns included', async () => {
+      for (const [full, agg] of [[B, A], [C, D]] as const) {
+        const raw = await run(full, 'admin', (ctx) => getWastedSpend({ ...ctx, forceSource: 'raw' }, R30));
+        const roll = await run(full, 'admin', (ctx) => getWastedSpend({ ...ctx, forceSource: 'rollup' }, R30));
+        const aggRaw = await run(agg, 'admin', (ctx) => getWastedSpend({ ...ctx, forceSource: 'raw' }, R30));
+        const aggRoll = await run(agg, 'admin', (ctx) => getWastedSpend({ ...ctx, forceSource: 'rollup' }, R30));
+        const key = (r: typeof raw) => canon({ total: r.total, wasted: r.wasted, unclassified: r.unclassified, share: r.share, daily: r.daily, models: [...r.byModel].sort() });
+        expect(key(roll)).toEqual(key(raw));
+        expect(key(aggRaw)).toEqual(key(raw));
+        expect(key(aggRoll)).toEqual(key(raw));
+        expect(roll.unsplitDays).toBe(0);
+      }
+    });
+  });
+
+  describe('effort advisor', () => {
+    it('cells: direct = aggregate path, counts match the turns, medians are priced per usage model', async () => {
+      const direct = await run(B, 'admin', (ctx) => getEffortCells(ctx, R30));
+      const agg = await run(A, 'admin', (ctx) => getEffortCells(ctx, R30));
+      // project ids differ between the two companies: compare the cells without them, in a stable order
+      const strip = (cells: typeof direct) => cells.map(({ projectId: _p, ...c }) => JSON.stringify(canon(c))).sort();
+      expect(strip(agg)).toEqual(strip(direct));
+      const k = await kpis(B, 'admin', R30);
+      expect(direct.reduce((a, c) => a + c.turns, 0)).toBe(k.turns);
+      expect(direct.find((c) => c.model === 'mystery-1')?.medianCostUsd ?? null).toBeNull(); // unpriced model
+      expect(direct.filter((c) => c.model !== 'mystery-1').every((c) => (c.medianCostUsd ?? 0) > 0)).toBe(true);
+    });
+
+    it('is unavailable on rollup ranges and ignores the effort filter', async () => {
+      const long = await run(B, 'admin', (ctx) => getEffortAdvice(ctx, f({ range: '90d' })));
+      expect(long.available).toBe(false);
+      const withEffort = await run(B, 'admin', (ctx) => getEffortAdvice(ctx, f({ range: '30d', effort: 'high' })));
+      expect(withEffort.available).toBe(true);
+      expect(withEffort.ignoredFilters).toEqual(['effort']);
+    });
+  });
+
+  describe('runaways', () => {
+    it('admins see every runaway (direct = aggregate path), members only their own', async () => {
+      const full = await run(B, 'admin', (ctx) => getRunaways(ctx, R30, 500));
+      const agg = await run(A, 'admin', (ctx) => getRunaways(ctx, R30, 500));
+      const strip = (r: typeof full) => r.rows.map(({ turnId: _t, startedMs, tokens, durationMs, reasons, costUsd }) => ({ startedMs, tokens, durationMs, reasons, costUsd }));
+      expect(full.rows.length).toBeGreaterThan(5);
+      expect(strip(agg)).toEqual(strip(full));
+      const mine = await run(A, 'm1', (ctx) => getRunaways(ctx, R30, 500));
+      expect(mine.rows.length).toBeGreaterThan(0);
+      expect(mine.rows.length).toBeLessThan(full.rows.length);
+      expect(mine.rows.every((r) => r.isMine)).toBe(true);
+      expect((await run(A, 'admin', (ctx) => getRunaways(ctx, R30))).rows).toHaveLength(10); // default limit
+    });
+  });
+
   describe('skills & MCP', () => {
     it('raw = rollup = aggregate path; a server counts each turn once; sub-agent calls included', async () => {
       const raw = await run(B, 'admin', (ctx) => getSkillsMcp({ ...ctx, forceSource: 'raw' }, R30));
@@ -410,6 +488,17 @@ describe.skipIf(skipReason !== null)(skipReason ? `dashboard queries - SKIPPED: 
       expect(body(roll)).toEqual(body(raw));
       expect(body(agg)).toEqual(body(raw));
       expect(body(aggRoll)).toEqual(body(raw));
+
+      // MCP reliability: errors only on search_code, denials only on get_file, docs slow (30–120 s bucket)
+      const gh = raw.servers.find((s) => s.name === 'github')!;
+      const search = gh.tools.find((t) => t.tool === 'search_code')!;
+      const getFile = gh.tools.find((t) => t.tool === 'get_file')!;
+      expect(search.errors).toBeGreaterThan(0);
+      expect(search.buckets[0]).toBe(search.buckets[1]);
+      expect(getFile).toMatchObject({ errors: 0, latencyMs: 0 });
+      expect(getFile.denied).toBe(getFile.calls);
+      expect(gh).toMatchObject({ errors: search.errors, denied: getFile.denied, latencyMs: search.latencyMs });
+      expect(raw.servers.find((s) => s.name === 'docs')!.buckets).toEqual([0, 0, 0, raw.servers.find((s) => s.name === 'docs')!.calls, 0]);
 
       const [skill] = raw.skills;
       expect(skill).toMatchObject({ name: 'code-review' });
@@ -422,6 +511,27 @@ describe.skipIf(skipReason !== null)(skipReason ? `dashboard queries - SKIPPED: 
       // turns with both search_code (turn) and get_file (run) count once for the server
       expect(github.turns).toBeLessThan(github.tools.reduce((a, t) => a + t.turns, 0));
       expect(raw.days.filter((d) => d.kind === 'skill').reduce((a, d) => a + d.calls, 0)).toBe(skill!.calls);
+    });
+
+    it('skill impact: direct = aggregate path on raw and rollup ranges; rollup compares success only', async () => {
+      const raw = await run(B, 'admin', (ctx) => getSkillImpact({ ...ctx, forceSource: 'raw' }, R30));
+      const aggRaw = await run(A, 'admin', (ctx) => getSkillImpact({ ...ctx, forceSource: 'raw' }, R30));
+      const roll = await run(B, 'admin', (ctx) => getSkillImpact({ ...ctx, forceSource: 'rollup' }, R30));
+      const aggRoll = await run(A, 'admin', (ctx) => getSkillImpact({ ...ctx, forceSource: 'rollup' }, R30));
+      expect(canon(aggRaw.impacts)).toEqual(canon(raw.impacts));
+      expect(canon(aggRoll.impacts)).toEqual(canon(roll.impacts));
+      const pick = (r: typeof raw) => r.impacts.map((i) => [i.skill, i.turns, i.comparableTurns, i.successRate, i.comparableSuccessRate]);
+      expect(canon(pick(roll))).toEqual(canon(pick(raw)));
+      expect(roll.mediansAvailable).toBe(false);
+      expect(roll.impacts.every((i) => i.cost === null)).toBe(true);
+
+      const [cr] = raw.impacts;
+      expect(cr!.skill).toBe('code-review');
+      // every code-review turn has comparable turns except the one on the unpriced mystery-1 model (its own cell)
+      const skills = await run(B, 'admin', (ctx) => getSkillsMcp({ ...ctx, forceSource: 'raw' }, R30));
+      expect(cr!.turns).toBe(skills.skills[0]!.turns - 1);
+      expect(cr!.enough).toBe(true);
+      expect(cr!.cost).not.toBeNull();
     });
 
     it('a member sees only their own use; a lead in aggregates-only mode only their team', async () => {
@@ -451,6 +561,7 @@ describe.skipIf(skipReason !== null)(skipReason ? `dashboard queries - SKIPPED: 
           phases: await getPhases(ctx, R30, 'team'),
           agents: await getAgents(ctx, R30),
           skillsMcp: await getSkillsMcp(ctx, R30),
+          runaways: await getRunaways(ctx, R30, 500),
           turns,
           detail: await getTurnDetail(ctx, someone.id, someone.startedMs),
           budgets: await getBudgetProgress(ctx),

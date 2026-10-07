@@ -4,8 +4,11 @@ import {
   MAX_MCP_TOOLS_PER_SERVER,
   MAX_SKILLS_PER_EVENT,
   MAX_USAGE_NAME_LENGTH,
+  MCP_LATENCY_BUCKETS_MS,
   type IngestEvent,
   type McpCounts,
+  type McpStats,
+  type McpToolStats,
   type ProjectNamingMode,
   type SkillCounts,
   type SkillSource,
@@ -146,11 +149,12 @@ export function hashMcp(mcp: McpCounts, salt: string | null | undefined): McpCou
 export function applyUsageNaming(events: readonly IngestEvent[], naming: ProjectNamingMode, salt: string | null | undefined): IngestEvent[] {
   if (naming !== 'hashed') return [...events];
   return events.map((e) => {
-    if ((e.type !== 'turn' && e.type !== 'run') || (!e.skills && !e.mcp)) return e;
+    if ((e.type !== 'turn' && e.type !== 'run') || (!e.skills && !e.mcp && !e.mcp_stats)) return e;
     return {
       ...e,
       ...(e.skills ? { skills: hashSkills(e.skills, salt) } : {}),
       ...(e.mcp ? { mcp: hashMcp(e.mcp, salt) } : {}),
+      ...(e.mcp_stats ? { mcp_stats: hashMcpStats(e.mcp_stats, salt) } : {}),
     };
   });
 }
@@ -164,3 +168,88 @@ export function skillReadBy(command: string): string | null {
   const m = /([A-Za-z0-9._:-]+)[\\/]SKILL\.md\b/.exec(command);
   return m ? m[1]! : null;
 }
+
+// ------------------------------------------------------------------ MCP reliability (errors, denials, latency)
+
+const emptyStats = (): McpToolStats => ({ errors: 0, denied: 0, ms: 0, buckets: [0, 0, 0, 0, 0] });
+
+/** Index of the latency bucket for a call that took `ms`. */
+export function latencyBucket(ms: number): number {
+  const i = MCP_LATENCY_BUCKETS_MS.findIndex((b) => ms < b);
+  return i < 0 ? MCP_LATENCY_BUCKETS_MS.length : i;
+}
+
+/**
+ * Records the result of one MCP call. A denied call (the user refused it) is counted as denied only, not as an
+ * error; its wall time is not latency. Every other result with a known duration adds it to the histogram.
+ */
+export function addMcpResult(stats: McpStats, server: string, tool: string, r: { error: boolean; denied: boolean; ms: number | null }): void {
+  const s = usageName(server);
+  const t = usageName(tool);
+  if (!s || !t) return;
+  const cur = ((stats[s] ??= {})[t] ??= emptyStats());
+  if (r.denied) {
+    cur.denied += 1;
+    return;
+  }
+  if (r.error) cur.errors += 1;
+  if (r.ms === null) return; // no timing known: an error still counts, latency does not
+  const ms = Math.max(0, Math.round(r.ms));
+  cur.ms += ms;
+  cur.buckets[latencyBucket(ms)]! += 1;
+}
+
+function addStats(into: McpToolStats, x: McpToolStats): void {
+  into.errors += int(x.errors);
+  into.denied += int(x.denied);
+  into.ms += int(x.ms);
+  for (let i = 0; i < into.buckets.length; i++) into.buckets[i]! += int(x.buckets?.[i] ?? 0);
+}
+
+export function mergeMcpStats(a: McpStats | undefined, b: McpStats | undefined): McpStats {
+  const out: McpStats = {};
+  for (const src of [a, b]) {
+    for (const [server, tools] of Object.entries(src ?? {})) {
+      for (const [tool, st] of Object.entries(tools)) {
+        const s = usageName(server);
+        const t = usageName(tool);
+        if (s && t) addStats(((out[s] ??= {})[t] ??= emptyStats()), st);
+      }
+    }
+  }
+  return out;
+}
+
+const statTotal = (x: McpToolStats) => x.errors + x.denied + x.buckets.reduce((a, b) => a + b, 0);
+
+/** Wire-ready stats (integers, ≤ 50 servers × 100 tools, most active kept); undefined when empty. */
+export function normalizeMcpStats(stats: McpStats | undefined): McpStats | undefined {
+  const clean = mergeMcpStats(undefined, stats);
+  const servers: Array<[string, Record<string, McpToolStats>]> = [];
+  for (const [server, tools] of Object.entries(clean)) {
+    const kept = top(Object.entries(tools).filter(([, x]) => statTotal(x) > 0), statTotal, MAX_MCP_TOOLS_PER_SERVER);
+    if (kept.length) servers.push([server, Object.fromEntries(kept)]);
+  }
+  if (!servers.length) return undefined;
+  const sum = (t: Record<string, McpToolStats>) => Object.values(t).reduce((a, x) => a + statTotal(x), 0);
+  return Object.fromEntries(top(servers, sum, MAX_MCP_SERVERS_PER_EVENT));
+}
+
+export function hashMcpStats(stats: McpStats, salt: string | null | undefined): McpStats {
+  const out: McpStats = {};
+  for (const [server, tools] of Object.entries(stats)) {
+    const s = isHashed(server) ? server : hashUsageName(`mcp:${server}`, salt);
+    for (const [tool, st] of Object.entries(tools)) {
+      const t = isHashed(tool) ? tool : hashUsageName(`mcp:${server}/${tool}`, salt);
+      addStats(((out[s] ??= {})[t] ??= emptyStats()), st);
+    }
+  }
+  return out;
+}
+
+/**
+ * Claude Code's tool-result text when the user (or the permission mode) refused a tool call. From Claude Code's
+ * known messages; not yet seen in a recorded fixture.
+ */
+const DENIED_RE = /^(The user doesn't want to proceed with this tool use|Permission for this tool use was denied|\[Request interrupted by user for tool use\])/;
+export const isDeniedResult = (text: string): boolean => DENIED_RE.test(text.trimStart());

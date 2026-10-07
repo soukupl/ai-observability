@@ -1,7 +1,7 @@
 import { editFingerprint, isRevertCommand } from '../../analysis/outcome.js';
 import type { PhaseOrDelegating, TimelineEntry } from '../../analysis/phases.js';
-import { addSkill } from '../../analysis/usage.js';
-import type { SkillCounts, UsageEntry } from '../../protocol-types.js';
+import { addMcpResult, addSkill } from '../../analysis/usage.js';
+import type { McpStats, SkillCounts, UsageEntry } from '../../protocol-types.js';
 import type { RolloutItem, TokenTotals } from './records.js';
 import { parseExecOutput, pathHash, spawnedAgentIds, toolFacts } from './tools.js';
 
@@ -21,6 +21,8 @@ export interface RunAcc {
   tools: Record<string, number>;
   /** skills the model opened (SKILL.md reads), by plain name. Absent in older state. */
   skills?: SkillCounts;
+  /** MCP errors / latency by plain server → tool (from McpToolCall items). Absent in older state. */
+  mcpStats?: McpStats;
   toolNames: string[];
   pending: Record<string, { check: 'testing' | 'validating' | null; phase: PhaseOrDelegating; name: string }>;
   procs: Record<string, { phase: PhaseOrDelegating; check: 'testing' | 'validating' | null }>;
@@ -139,6 +141,10 @@ export function applyItem(acc: RunAcc, item: RolloutItem): void {
       push(acc, { at: item.at, type: 'tool_call', id: item.callId, phase: f.phase });
       return;
     }
+    case 'mcp_result':
+      // Codex has no denial marker for MCP calls; a refused call shows up as failed.
+      addMcpResult((acc.mcpStats ??= {}), item.server, item.tool, { error: item.error, denied: false, ms: item.ms });
+      return;
     case 'tool_output': {
       const call = acc.pending[item.callId];
       delete acc.pending[item.callId];

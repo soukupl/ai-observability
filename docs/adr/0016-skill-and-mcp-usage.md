@@ -58,3 +58,18 @@ ADR-0008 already has a per-company answer to "names may be internal": the projec
   hashing.
 - **MCP server only, no tool:** less exposure, but it cannot tell which tools are really used.
 - **Model-invoked skills only:** easier to parse, but it misses the "user had to ask" signal the owner wanted.
+
+## Amendment 2026-10-07: MCP reliability (errors, denials, latency)
+
+- **Decided by:** owner (brief [mcp-reliability](../briefs/mcp-reliability.md) accepted with "go, implement", 2026-10-07); details by Claude.
+- New optional `mcp_stats` on turn and run events: `{server: {tool: {errors, denied, ms, buckets[5]}}}`. The
+  buckets are < 1 s, 1–5 s, 5–30 s, 30–120 s, > 120 s. Names are hashed like `mcp`. Error texts and payloads are
+  never sent.
+- Claude Code: each `mcp__…` tool_use is paired with its tool_result. `is_error` counts as an error, latency is
+  result time minus call time, and a refused call (Claude Code's rejection / denial text) counts as `denied`, not
+  as an error and not as latency.
+- Codex: the `item_completed` `McpToolCall` record gives `status` / `result.isError` and an exact `duration`. Codex
+  has no denial marker.
+- Storage: `turns.mcp_stats` / `runs.mcp_stats` and the counters `errors`, `denied`, `latency_ms`, `lat0`…`lat4` on
+  `daily_skill_mcp_rollups` MCP rows (migration 0009). The view shows the error rate (errors / calls not refused)
+  and the bucket of the median / p95. Tools with ≥ 10 % errors over ≥ 20 calls are highlighted.

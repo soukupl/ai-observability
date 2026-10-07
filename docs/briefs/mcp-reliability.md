@@ -1,6 +1,6 @@
 # Brief: MCP reliability (errors and latency per tool)
 
-Status: **Draft 2026-10-07**, waiting for the owner. Builds on [skills-and-mcp-stats.md](skills-and-mcp-stats.md) (ADR-0016).
+Status: **Accepted 2026-10-07**. Owner: "go, implement", which accepts the recommended defaults below. Builds on [skills-and-mcp-stats.md](skills-and-mcp-stats.md) (ADR-0016).
 
 ## Goal
 

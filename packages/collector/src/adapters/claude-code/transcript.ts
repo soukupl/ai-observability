@@ -2,6 +2,7 @@ import { closeSync, fstatSync, openSync, readSync } from 'node:fs';
 import { editFingerprint, isRevertCommand, type EditFingerprint } from '../../analysis/outcome.js';
 import { classify, type PhaseOrDelegating } from '../../analysis/phases.js';
 import type { UsageRecord } from '../../analysis/tokens.js';
+import { isDeniedResult } from '../../analysis/usage.js';
 
 /**
  * Claude Code transcript JSONL (see FORMAT.md) reduced to "slim" entries right after parsing: only
@@ -63,6 +64,8 @@ export interface ToolResultInfo {
   workflowRunId: string | null;
   /** the result text is Claude Code's "[Request interrupted by user …]" marker */
   userInterrupt: boolean;
+  /** the user (or the permission mode) refused the call */
+  denied: boolean;
 }
 
 export interface TranscriptLine {
@@ -291,6 +294,7 @@ function slimToolResult(r: Obj, toolUseResult: unknown): ToolResultInfo {
   const interrupted = tur?.interrupted === true || userInterrupt;
   return {
     userInterrupt,
+    denied: isError && isDeniedResult(text.slice(0, 200)),
     id: str(r.tool_use_id) ?? '',
     isError,
     exitCode: exit ? Number(exit[1]) : isError ? null : 0,

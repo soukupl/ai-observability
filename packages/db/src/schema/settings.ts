@@ -15,7 +15,15 @@ export interface CompanySettings {
   individualVisibility: IndividualVisibility;
   projectNaming: ProjectNaming;
   retentionDays: number;
+  /** Runaway alert when one turn's ≈ cost reaches this (USD; docs/briefs/runaway-alerts.md). Default RUNAWAY_DEFAULTS. */
+  runawayCostUsd?: number;
+  /** Runaway alert when one turn runs this long (hours) with above-normal tokens. Default RUNAWAY_DEFAULTS. */
+  runawayHours?: number;
 }
+
+/** Runaway thresholds when a company has not set its own, and the allowed ranges (CHECK companies_settings_valid). */
+export const RUNAWAY_DEFAULTS = { costUsd: 20, hours: 2 } as const;
+export const RUNAWAY_BOUNDS = { costUsd: [1, 100_000], hours: [0.5, 72] } as const;
 
 export const DEFAULT_COMPANY_SETTINGS: CompanySettings = {
   individualVisibility: 'aggregates-only',

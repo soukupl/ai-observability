@@ -1,6 +1,6 @@
 # Brief: runaway detection
 
-Status: **Draft 2026-10-07**, waiting for the owner.
+Status: **Accepted 2026-10-07**. Owner: "go, implement", which accepts the recommended defaults below.
 
 ## Goal
 
@@ -14,6 +14,12 @@ left running, and tell someone quickly. It notifies only and never blocks (same 
   80 % / 100 %.
 - The worker, the e-mail path and the budget recipient rules (SEC-2: in aggregates-only mode, a person's
   consumption is mailed only to that person) already exist.
+
+## Decision for v1 (owner, 2026-10-07)
+
+**Detection runs after the turn ends**, with no collector change; live progress events are a follow-up. Because the
+ingest role cannot read token columns (ADR-0014), the worker evaluates finished turns (a `runaways` job), not
+ingest. Decisions 1 and 5 below are therefore deferred.
 
 ## Decisions to confirm (recommended defaults)
 

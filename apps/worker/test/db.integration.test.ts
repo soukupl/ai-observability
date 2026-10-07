@@ -5,6 +5,7 @@ import type { WorkerContext } from '../src/context.js';
 import { monthToDate, runBudgets } from '../src/jobs/budgets.js';
 import { runRetention } from '../src/jobs/retention.js';
 import { recomputeDay, runRollups } from '../src/jobs/rollups.js';
+import { detectRunaways, sendRunawayDigests } from '../src/jobs/runaways.js';
 import { loadConfig } from '../src/lib/config.js';
 import type { MailMessage } from '../src/lib/mailer.js';
 import { memoryStateStore } from '../src/lib/state.js';
@@ -116,6 +117,15 @@ describe('worker jobs against Postgres', () => {
       expect(c.state.get('rollups.watermark')).toBe(NOW.toISOString());
     });
 
+    it('splits tokens by outcome: wasted = failed / abandoned turns, unknown separately (ADR-0017)', async (ctx) => {
+      if (skip) return ctx.skip();
+      await runRollups(makeCtx());
+      const [r] = await rows<{ w: string; u: string; split: boolean }>(sql`
+        select coalesce(sum(wasted_input_tokens), 0) w, coalesce(sum(unknown_input_tokens), 0) u, bool_and(outcome_split) split
+        from daily_rollups where company_id = ${co.companyId} and day = '2026-10-05'`);
+      expect(r).toEqual({ w: '400', u: '10', split: true }); // r2 failed (400 input), r3 unknown (10 input)
+    });
+
     it('is idempotent: a second pass leaves identical rows', async (ctx) => {
       if (skip) return ctx.skip();
       const snapshot = () =>
@@ -211,6 +221,7 @@ describe('worker jobs against Postgres', () => {
       await addTurn(owner, x.companyId, {
         key: 'sk-c', at: `${day}T08:00:00Z`, user: x.carol, team: x.teamA, usage: [[OPUS, 'high', 10, 0, 0, 0], [HAIKU, null, 1, 0, 0, 0]],
         skills: { 'code-review': { model: 1, user: 1 } }, mcp: { github: { search_code: 2 } }, runMcp: { github: { search_code: 1, get_file: 1 } },
+        mcpStats: { github: { search_code: { errors: 1, denied: 0, ms: 6000, buckets: [1, 0, 1, 0, 0] } } },
       });
       await addTurn(owner, x.companyId, { key: 'sk-b', at: `${day}T09:00:00Z`, user: x.bob, team: x.teamA, usage: [[OPUS, 'high', 10, 0, 0, 0]], skills: { 'code-review': { model: 0, user: 1 } } });
       await addTurn(owner, x.companyId, { key: 'sk-none', at: `${day}T10:00:00Z`, user: x.bob, team: x.teamA, usage: [[OPUS, 'high', 10, 0, 0, 0]] });
@@ -228,6 +239,17 @@ describe('worker jobs against Postgres', () => {
         { kind: 'skill', name: 'code-review', tool: '', calls: 3, model_calls: 1, user_calls: 2, turns: 2, users: 2 },
       ];
       expect(await totals()).toEqual(expected);
+      const [oc] = await rows<{ success: number; failed: number; split: boolean }>(sql`
+        select sum(success)::int success, sum(failed)::int failed, bool_and(outcome_split) split from daily_skill_mcp_rollups
+        where company_id = ${x.companyId} and kind = 'skill' and name = 'code-review'`);
+      expect(oc).toEqual({ success: 2, failed: 0, split: true }); // both code-review turns succeeded (fixture default)
+      const rel = await rows(sql`select tool, errors::int, latency_ms::int, lat0::int, lat2::int from daily_skill_mcp_rollups
+        where company_id = ${x.companyId} and kind = 'mcp' and name = 'github' order by tool`);
+      expect(rel).toEqual([
+        { tool: '', errors: 1, latency_ms: 6000, lat0: 1, lat2: 1 },
+        { tool: 'get_file', errors: 0, latency_ms: 0, lat0: 0, lat2: 0 },
+        { tool: 'search_code', errors: 1, latency_ms: 6000, lat0: 1, lat2: 1 },
+      ]);
       await runRollups(makeCtx()); // idempotent
       expect(await totals()).toEqual(expected);
 
@@ -366,6 +388,72 @@ describe('worker jobs against Postgres', () => {
       await runRetention(makeCtx(), { force: true });
       expect(await rows(sql`select 1 from turns where company_id = ${free.companyId}`)).toHaveLength(0);
       expect(await rows(sql`select 1 from turns where company_id = ${pro.companyId}`)).toHaveLength(1);
+    });
+  });
+
+  describe('runaways', () => {
+    /** 50 ordinary turns of `user` over the 25 days before NOW (1000 tokens each), stamped long ago (not candidates). */
+    async function history(x: Seeded, user: string, team: string) {
+      for (let i = 0; i < 50; i++) {
+        const at = new Date(NOW.getTime() - (2 + i * 0.5) * 86_400_000).toISOString();
+        await addTurn(owner, x.companyId, { key: `h-${user}-${i}`, at, stamp: '2026-09-01T00:00:00Z', user, team, usage: [[OPUS, 'high', 1000, 0, 0, 0]] });
+      }
+    }
+    const alerts = (companyId: string) =>
+      rows<{ external_id: string; reasons: string[]; notified: boolean }>(sql`
+        select t.external_id, a.reasons, a.notified_at is not null as notified from runaway_alerts a join turns t on t.id = a.turn_id
+        where a.company_id = ${companyId} order by t.external_id`);
+
+    it('flags tokens far above the user\'s normal and turns over the cost threshold, once per turn', async (ctx) => {
+      if (skip) return ctx.skip();
+      const x = await seedCompany(owner, { slug: 'run-agg', retentionDays: 90 });
+      await history(x, x.carol, x.teamA);
+      await addTurn(owner, x.companyId, { key: 'carol-big', at: '2026-10-05T10:00:00Z', user: x.carol, team: x.teamA, usage: [[OPUS, 'high', 10_000, 0, 0, 0]] });
+      await addTurn(owner, x.companyId, { key: 'carol-ok', at: '2026-10-05T10:30:00Z', user: x.carol, team: x.teamA, usage: [[OPUS, 'high', 1200, 0, 0, 0]] });
+      await addTurn(owner, x.companyId, { key: 'dave-huge', at: '2026-10-05T11:00:00Z', user: x.dave, team: x.teamB, usage: [[OPUS, 'high', 30_000_000, 0, 0, 0]] });
+      expect(await detectRunaways(makeCtx())).toBe(2);
+      expect(await alerts(x.companyId)).toEqual([
+        { external_id: 't-carol-big', reasons: ['tokens'], notified: false },
+        { external_id: 't-dave-huge', reasons: ['tokens', 'cost'], notified: false }, // 30 M input × $4 / Mtok = $120
+      ]);
+      expect(await detectRunaways(makeCtx())).toBe(0); // one alert per turn
+    });
+
+    it('aggregates-only: each user gets their own turns, admins an anonymous digest; at most one digest per hour', async (ctx) => {
+      if (skip) return ctx.skip();
+      const [co] = await rows<{ id: string }>(sql`select id from companies where slug = 'run-agg'`);
+      const mails: MailMessage[] = [];
+      expect(await sendRunawayDigests(makeCtx({ mails }))).toEqual({ sent: 3, failed: 0 });
+      const to = (who: string) => mails.filter((m) => m.to === `${who}@run-agg.test`);
+      expect(to('carol')).toHaveLength(1);
+      expect(to('carol')[0]!.text).toContain('/turns/');
+      expect(to('dave')).toHaveLength(1);
+      expect(to('bob')).toHaveLength(0); // leads are not mailed in aggregates-only mode
+      const admin = to('alice')[0]!;
+      expect(admin.subject).toContain('2 runaway turns');
+      expect(admin.text).not.toMatch(/carol|dave|\/turns\//);
+      expect((await alerts(co!.id)).every((a) => a.notified)).toBe(true);
+
+      // a new runaway within the hour waits for the next digest
+      await addTurn(owner, co!.id, { key: 'dave-huge-2', at: '2026-10-05T11:30:00Z', stamp: AFTER_NOW, user: (await rows<{ id: string }>(sql`select id from users where email = 'dave@run-agg.test'`))[0]!.id, team: (await rows<{ id: string }>(sql`select id from teams where company_id = ${co!.id} and name = 'B'`))[0]!.id, usage: [[OPUS, 'high', 25_000_000, 0, 0, 0]] });
+      expect(await detectRunaways(makeCtx())).toBe(1);
+      const later: MailMessage[] = [];
+      expect(await sendRunawayDigests(makeCtx({ mails: later }))).toEqual({ sent: 0, failed: 0 });
+      expect(await sendRunawayDigests(makeCtx({ mails: later, now: new Date(NOW.getTime() + 61 * 60_000) }))).toEqual({ sent: 2, failed: 0 });
+      expect(later.map((m) => m.to).sort()).toEqual(['alice@run-agg.test', 'dave@run-agg.test']);
+    });
+
+    it('full mode: the user and the leads of the turn\'s team (named); a failed send is retried', async (ctx) => {
+      if (skip) return ctx.skip();
+      const x = await seedCompany(owner, { slug: 'run-full', retentionDays: 90, visibility: 'full' });
+      await addTurn(owner, x.companyId, { key: 'carol-huge', at: '2026-10-05T10:00:00Z', user: x.carol, team: x.teamA, usage: [[OPUS, 'high', 30_000_000, 0, 0, 0]] });
+      expect(await detectRunaways(makeCtx())).toBe(1);
+      expect(await sendRunawayDigests(makeCtx({ failMail: true }))).toEqual({ sent: 0, failed: 1 });
+      expect((await alerts(x.companyId))[0]!.notified).toBe(false); // released
+      const mails: MailMessage[] = [];
+      expect(await sendRunawayDigests(makeCtx({ mails }))).toEqual({ sent: 2, failed: 0 });
+      expect(mails.map((m) => m.to).sort()).toEqual(['bob@run-full.test', 'carol@run-full.test']);
+      expect(mails.find((m) => m.to === 'bob@run-full.test')!.text).toContain('carol');
     });
   });
 

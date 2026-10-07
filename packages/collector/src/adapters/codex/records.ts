@@ -36,7 +36,9 @@ export type RolloutItem =
   | { kind: 'token_count'; at: number; total: TokenTotals | null; last: TokenTotals | null }
   | { kind: 'turn_complete'; at: number; turnId: string | null; lastMessage: string | null }
   | { kind: 'turn_aborted'; at: number; turnId: string | null; reason: string | null }
-  | { kind: 'error'; at: number };
+  | { kind: 'error'; at: number }
+  /** an MCP call finished (`item_completed` of type `McpToolCall`): error flag and exact duration */
+  | { kind: 'mcp_result'; at: number; server: string; tool: string; error: boolean; ms: number | null };
 
 type Obj = Record<string, unknown>;
 const obj = (v: unknown): Obj | null => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Obj) : null);
@@ -174,6 +176,7 @@ function eventMsg(p: Obj, type: string | null, at: number): RolloutItem | null {
       const item = obj(p.item);
       if (item?.type === 'UserMessage') return { kind: 'user_prompt', at, text: textOf(item.content) };
       if (item?.type === 'AgentMessage') return { kind: 'agent_message', at, text: textOf(item.content) };
+      if (item?.type === 'McpToolCall') return mcpResult(item, at);
       return null;
     }
     default:
@@ -212,3 +215,16 @@ function responseItem(p: Obj, type: string | null, at: number): RolloutItem | nu
 
 /** Real user prompt (not injected context). */
 export const isRealPrompt = (text: string) => Boolean(text.trim()) && !INJECTED_RE.test(text);
+
+/**
+ * `{type: "McpToolCall", server, tool, status: "completed" | "failed", result: {isError}, duration: {secs, nanos}}`.
+ * Arguments and result content are never read.
+ */
+function mcpResult(item: Obj, at: number): RolloutItem | null {
+  const server = str(item.server);
+  const tool = str(item.tool);
+  if (!server || !tool) return null;
+  const d = obj(item.duration);
+  const ms = d ? num(d.secs) * 1000 + num(d.nanos) / 1e6 : null;
+  return { kind: 'mcp_result', at, server, tool, error: item.status === 'failed' || obj(item.result)?.isError === true, ms };
+}

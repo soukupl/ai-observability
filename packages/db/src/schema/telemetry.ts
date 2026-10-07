@@ -1,12 +1,14 @@
 import { sql } from 'drizzle-orm';
 import {
   type AnyPgColumn,
+  bigint,
   boolean,
   check,
   foreignKey,
   index,
   integer,
   jsonb,
+  numeric,
   pgTable,
   text,
   unique,
@@ -187,5 +189,40 @@ export const pendingTurnPatches = pgTable(
     unique('pending_turn_patches_company_turn_uq').on(t.companyId, t.turnExternalId),
     index('pending_turn_patches_received_idx').on(t.receivedAt),
     check('pending_turn_patches_summary_len', sql`char_length(${t.summary}) <= 140`),
+  ],
+);
+
+/**
+ * A turn flagged as a runaway by the worker's `runaways` job (docs/briefs/runaway-alerts.md, ADR-0018): one row per
+ * turn, written after the turn ended. `reasons`: 'tokens' (far above the user's own normal), 'cost' (≈ cost at or
+ * above the company threshold), 'duration' (long and above-normal tokens). `notified_at` = mailed in a digest.
+ * Deleted with its turn (retention) and with its user.
+ */
+export const runawayAlerts = pgTable(
+  'runaway_alerts',
+  {
+    id: pk(),
+    companyId: uuid('company_id')
+      .notNull()
+      .references(() => companies.id, { onDelete: 'cascade' }),
+    turnId: uuid('turn_id').notNull(),
+    teamId: uuid('team_id').notNull(),
+    userId: uuid('user_id'),
+    projectId: uuid('project_id').references(() => projects.id, { onDelete: 'set null' }),
+    harness: text('harness').notNull(),
+    model: text('model'),
+    startedAt: tstz('started_at').notNull(),
+    reasons: jsonb('reasons').$type<string[]>().notNull().default([]),
+    tokens: bigint('tokens', { mode: 'number' }).notNull().default(0),
+    costUsd: numeric('cost_usd', { precision: 14, scale: 4 }),
+    durationMs: bigint('duration_ms', { mode: 'number' }).notNull().default(0),
+    createdAt: createdAt(),
+    notifiedAt: tstz('notified_at'),
+  },
+  (t) => [
+    unique('runaway_alerts_company_turn_uq').on(t.companyId, t.turnId),
+    index('runaway_alerts_company_started_idx').on(t.companyId, t.startedAt),
+    foreignKey({ columns: [t.companyId, t.turnId], foreignColumns: [turns.companyId, turns.id] }).onDelete('cascade'),
+    foreignKey({ columns: [t.companyId, t.userId], foreignColumns: [users.companyId, users.id] }).onDelete('cascade'),
   ],
 );

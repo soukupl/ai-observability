@@ -12,6 +12,12 @@ export const MAX_SKILLS_PER_EVENT = 100;
 export const MAX_MCP_SERVERS_PER_EVENT = 50;
 export const MAX_MCP_TOOLS_PER_SERVER = 100;
 
+/**
+ * MCP call latency buckets (upper bounds in ms; the last bucket is open): < 1 s, 1–5 s, 5–30 s, 30–120 s, > 120 s
+ * (docs/briefs/mcp-reliability.md).
+ */
+export const MCP_LATENCY_BUCKETS_MS = [1_000, 5_000, 30_000, 120_000] as const;
+
 /** How a skill was started: picked up by the model (Skill tool) or typed by the user (`/name`). */
 export const SKILL_SOURCES = ['model', 'user'] as const;
 export type SkillSource = (typeof SKILL_SOURCES)[number];

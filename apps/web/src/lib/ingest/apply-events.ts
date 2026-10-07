@@ -154,7 +154,7 @@ export async function applyTurn(tx: Tx, ctx: BatchContext, e: TurnEvent, eventId
     input_tokens = ${t.input}, output_tokens = ${t.output}, cache_read_tokens = ${t.cacheRead},
     cache_write_tokens = ${t.cacheWrite}, reasoning_tokens = ${t.reasoning}, requests = ${t.requests},
     phases_ms = ${json(e.phases_ms)}::jsonb, tools = ${json(e.tools)}::jsonb, skills = ${json(e.skills)}::jsonb,
-    mcp = ${json(e.mcp)}::jsonb, source_event_id = ${eventId},
+    mcp = ${json(e.mcp)}::jsonb, mcp_stats = ${json(e.mcp_stats)}::jsonb, source_event_id = ${eventId},
     files_touched = ${e.files_touched}, lines_added = ${e.lines_added}, lines_removed = ${e.lines_removed},
     phase_rules_version = ${e.phase_rules_version}, updated_at = now()`;
 
@@ -162,13 +162,13 @@ export async function applyTurn(tx: Tx, ctx: BatchContext, e: TurnEvent, eventId
     tx,
     sql`insert into turns (company_id, team_id, user_id, attribution, session_id, project_id, external_id, harness,
           model, effort, started_at, ended_at, duration_ms, input_tokens, output_tokens, cache_read_tokens,
-          cache_write_tokens, reasoning_tokens, requests, phases_ms, tools, skills, mcp, outcome, outcome_signals,
+          cache_write_tokens, reasoning_tokens, requests, phases_ms, tools, skills, mcp, mcp_stats, outcome, outcome_signals,
           outcome_provisional, source_event_id, files_touched, lines_added, lines_removed, phase_rules_version)
         values (${ctx.companyId}::uuid, ${teamId}::uuid, ${ctx.userId}::uuid, ${ctx.attribution}::attribution,
           ${session.id}::uuid, ${session.projectId}::uuid, ${key}, ${e.harness}, ${e.model}, ${e.effort},
           ${e.started_at}::timestamptz, ${e.ended_at}::timestamptz, ${durationMs(e.started_at, e.ended_at)},
           ${t.input}, ${t.output}, ${t.cacheRead}, ${t.cacheWrite}, ${t.reasoning}, ${t.requests},
-          ${json(e.phases_ms)}::jsonb, ${json(e.tools)}::jsonb, ${json(e.skills)}::jsonb, ${json(e.mcp)}::jsonb,
+          ${json(e.phases_ms)}::jsonb, ${json(e.tools)}::jsonb, ${json(e.skills)}::jsonb, ${json(e.mcp)}::jsonb, ${json(e.mcp_stats)}::jsonb,
           ${e.outcome.status}::outcome,
           ${json(e.outcome.signals)}::jsonb, ${e.outcome.provisional}, ${eventId}, ${e.files_touched},
           ${e.lines_added}, ${e.lines_removed}, ${e.phase_rules_version})
@@ -219,19 +219,20 @@ export async function applyRun(tx: Tx, ctx: BatchContext, e: RunEvent, eventId: 
   const tools = json(e.tools);
   const skills = json(e.skills);
   const mcp = json(e.mcp);
+  const mcpStats = json(e.mcp_stats);
   const dur = durationMs(e.started_at, e.ended_at);
 
   const [run] = await rows<{ id: string }>(
     tx,
     sql`insert into runs (company_id, team_id, user_id, turn_id, turn_external_id, parent_run_id, parent_external_id,
           external_id, agent_type, depth, model, effort, started_at, ended_at, duration_ms, input_tokens, output_tokens,
-          cache_read_tokens, cache_write_tokens, reasoning_tokens, requests, phases_ms, tools, skills, mcp, outcome,
+          cache_read_tokens, cache_write_tokens, reasoning_tokens, requests, phases_ms, tools, skills, mcp, mcp_stats, outcome,
           outcome_signals, outcome_provisional, source_event_id)
         values (${ctx.companyId}::uuid, ${teamId}::uuid, ${userId}::uuid, ${turnId}::uuid, ${key}, ${parentId}::uuid,
           ${e.parent_run_id}, ${e.run_id}, ${e.agent_type}, ${e.depth}, ${model}, ${effort},
           ${e.started_at}::timestamptz, ${e.ended_at}::timestamptz, ${dur}, ${t.input}, ${t.output}, ${t.cacheRead},
           ${t.cacheWrite}, ${t.reasoning}, ${t.requests}, ${phases}::jsonb, ${tools}::jsonb, ${skills}::jsonb,
-          ${mcp}::jsonb, ${e.outcome.status}::outcome, ${signals}::jsonb, ${e.outcome.provisional}, ${eventId})
+          ${mcp}::jsonb, ${mcpStats}::jsonb, ${e.outcome.status}::outcome, ${signals}::jsonb, ${e.outcome.provisional}, ${eventId})
         on conflict on constraint runs_company_turn_external_uq do update set
           team_id = ${teamId}::uuid, user_id = ${userId}::uuid, turn_id = coalesce(${turnId}::uuid, runs.turn_id),
           parent_run_id = coalesce(${parentId}::uuid, runs.parent_run_id), parent_external_id = ${e.parent_run_id},
@@ -239,7 +240,7 @@ export async function applyRun(tx: Tx, ctx: BatchContext, e: RunEvent, eventId: 
           started_at = ${e.started_at}::timestamptz, ended_at = ${e.ended_at}::timestamptz, duration_ms = ${dur},
           input_tokens = ${t.input}, output_tokens = ${t.output}, cache_read_tokens = ${t.cacheRead},
           cache_write_tokens = ${t.cacheWrite}, reasoning_tokens = ${t.reasoning}, requests = ${t.requests},
-          phases_ms = ${phases}::jsonb, tools = ${tools}::jsonb, skills = ${skills}::jsonb, mcp = ${mcp}::jsonb,
+          phases_ms = ${phases}::jsonb, tools = ${tools}::jsonb, skills = ${skills}::jsonb, mcp = ${mcp}::jsonb, mcp_stats = ${mcpStats}::jsonb,
           outcome = ${e.outcome.status}::outcome,
           outcome_signals = ${signals}::jsonb, outcome_provisional = ${e.outcome.provisional},
           source_event_id = ${eventId}

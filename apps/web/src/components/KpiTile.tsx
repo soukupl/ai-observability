@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import { Sparkline } from './charts/Sparkline';
 
 /** One headline number. `sub` is the small line under it (e.g. "12% unknown"); `title` is a tooltip. */
 export function KpiTile({
@@ -7,12 +8,15 @@ export function KpiTile({
   sub,
   title,
   tone = 'default',
+  spark,
 }: {
   label: string;
   value: ReactNode;
   sub?: ReactNode;
   title?: string;
   tone?: 'default' | 'good' | 'warn' | 'bad';
+  /** optional small trend line under the value */
+  spark?: number[];
 }) {
   const toneClass = {
     default: 'text-zinc-900 dark:text-zinc-50',
@@ -25,6 +29,11 @@ export function KpiTile({
       <div className="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">{label}</div>
       <div className={`mt-1 text-2xl font-semibold tabular-nums ${toneClass}`}>{value}</div>
       {sub && <div className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">{sub}</div>}
+      {spark && spark.length > 1 && (
+        <div className="mt-1">
+          <Sparkline values={spark} width={120} height={24} />
+        </div>
+      )}
     </div>
   );
 }

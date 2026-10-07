@@ -11,6 +11,8 @@ export const MAX_USAGE_NAME_LENGTH = 128;
 export const MAX_SKILLS_PER_EVENT = 100;
 export const MAX_MCP_SERVERS_PER_EVENT = 50;
 export const MAX_MCP_TOOLS_PER_SERVER = 100;
+/** MCP latency bucket upper bounds (ms); the last of the 5 buckets is open. */
+export const MCP_LATENCY_BUCKETS_MS = [1_000, 5_000, 30_000, 120_000] as const;
 export const USER_TOKEN_PREFIX = 'aiobs_u_' as const;
 export const TEAM_TOKEN_PREFIX = 'aiobs_t_' as const;
 /** Recursion guard for the collector's own summarizer child process (BRIEF §5.6). */
@@ -70,6 +72,14 @@ export type SkillSource = 'model' | 'user';
 export type SkillCounts = Record<string, { model: number; user: number }>;
 /** MCP server → tool → calls. Names are plain or `sha256:<64 hex>` (company project-naming mode). */
 export type McpCounts = Record<string, Record<string, number>>;
+/** MCP errors / denials / latency per server × tool (`buckets`: 5 counts over MCP_LATENCY_BUCKETS_MS). */
+export interface McpToolStats {
+  errors: number;
+  denied: number;
+  ms: number;
+  buckets: number[];
+}
+export type McpStats = Record<string, Record<string, McpToolStats>>;
 
 interface EventBase {
   event_id: string;
@@ -99,6 +109,7 @@ export interface TurnEvent extends EventBase {
   tools: Record<string, number>;
   skills?: SkillCounts;
   mcp?: McpCounts;
+  mcp_stats?: McpStats;
   files_touched: number;
   lines_added: number;
   lines_removed: number;
@@ -122,6 +133,7 @@ export interface RunEvent extends EventBase {
   tools?: Record<string, number>;
   skills?: SkillCounts;
   mcp?: McpCounts;
+  mcp_stats?: McpStats;
   outcome: Outcome;
 }
 

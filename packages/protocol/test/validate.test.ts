@@ -97,6 +97,19 @@ describe('validateBatch', () => {
     expect(b?.type === 'turn' && b.skills).toBeUndefined();
   });
 
+  it('accepts MCP stats with 5 latency buckets and rejects other bucket counts', () => {
+    const turn = fixture().events[1]! as Record<string, unknown>;
+    const stats = (buckets: number[]) => ({ ...turn, event_id: '01J9ZQ8Y3N4X5V6W7Z8A9B0C97', mcp_stats: { s: { t: { errors: 1, ms: 10, buckets } } } });
+    const ok = validateBatch(withEvents([stats([1, 0, 0, 0, 0])]));
+    if (!ok.ok) throw new Error(ok.error);
+    expect(ok.rejected).toEqual([]);
+    const e = ok.events[0];
+    expect(e?.type === 'turn' && e.mcp_stats).toEqual({ s: { t: { errors: 1, denied: 0, ms: 10, buckets: [1, 0, 0, 0, 0] } } });
+    const bad = validateBatch(withEvents([stats([1, 0, 0])]));
+    if (!bad.ok) throw new Error(bad.error);
+    expect(bad.rejected).toHaveLength(1);
+  });
+
   it('rejects skill / MCP names with whitespace and too many entries', () => {
     const turn = fixture().events[1]! as Record<string, unknown>;
     const id = (n: number) => `01J9ZQ8Y3N4X5V6W7Z8A9B0C${String(n).padStart(2, '0')}`;

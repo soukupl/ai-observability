@@ -1,6 +1,6 @@
 # Brief: effort advisor
 
-Status: **Draft 2026-10-07**, waiting for the owner.
+Status: **Accepted 2026-10-07**. Owner: "go, implement", which accepts the recommended defaults below.
 
 ## Goal
 

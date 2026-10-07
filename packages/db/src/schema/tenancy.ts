@@ -41,7 +41,11 @@ export const companies = pgTable(
       sql`${t.settings}->>'individualVisibility' in ('aggregates-only', 'full')
         and ${t.settings}->>'projectNaming' in ('plain', 'hashed')
         and jsonb_typeof(${t.settings}->'retentionDays') = 'number'
-        and (${t.settings}->>'retentionDays')::numeric between 30 and 730`,
+        and (${t.settings}->>'retentionDays')::numeric between 30 and 730
+        and (${t.settings}->'runawayCostUsd' is null or (jsonb_typeof(${t.settings}->'runawayCostUsd') = 'number'
+          and (${t.settings}->>'runawayCostUsd')::numeric between 1 and 100000))
+        and (${t.settings}->'runawayHours' is null or (jsonb_typeof(${t.settings}->'runawayHours') = 'number'
+          and (${t.settings}->>'runawayHours')::numeric between 0.5 and 72))`,
     ),
   ],
 );
