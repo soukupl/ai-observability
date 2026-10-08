@@ -13,6 +13,10 @@ export const MAX_MCP_SERVERS_PER_EVENT = 50;
 export const MAX_MCP_TOOLS_PER_SERVER = 100;
 /** MCP latency bucket upper bounds (ms); the last of the 5 buckets is open. */
 export const MCP_LATENCY_BUCKETS_MS = [1_000, 5_000, 30_000, 120_000] as const;
+/** Incoming links a run event may carry (ADR-0020). */
+export const MAX_RUN_LINKS = 32;
+/** Upper bound of `stage_index`. */
+export const MAX_STAGE_INDEX = 10_000;
 export const USER_TOKEN_PREFIX = 'aiobs_u_' as const;
 export const TEAM_TOKEN_PREFIX = 'aiobs_t_' as const;
 /** Recursion guard for the collector's own summarizer child process (BRIEF §5.6). */
@@ -127,6 +131,12 @@ export interface RunEvent extends EventBase {
   agent_group?: string;
   /** batch / workflow run that launched the agent */
   orchestration_id?: string;
+  /** 0-based ordinal of the agent's stage (workflow phase) inside its orchestration (ADR-0020) */
+  stage_index?: number;
+  /** the item the agent worked on (`<item>` of a `<stage>:<item>` label, slugged) */
+  flow_key?: string;
+  /** incoming edges: runs of the same turn whose result fed this run (≤ MAX_RUN_LINKS) */
+  links?: RunLink[];
   depth: number;
   started_at: string;
   ended_at: string;
@@ -139,6 +149,13 @@ export interface RunEvent extends EventBase {
   mcp?: McpCounts;
   mcp_stats?: McpStats;
   outcome: Outcome;
+}
+
+/** `item`: same orchestration and flow key, previous stage; `sequence`: previous sibling Agent-tool run. */
+export type RunLinkKind = 'item' | 'sequence';
+export interface RunLink {
+  from_run_id: string;
+  kind: RunLinkKind;
 }
 
 export interface TurnOutcomeEvent extends EventBase {

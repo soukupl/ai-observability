@@ -3,6 +3,7 @@ export { batchEnvelope, collectorConfigResponse, ingestResponse } from './batch.
 export {
   ingestEvent,
   runEvent,
+  runLink,
   sessionEndEvent,
   sessionStartEvent,
   turnEvent,

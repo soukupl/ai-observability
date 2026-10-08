@@ -2,10 +2,11 @@ import { buildDigest } from '../../analysis/digest.js';
 import { looksLikeCorrection } from '../../analysis/corrections.js';
 import { detectRevert, finalOutcome, provisionalOutcome } from '../../analysis/outcome.js';
 import { mergeUsage, primaryModel } from '../../analysis/tokens.js';
-import { turnEvent, turnOutcomeEvent } from '../../events.js';
-import type { IngestEvent, Outcome } from '../../protocol-types.js';
+import { normalizeRunLinks, turnEvent, turnOutcomeEvent, withRunLinks, type RunLinkInput } from '../../events.js';
+import type { IngestEvent, Outcome, RunEvent } from '../../protocol-types.js';
 import { analyzeEntries, isWorkflowKey, mergeAgg } from './analyze.js';
-import type { SessionState, StoredTurn } from './state.js';
+import { computeRunLinks, type LinkableRun } from './run-links.js';
+import type { RunSpan, SessionState, StoredTurn } from './state.js';
 import { agentsOfToolUses, buildRun, listAgents, workflowOver, type AgentMeta } from './subagents.js';
 import { hasRevertCommand, readTranscript, type SlimEntry, type TranscriptLine } from './transcript.js';
 
@@ -266,6 +267,8 @@ export function emitTurn(em: Emitter, t: StoredTurn): void {
 /**
  * Run events for the turn's finished sub-agents (and their nested sub-agents) not sent yet; their
  * usage is added to the turn. Background sub-agents still running are picked up by SubagentStop.
+ * Once they are built, each gets its incoming links, computed over every run of the turn known so far
+ * (sent in an earlier pass or built now; see `run-links.ts`).
  */
 export function collectRuns(em: Emitter, turn: StoredTurn, all: boolean): IngestEvent[] {
   const calls = turn.agg.agentCalls;
@@ -278,15 +281,22 @@ export function collectRuns(em: Emitter, turn: StoredTurn, all: boolean): Ingest
   // The turn's own list is authoritative (never trimmed while the turn is kept); the session-wide
   // list is capped and only covers turns saved before per-turn lists existed.
   const emitted = new Set([...st.emittedAgents, ...(turn.emitted ?? [])]);
-  const out: IngestEvent[] = [];
-  for (const meta of agentsOfToolUses(metas, ids)) {
-    if (emitted.has(meta.agentId)) continue;
+  // State from an older collector: the runs it sent are unknown here, so links would skip them.
+  const linkable = !(turn.emitted?.length && !turn.runSpans);
+  const out: RunEvent[] = [];
+  const build = (meta: AgentMeta, idSalt?: string) => {
     const a = failed.has(meta.agentId) && !meta.failed ? { ...meta, failed: true } : meta;
     const root = rootOf(a, metas);
     const call = root.toolUseId ? calls[root.toolUseId] : undefined;
+    const hint = a.parentAgentId ? null : (call?.type ?? null);
+    return { a, root, call, run: () => buildRun(a, metas, { harness: em.harness, turnId: turn.turnId, agentTypeHint: hint, ...(idSalt ? { idSalt } : {}) }) };
+  };
+  for (const meta of agentsOfToolUses(metas, ids)) {
+    if (emitted.has(meta.agentId)) continue;
+    const { a, root, call, run: make } = build(meta);
     const wfDone = isWorkflowKey(root.toolUseId) && root.workflowId !== null && em.workflowOver(root.workflowId);
     if (!(all || done.has(a.agentId) || call?.completed || a.finished || wfDone)) continue;
-    const run = buildRun(a, metas, { harness: em.harness, turnId: turn.turnId, agentTypeHint: a.parentAgentId ? null : (call?.type ?? null) });
+    const run = make();
     if (!run) continue;
     out.push(run.event);
     turn.runUsage = mergeUsage(turn.runUsage, run.usage);
@@ -300,6 +310,65 @@ export function collectRuns(em: Emitter, turn: StoredTurn, all: boolean): Ingest
     if (isWorkflowKey(key) && !call.completed && em.workflowOver(key.slice(3))) call.completed = true;
   }
   if (all) for (const c of Object.values(calls)) c.completed = true;
+  if (!linkable) return out;
+  // Re-send of a run sent earlier whose incoming links changed: same content (its usage is already
+  // counted), new event id (`relink<rev>`), so ingest replaces its links instead of dropping a duplicate.
+  const resend = (runId: string): RunEvent | null => {
+    const meta = metas.get(runId);
+    return meta ? (build(meta, `relink${turn.rev}`).run()?.event ?? null) : null;
+  };
+  return attachLinks(turn, out, resend);
+}
+
+/** A span without the links-sent element. */
+type SpanCore = [runId: string, parentRunId: string | null, orchestrationId: string | null, flowKey: string | null, startedMs: number, endedMs: number];
+
+const spanOf = (e: RunEvent): SpanCore => [
+  e.run_id,
+  e.parent_run_id,
+  e.orchestration_id ?? null,
+  e.flow_key ?? null,
+  Date.parse(e.started_at),
+  Date.parse(e.ended_at),
+];
+
+/** A run's incoming links as sent on the wire, order-free ('' = none). */
+const linksSig = (runId: string, links: readonly RunLinkInput[] | undefined): string =>
+  normalizeRunLinks(runId, links)
+    .map((l) => `${l.kind}|${l.from_run_id}`)
+    .sort()
+    .join(',');
+
+/**
+ * Adds the incoming links to the newly built runs and remembers their spans on the turn. Links follow
+ * start order, not the order runs finish in: a run built now can become the source of a link INTO a run
+ * sent earlier (two same-item workflow agents finishing out of order; a sibling sent late by the
+ * session-end flush). Such a sent run whose links changed is re-sent (`resend`) with its new links.
+ */
+function attachLinks(turn: StoredTurn, built: RunEvent[], resend: (runId: string) => RunEvent | null): RunEvent[] {
+  if (!built.length) return built;
+  const prev = turn.runSpans ?? [];
+  const links = computeRunLinks(
+    [...prev, ...built.map(spanOf)].map(([runId, parentRunId, orchestrationId, flowKey, startedMs, endedMs]): LinkableRun => ({
+      runId,
+      parentRunId,
+      orchestrationId,
+      flowKey,
+      startedMs,
+      endedMs,
+    })),
+  );
+  const out = built.map((e) => withRunLinks(e, links.get(e.run_id)));
+  const spans: RunSpan[] = [];
+  for (const span of prev) {
+    const [runId, , , , , , sent = ''] = span;
+    const sig = linksSig(runId, links.get(runId));
+    const again = sig === sent ? null : resend(runId);
+    if (again) out.push(withRunLinks(again, links.get(runId)));
+    spans.push(again ? [...(span.slice(0, 6) as SpanCore), sig] : span);
+  }
+  for (const e of built) spans.push([...spanOf(e), linksSig(e.run_id, links.get(e.run_id))]);
+  turn.runSpans = spans;
   return out;
 }
 

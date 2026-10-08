@@ -251,6 +251,60 @@ describe('claude-code adapter: other turn endings', () => {
     assertValid(h.events);
   });
 
+  it('sequence links (ADR-0020): siblings chain to the latest one that ended before they started', async () => {
+    const h = setup();
+    const { mkdirSync, writeFileSync } = await import('node:fs');
+    const b = new TranscriptBuilder();
+    b.prompt(0, 'tf', 'plan, build, review');
+    // two parallel Explore agents, then Plan → general-purpose → code-reviewer one after the other
+    b.assistant(1, 'msg_1', OPUS, { in: 1, out: 10 }, [
+      toolUse('tu_e1', 'Agent', { prompt: 'p', subagent_type: 'Explore' }),
+      toolUse('tu_e2', 'Agent', { prompt: 'p', subagent_type: 'Explore' }),
+    ]);
+    b.toolResult(9.5, 'tu_e1', 'report', false, { status: 'completed', agentId: 'e1' });
+    b.toolResult(10, 'tu_e2', 'report', false, { status: 'completed', agentId: 'e2' });
+    b.assistant(10.5, 'msg_2', OPUS, { in: 1, out: 10 }, [toolUse('tu_plan', 'Agent', { prompt: 'p', subagent_type: 'Plan' })]);
+    b.toolResult(20, 'tu_plan', 'plan', false, { status: 'completed', agentId: 'pl' });
+    b.assistant(20.5, 'msg_3', OPUS, { in: 1, out: 10 }, [toolUse('tu_gp', 'Agent', { prompt: 'p', subagent_type: 'general-purpose' })]);
+    b.toolResult(41, 'tu_gp', 'done', false, { status: 'completed', agentId: 'gp' });
+    b.assistant(41.5, 'msg_4', OPUS, { in: 1, out: 10 }, [toolUse('tu_rv', 'Agent', { prompt: 'p', subagent_type: 'code-reviewer' })]);
+    b.toolResult(51, 'tu_rv', 'lgtm', false, { status: 'completed', agentId: 'rv' });
+    b.assistant(52, 'msg_5', OPUS, { in: 1, out: 10 }, [text('all done')]);
+    appendFileSync(join(h.projectDir, `${SESSION}.jsonl`), b.text());
+
+    const dir = join(h.projectDir, SESSION, 'subagents');
+    mkdirSync(dir, { recursive: true });
+    // id, type, tool_use, parent, start, end (fixture seconds)
+    const agents: Array<[string, string, string, string | null, number, number]> = [
+      ['e1', 'Explore', 'tu_e1', null, 2, 8],
+      ['e2', 'Explore', 'tu_e2', null, 3, 9],
+      ['pl', 'Plan', 'tu_plan', null, 11, 19],
+      ['gp', 'general-purpose', 'tu_gp', null, 21, 40],
+      ['n1', 'Explore', 'tu_n1', 'gp', 23, 28], // nested: chain only with gp's other children
+      ['n2', 'Explore', 'tu_n2', 'gp', 30, 36],
+      ['rv', 'code-reviewer', 'tu_rv', null, 42, 50],
+    ];
+    for (const [id, type, tu, parent, start, end] of agents) {
+      const sub = new TranscriptBuilder(SESSION, { agentId: id });
+      sub.prompt(start, `${id}-p`, 'task');
+      sub.assistant(end, `msg_${id}`, HAIKU, { in: 1, out: 1 }, [text('ok')]);
+      writeFileSync(join(dir, `agent-${id}.jsonl`), sub.text());
+      writeFileSync(
+        join(dir, `agent-${id}.meta.json`),
+        JSON.stringify({ agentType: type, toolUseId: tu, spawnDepth: parent ? 2 : 1, ...(parent ? { parentAgentId: parent } : {}) }),
+      );
+    }
+
+    await h.hook('Stop', at(53));
+    const runs = byType(h.events, 'run');
+    expect(runs).toHaveLength(agents.length);
+    const links = Object.fromEntries(runs.map((r) => [r.run_id, r.links ?? []]));
+    const seq = (from: string) => [{ from_run_id: from, kind: 'sequence' }];
+    expect(links).toEqual({ e1: [], e2: [], pl: seq('e2'), gp: seq('pl'), n1: [], n2: seq('n1'), rv: seq('gp') });
+    expect(runs.every((r) => r.stage_index === undefined && r.flow_key === undefined)).toBe(true);
+    assertValid(h.events);
+  });
+
   it('a revert in the next turn fails the previous one', async () => {
     const h = setup();
     const file = join(h.projectDir, `${SESSION}.jsonl`);

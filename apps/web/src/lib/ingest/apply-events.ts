@@ -3,6 +3,7 @@ import type { Tx } from '@ai-obs/db';
 import type {
   Outcome,
   RunEvent,
+  RunLink,
   SessionEndEvent,
   SessionStartEvent,
   TurnEvent,
@@ -224,22 +225,26 @@ export async function applyRun(tx: Tx, ctx: BatchContext, e: RunEvent, eventId: 
   // Already sanitised / clipped by enforceLimits (normalizeAgentGroup / normalizeOrchestrationId); NULL when absent.
   const agentGroup = e.agent_group ?? null;
   const orchestrationId = e.orchestration_id ?? null;
+  // Agent flow (ADR-0020); flow_key sanitised by normalizeFlowKey, links de-duplicated without self-links.
+  const stageIndex = e.stage_index ?? null;
+  const flowKey = e.flow_key ?? null;
 
   const [run] = await rows<{ id: string }>(
     tx,
     sql`insert into runs (company_id, team_id, user_id, turn_id, turn_external_id, parent_run_id, parent_external_id,
-          external_id, agent_type, agent_group, orchestration_id, depth, model, effort, started_at, ended_at, duration_ms, input_tokens, output_tokens,
+          external_id, agent_type, agent_group, orchestration_id, stage_index, flow_key, depth, model, effort, started_at, ended_at, duration_ms, input_tokens, output_tokens,
           cache_read_tokens, cache_write_tokens, reasoning_tokens, requests, phases_ms, tools, skills, mcp, mcp_stats, outcome,
           outcome_signals, outcome_provisional, source_event_id)
         values (${ctx.companyId}::uuid, ${teamId}::uuid, ${userId}::uuid, ${turnId}::uuid, ${key}, ${parentId}::uuid,
-          ${e.parent_run_id}, ${e.run_id}, ${e.agent_type}, ${agentGroup}, ${orchestrationId}, ${e.depth}, ${model}, ${effort},
+          ${e.parent_run_id}, ${e.run_id}, ${e.agent_type}, ${agentGroup}, ${orchestrationId}, ${stageIndex}, ${flowKey}, ${e.depth}, ${model}, ${effort},
           ${e.started_at}::timestamptz, ${e.ended_at}::timestamptz, ${dur}, ${t.input}, ${t.output}, ${t.cacheRead},
           ${t.cacheWrite}, ${t.reasoning}, ${t.requests}, ${phases}::jsonb, ${tools}::jsonb, ${skills}::jsonb,
           ${mcp}::jsonb, ${mcpStats}::jsonb, ${e.outcome.status}::outcome, ${signals}::jsonb, ${e.outcome.provisional}, ${eventId})
         on conflict on constraint runs_company_turn_external_uq do update set
           team_id = ${teamId}::uuid, user_id = ${userId}::uuid, turn_id = coalesce(${turnId}::uuid, runs.turn_id),
           parent_run_id = coalesce(${parentId}::uuid, runs.parent_run_id), parent_external_id = ${e.parent_run_id},
-          agent_type = ${e.agent_type}, agent_group = ${agentGroup}, orchestration_id = ${orchestrationId}, depth = ${e.depth}, model = ${model}, effort = ${effort},
+          agent_type = ${e.agent_type}, agent_group = ${agentGroup}, orchestration_id = ${orchestrationId},
+          stage_index = ${stageIndex}, flow_key = ${flowKey}, depth = ${e.depth}, model = ${model}, effort = ${effort},
           started_at = ${e.started_at}::timestamptz, ended_at = ${e.ended_at}::timestamptz, duration_ms = ${dur},
           input_tokens = ${t.input}, output_tokens = ${t.output}, cache_read_tokens = ${t.cacheRead},
           cache_write_tokens = ${t.cacheWrite}, reasoning_tokens = ${t.reasoning}, requests = ${t.requests},
@@ -255,11 +260,42 @@ export async function applyRun(tx: Tx, ctx: BatchContext, e: RunEvent, eventId: 
   // Children that arrived before this run.
   await tx.execute(sql`update runs set parent_run_id = ${run.id}::uuid
     where turn_external_id = ${key} and parent_external_id = ${e.run_id} and parent_run_id is null`);
+  await replaceRunLinks(tx, ctx, { key, turnId, runId: run.id, externalId: e.run_id }, e.links ?? []);
   await replaceUsage(
     tx,
     { companyId: ctx.companyId, turnId: null, runId: run.id, teamId, userId, startedAt: e.started_at },
     usage,
   );
+}
+
+/**
+ * Replaces the incoming links of one run (ADR-0020): the run event carries all of them, so a re-sent run drops edges it
+ * no longer reports (an older collector sends none). A source run that has not arrived yet keeps from_run_id NULL and
+ * is resolved when it does; the same pass resolves the links that were waiting for THIS run as their source. Runs of
+ * one turn key are serialised by the turn lock, so the two passes cannot miss each other.
+ */
+async function replaceRunLinks(
+  tx: Tx,
+  ctx: BatchContext,
+  run: { key: string; turnId: string | null; runId: string; externalId: string },
+  links: readonly RunLink[],
+): Promise<void> {
+  await tx.execute(sql`delete from run_links
+    where company_id = ${ctx.companyId}::uuid and turn_external_id = ${run.key} and to_external_id = ${run.externalId}`);
+  const edges = links.filter((l) => l.from_run_id !== run.externalId);
+  if (edges.length > 0) {
+    const values = edges.map(
+      (l) => sql`(${ctx.companyId}::uuid, ${run.turnId}::uuid, ${run.key},
+        (select id from runs where turn_external_id = ${run.key} and external_id = ${l.from_run_id}),
+        ${run.runId}::uuid, ${l.from_run_id}, ${run.externalId}, ${l.kind})`,
+    );
+    await tx.execute(sql`insert into run_links (company_id, turn_id, turn_external_id, from_run_id, to_run_id,
+        from_external_id, to_external_id, kind)
+      values ${sql.join(values, sql`, `)}
+      on conflict on constraint run_links_edge_uq do nothing`);
+  }
+  await tx.execute(sql`update run_links set from_run_id = ${run.runId}::uuid
+    where turn_external_id = ${run.key} and from_external_id = ${run.externalId} and from_run_id is null`);
 }
 
 /**

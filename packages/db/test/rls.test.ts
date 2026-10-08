@@ -161,7 +161,7 @@ describe.skipIf(skipReason !== null)(skipReason ? `RLS — SKIPPED: ${skipReason
       expect(list.filter((x) => x.is_mine)).toHaveLength(1);
       const userIds = new Set(Object.values(A.people).map((p) => p.id));
       for (const fn of ['agg_turn_list', 'agg_turns_daily', 'agg_usage_daily', 'agg_turns_by_project', 'agg_turns_by_model', 'agg_agents',
-        'agg_timeline_turns', 'agg_timeline_runs']) {
+        'agg_timeline_turns', 'agg_timeline_runs', 'agg_timeline_links']) {
         const out = await rows(lead, sql`select * from ${sql.identifier(fn)}(${FROM}, ${TO})`);
         for (const row of out) {
           expect(Object.keys(row)).not.toContain('user_id');
@@ -253,7 +253,7 @@ describe.skipIf(skipReason !== null)(skipReason ? `RLS — SKIPPED: ${skipReason
 
   describe('app_platform (super admin)', () => {
     it('has no access to telemetry tables', async () => {
-      for (const t of [...TELEMETRY, 'projects', 'machines', 'teams', 'team_memberships', 'ingest_events', 'ingest_tokens', 'budgets', 'pending_turn_patches']) {
+      for (const t of [...TELEMETRY, 'run_links', 'projects', 'machines', 'teams', 'team_memberships', 'ingest_events', 'ingest_tokens', 'budgets', 'pending_turn_patches']) {
         expect(await pgErrorCode(platform.execute(sql`select 1 from ${sql.identifier(t)} limit 1`)), t).toBe('42501');
       }
     });
@@ -273,7 +273,7 @@ describe.skipIf(skipReason !== null)(skipReason ? `RLS — SKIPPED: ${skipReason
   describe('app_ingest', () => {
     it('cannot read telemetry back', async () => {
       await withIngestContext(ingest, A.id, async () => {});
-      for (const q of [sql`select * from turns`, sql`select summary from turns`, sql`select input_tokens from usage`, sql`select * from runs`, sql`select * from users`, sql`select * from ingest_tokens`]) {
+      for (const q of [sql`select * from turns`, sql`select summary from turns`, sql`select input_tokens from usage`, sql`select * from runs`, sql`select * from users`, sql`select * from ingest_tokens`, sql`select * from run_links`]) {
         expect(await pgErrorCode(withIngestContext(ingest, A.id, (tx) => tx.execute(q)))).toBe('42501');
       }
     });
@@ -338,6 +338,107 @@ describe.skipIf(skipReason !== null)(skipReason ? `RLS — SKIPPED: ${skipReason
       expect(r!.n).toBeGreaterThanOrEqual(2);
       expect(await pgErrorCode(worker.execute(sql`select * from ingest_tokens`))).toBe('42501');
       expect(await pgErrorCode(worker.execute(sql`update turns set summary = 'x'`))).toBe('42501');
+    });
+  });
+
+  describe('run_links (ADR-0020)', () => {
+    // m1's turn in each company gets a second run r2 (stage 1, flow 'data') fed by r1 (an 'item' link), plus a link
+    // whose source has not arrived (from_run_id null). The worker removes r2 at the end (cascade test), so the
+    // run counts of the other blocks are unaffected.
+    const extra = new Map<string, { turnId: string; r1: string; r2: string }>();
+    const m1Turn = (fx: CompanyFixture) => [...fx.turns].find(([, u]) => u === fx.people.m1!.id)![0];
+
+    beforeAll(async () => {
+      const owner = connectOwner();
+      for (const fx of [A, B]) {
+        const turnId = m1Turn(fx);
+        await owner.transaction(async (tx) => {
+          await tx.execute(sql`set local role app_definer`);
+          const [r1] = [...(await tx.execute(sql`select id from runs where turn_id = ${turnId}::uuid`))] as { id: string }[];
+          const [r2] = [...(await tx.execute(sql`insert into runs (company_id, team_id, user_id, turn_id, turn_external_id,
+              external_id, agent_type, depth, started_at, ended_at, stage_index, flow_key, orchestration_id)
+            select company_id, team_id, user_id, turn_id, turn_external_id, 'r2', 'workflow', 1,
+              started_at + interval '1 second', started_at + interval '2 seconds', 1, 'data', 'wf_r2'
+            from runs where id = ${r1!.id}::uuid returning id`))] as { id: string }[];
+          await tx.execute(sql`insert into run_links (company_id, turn_id, turn_external_id, from_run_id, to_run_id,
+              from_external_id, to_external_id, kind)
+            select company_id, turn_id, turn_external_id, ${r1!.id}::uuid, ${r2!.id}::uuid, 'r1', 'r2', 'item'
+            from runs where id = ${r1!.id}::uuid
+            union all
+            select company_id, turn_id, turn_external_id, null, ${r2!.id}::uuid, 'r0-missing', 'r2', 'sequence'
+            from runs where id = ${r1!.id}::uuid`);
+          extra.set(fx.id, { turnId, r1: r1!.id, r2: r2!.id });
+        });
+      }
+    });
+
+    const linkCount = async (p: Person) => count(p, 'run_links');
+
+    it('a link is visible when its target run is: owner, a lead of the team in full mode; not another member', async () => {
+      // Full mode (B): m1 owns them, b1's lead sees b1's rows, the admin sees the company, m2 (b2 only) sees nothing.
+      expect(await linkCount(B.people.m1!)).toBe(2);
+      expect(await linkCount(B.people.lead!)).toBe(2);
+      expect(await linkCount(B.people.admin!)).toBe(2);
+      expect(await linkCount(B.people.m2!)).toBe(0);
+      // Aggregates-only (A): only the owner reads rows; the lead and admin go through agg_turn_links.
+      expect(await linkCount(A.people.m1!)).toBe(2);
+      for (const k of ['lead', 'admin', 'm2']) expect(await linkCount(A.people[k]!), k).toBe(0);
+      // A forged company context sees nothing.
+      expect(await linkCount({ ...B.people.admin!, companyId: A.id })).toBe(0);
+    });
+
+    it('agg_turn_links / agg_timeline_links give an aggregates-only admin the resolved links, never user ids', async () => {
+      const admin = A.people.admin!;
+      const { turnId, r1, r2 } = extra.get(A.id)!;
+      const edge = { from_run_id: r1, to_run_id: r2, kind: 'item' };
+      expect(await rows(admin, sql`select * from agg_turn_links(${turnId}::uuid)`)).toEqual([edge]);
+      expect(await rows(admin, sql`select * from agg_timeline_links(${FROM}, ${TO})`)).toEqual([edge]);
+      expect(await rows(A.people.lead!, sql`select * from agg_timeline_links(${FROM}, ${TO})`)).toEqual([edge]);
+      expect(await rows(admin, sql`select * from agg_timeline_links(${FROM}, ${TO}, p_limit => 0)`)).toEqual([]);
+      // Out of scope: a member for someone else's turn, another company's admin, a window after the target run.
+      expect(await rows(A.people.m2!, sql`select * from agg_turn_links(${turnId}::uuid)`)).toEqual([]);
+      expect(await rows(A.people.m2!, sql`select * from agg_timeline_links(${FROM}, ${TO})`)).toEqual([]);
+      expect(await rows(B.people.admin!, sql`select * from agg_turn_links(${turnId}::uuid)`)).toEqual([]);
+      const late = new Date(Date.now() + 3_600_000).toISOString();
+      expect(await rows(admin, sql`select * from agg_timeline_links(${late}::timestamptz, ${TO})`)).toEqual([]);
+      // stage_index / flow_key (and, for agg_turn_runs, orchestration_id) are appended to the run functions.
+      const turnRuns = await rows(admin, sql`select id, agent_group, stage_index, flow_key, orchestration_id from agg_turn_runs(${turnId}::uuid)`);
+      expect(turnRuns).toEqual(expect.arrayContaining([{ id: r2, agent_group: null, stage_index: 1, flow_key: 'data', orchestration_id: 'wf_r2' }]));
+      const winRuns = await rows(admin, sql`select id, stage_index, flow_key from agg_timeline_runs(${FROM}, ${TO}) where id = ${r2}::uuid`);
+      expect(winRuns).toEqual([{ id: r2, stage_index: 1, flow_key: 'data' }]);
+      const userIds = new Set(Object.values(A.people).map((p) => p.id));
+      for (const out of [
+        await rows(admin, sql`select * from agg_turn_links(${turnId}::uuid)`),
+        await rows(admin, sql`select * from agg_timeline_links(${FROM}, ${TO})`),
+      ]) {
+        for (const row of out) {
+          expect(Object.keys(row)).toEqual(['from_run_id', 'to_run_id', 'kind']);
+          expect(Object.values(row).some((v) => userIds.has(v as string))).toBe(false);
+        }
+      }
+    });
+
+    it('app_ingest writes links only into its own company and cannot read their timestamps', async () => {
+      const { r2 } = extra.get(A.id)!;
+      const insert = (companyId: string) => sql`insert into run_links (company_id, turn_external_id, to_run_id,
+        from_external_id, to_external_id, kind) values (${companyId}, 'ext', ${r2}::uuid, 'x', 'y', 'item')`;
+      expect(await pgErrorCode(withIngestContext(ingest, A.id, (tx) => tx.execute(insert(B.id))))).toBe('42501');
+      expect(await pgErrorCode(withIngestContext(ingest, A.id, (tx) => tx.execute(sql`select created_at from run_links`)))).toBe('42501');
+      const bad = sql`insert into run_links (company_id, turn_external_id, from_external_id, to_external_id, kind)
+        values (${A.id}, 'ext', 'x', 'y', 'continues')`;
+      expect(await pgErrorCode(withIngestContext(ingest, A.id, (tx) => tx.execute(bad)))).toBe('23514');
+    });
+
+    it('retention: the worker deleting a run removes its links through the cascade, without a grant on run_links', async () => {
+      expect(await pgErrorCode(worker.execute(sql`select 1 from run_links limit 1`))).toBe('42501');
+      const owner = connectOwner();
+      for (const fx of [A, B]) {
+        const { r2 } = extra.get(fx.id)!;
+        const del = await worker.execute(sql`delete from runs where id = ${r2}::uuid`);
+        expect(del.count).toBe(1);
+        const left = [...(await owner.execute(sql`select count(*)::int as n from run_links where company_id = ${fx.id}::uuid`))];
+        expect(left[0]!.n).toBe(0);
+      }
     });
   });
 });

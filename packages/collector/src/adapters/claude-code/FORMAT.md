@@ -141,3 +141,33 @@ Both are optional `run` fields derived from the meta file, never from content.
   description). `orchestration_id` = the `wf_…` id.
 - Agent-tool sub-agent: `agent_group` = the agent type (`Explore`, `general-purpose`, ...), omitted when
   unknown. No `orchestration_id`.
+
+## Agent flow fields (`stage_index`, `flow_key`, `links`; ADR-0020)
+
+All three are optional `run` fields. They come from metas, the journal's `started` order and run times,
+never from prompts or results.
+
+- `stage_index` (workflow agents only): the 0-based order of first appearance of the agent's
+  `workflowPhase` among the journal's `started` records (`{type: "started", agentId, phase}`, launch
+  order). Omitted when the agent has no phase or the journal has no `started` record for it.
+- `flow_key` (workflow agents only): the label convention `<stage>:<item>` (`impl:data`,
+  `verify:data`). It is the `<item>` part of the raw meta `description` (everything after the first `:`),
+  slugged like the label (≤ 64). Omitted when the label has no `:` or the slug is empty.
+- `links`: incoming edges `{from_run_id, kind}` (≤ 32), computed once every run of the turn is built
+  (`run-links.ts`):
+  - `item`: workflow agents of one `orchestration_id` with the same `flow_key`, in start order (then
+    run id): each links to the previous one (`impl:data → verify:data → fix:data`).
+  - `sequence`: Agent-tool agents (no orchestration) with the same parent (the main agent, or the
+    parent agent): each links to the sibling with the latest end not after its own start (ties: the
+    greater run id). Siblings that overlap in time are not chained (two parallel `Explore`). Of two
+    zero-length runs at the same instant only the lower run id leads, so there are no cycles.
+  - Links are computed over the runs of the turn known at that moment: the runs sent in earlier passes
+    (their spans, with the links each was sent with, are kept in the session state,
+    `StoredTurn.runSpans`) and the ones built now. Links follow start order, not finish order, so a run
+    built now can change the incoming links of a run already sent (two agents of one item finishing out
+    of order). That run is then re-sent, same content, with its new links and a new event id
+    (`idSalt: relink<turn rev>`); ingest replaces a run's incoming links on every run event. Its usage is
+    counted once.
+    Turns from state written before this field get no links (the dashboard derives `sequence` links
+    on read).
+- Codex sends none of the three.

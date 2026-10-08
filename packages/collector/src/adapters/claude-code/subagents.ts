@@ -32,6 +32,8 @@ export interface AgentMeta {
   /** workflow label (meta `description`) and phase; local use only, sanitized in `workflowAgentType` */
   label: string | null;
   workflowPhase: string | null;
+  /** 0-based order of first appearance of the agent's phase among the journal's `started` records */
+  stageIndex: number | null;
   /** the workflow journal says this agent returned (`result`) or errored (`failed`) */
   finished: boolean;
   failed: boolean;
@@ -58,29 +60,45 @@ function readMeta(dir: string, agentId: string): Record<string, unknown> {
   return readJsonFile<Record<string, unknown>>(join(dir, `agent-${agentId}.meta.json`)) ?? {};
 }
 
-/** Agents the workflow journal reports as returned / failed. Only `type` and `agentId` are looked at. */
-function readJournal(dir: string): { finished: Set<string>; failed: Set<string> } {
-  const finished = new Set<string>();
-  const failed = new Set<string>();
+interface Journal {
+  finished: Set<string>;
+  failed: Set<string>;
+  /** phase → 0-based order of its first `started` record (launch order) */
+  phaseOrder: Map<string, number>;
+}
+
+const emptyJournal = (): Journal => ({ finished: new Set(), failed: new Set(), phaseOrder: new Map() });
+
+/**
+ * Agents the workflow journal reports as returned / failed, and the order in which phases started.
+ * Only `type`, `agentId` and `phase` are looked at.
+ */
+function readJournal(dir: string): Journal {
+  const out = emptyJournal();
+  const { finished, failed, phaseOrder } = out;
   let text = '';
   try {
     text = readFileSync(join(dir, 'journal.jsonl'), 'utf8');
   } catch {
-    return { finished, failed };
+    return out;
   }
   for (const line of text.split('\n')) {
-    if (!line.includes('"agentId"') || !(line.includes('"result"') || line.includes('"failed"'))) continue;
+    if (!line.includes('"agentId"') || !(line.includes('"result"') || line.includes('"failed"') || line.includes('"started"'))) continue;
     try {
       const j = JSON.parse(line) as Record<string, unknown>;
       const id = str(j.agentId);
       if (!id) continue;
       if (j.type === 'result') finished.add(id);
       else if (j.type === 'failed') (finished.add(id), failed.add(id));
+      else if (j.type === 'started') {
+        const phase = str(j.phase);
+        if (phase && !phaseOrder.has(phase)) phaseOrder.set(phase, phaseOrder.size);
+      }
     } catch {
       /* partial last line */
     }
   }
-  return { finished, failed };
+  return out;
 }
 
 /** All sub-agents of a session, by agent id: direct ones and those of Workflow runs. */
@@ -102,6 +120,7 @@ export function listAgents(transcriptPath: string): Map<string, AgentMeta> {
       workflowId: null,
       label: null,
       workflowPhase: null,
+      stageIndex: null,
       finished: false,
       failed: false,
     });
@@ -111,12 +130,13 @@ export function listAgents(transcriptPath: string): Map<string, AgentMeta> {
     if (!WF_DIR_RE.test(wf)) continue;
     const wfDir = join(wfRoot, wf);
     const names = readDir(wfDir);
-    const journal = names.includes('journal.jsonl') ? readJournal(wfDir) : { finished: new Set<string>(), failed: new Set<string>() };
+    const journal = names.includes('journal.jsonl') ? readJournal(wfDir) : emptyJournal();
     for (const n of names) {
       const m = FILE_RE.exec(n);
       if (!m?.[1] || out.has(m[1])) continue;
       const agentId = m[1];
       const meta = readMeta(wfDir, agentId);
+      const phase = str(meta.workflowPhase);
       out.set(agentId, {
         agentId,
         agentType: str(meta.agentType),
@@ -126,7 +146,8 @@ export function listAgents(transcriptPath: string): Map<string, AgentMeta> {
         file: join(wfDir, n),
         workflowId: wf,
         label: str(meta.description),
-        workflowPhase: str(meta.workflowPhase),
+        workflowPhase: phase,
+        stageIndex: phase ? (journal.phaseOrder.get(phase) ?? null) : null,
         finished: journal.finished.has(agentId),
         failed: journal.failed.has(agentId),
       });
@@ -152,6 +173,18 @@ const slug = (s: string, max: number) =>
     .replace(/[^a-z0-9._-]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, max);
+
+const FLOW_LABEL_RE = /^([^:]+):(.+)$/s;
+
+/**
+ * The item a workflow agent works on, from the label convention `<stage>:<item>` (ADR-0020): a slug of
+ * `<item>` (≤ 64), or null when the label does not follow the convention or the slug is empty.
+ */
+export function flowKeyOf(label: string | null): string | null {
+  const m = label ? FLOW_LABEL_RE.exec(label) : null;
+  const key = m ? slug(m[2]!, 64) : '';
+  return key || null;
+}
 
 /** `workflow:<label>` (a slug of the agent's label), or the meta agent type, or `workflow-subagent`. */
 export function workflowAgentType(a: AgentMeta): string {
@@ -220,7 +253,7 @@ export interface BuiltRun {
 export function buildRun(
   a: AgentMeta,
   agents: ReadonlyMap<string, AgentMeta>,
-  input: { harness: string; turnId: string; agentTypeHint?: string | null },
+  input: { harness: string; turnId: string; agentTypeHint?: string | null; idSalt?: string },
 ): BuiltRun | null {
   const agg = analyzeEntries(readWholeTranscript(a.file));
   if (!agg.active) return null;
@@ -232,12 +265,13 @@ export function buildRun(
       : outcome.status === 'unknown' ? { status: 'success', signals: ['no_failure_signal'], provisional: false } : { ...outcome, provisional: false };
   const event = runEvent({
     harness: input.harness,
+    ...(input.idSalt ? { idSalt: input.idSalt } : {}),
     turnId: input.turnId,
     runId: a.agentId,
     parentRunId: a.parentAgentId,
     agentType: a.workflowId ? workflowAgentType(a) : (a.agentType ?? input.agentTypeHint ?? 'unknown'),
     ...(a.workflowId
-      ? { agentGroup: workflowAgentGroup(a), orchestrationId: a.workflowId }
+      ? { agentGroup: workflowAgentGroup(a), orchestrationId: a.workflowId, stageIndex: a.stageIndex, flowKey: flowKeyOf(a.label) }
       : (() => {
           const t = a.agentType ?? input.agentTypeHint ?? null;
           return t && t !== 'unknown' ? { agentGroup: t } : {};

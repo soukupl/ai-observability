@@ -121,6 +121,10 @@ export const runs = pgTable(
     agentGroup: text('agent_group'),
     /** Batch / workflow run that launched the agent (`wf_…`); null when unknown (ADR-0019). */
     orchestrationId: text('orchestration_id'),
+    /** 0-based ordinal of the agent's phase inside its orchestration; null when unknown (ADR-0020). */
+    stageIndex: integer('stage_index'),
+    /** The item named by the label convention `<stage>:<item>`, slugged; null when absent (ADR-0020). */
+    flowKey: text('flow_key'),
     depth: integer('depth').notNull().default(0),
     ...workColumns(),
     createdAt: createdAt(),
@@ -135,6 +139,39 @@ export const runs = pgTable(
     index('runs_created_idx').on(t.createdAt),
     foreignKey({ columns: [t.companyId, t.userId], foreignColumns: [users.companyId, users.id] }).onDelete('cascade'),
     foreignKey({ columns: [t.companyId, t.turnId], foreignColumns: [turns.companyId, turns.id] }).onDelete('cascade'),
+  ],
+);
+
+/**
+ * A typed edge between two runs of one turn (ADR-0020): the source run's result fed the target run. Carried by the
+ * target run's event (`links`), so ingest replaces a run's incoming edges on every event. `from_run_id` is resolved
+ * late like `parent_run_id` (the source may arrive after the target); `turn_id` is linked when the turn arrives.
+ * Visibility follows the target run (RLS policy via `runs`); deleted with either run or the turn.
+ */
+export const runLinks = pgTable(
+  'run_links',
+  {
+    id: pk(),
+    companyId: companyRef(),
+    turnId: uuid('turn_id'),
+    turnExternalId: text('turn_external_id').notNull(),
+    fromRunId: uuid('from_run_id'),
+    toRunId: uuid('to_run_id'),
+    fromExternalId: text('from_external_id').notNull(),
+    toExternalId: text('to_external_id').notNull(),
+    /** 'item' (same workflow item, next stage) | 'sequence' (next sibling Agent-tool spawn). */
+    kind: text('kind').notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    unique('run_links_edge_uq').on(t.companyId, t.turnExternalId, t.fromExternalId, t.toExternalId, t.kind),
+    index('run_links_company_turn_idx').on(t.companyId, t.turnId),
+    index('run_links_to_idx').on(t.toRunId),
+    index('run_links_from_idx').on(t.fromRunId),
+    check('run_links_kind', sql`${t.kind} in ('item', 'sequence')`),
+    foreignKey({ columns: [t.companyId, t.turnId], foreignColumns: [turns.companyId, turns.id] }).onDelete('cascade'),
+    foreignKey({ columns: [t.companyId, t.fromRunId], foreignColumns: [runs.companyId, runs.id] }).onDelete('cascade'),
+    foreignKey({ columns: [t.companyId, t.toRunId], foreignColumns: [runs.companyId, runs.id] }).onDelete('cascade'),
   ],
 );
 

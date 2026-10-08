@@ -6,6 +6,7 @@ import {
   type McpStats,
   type Outcome,
   type ProjectNamingMode,
+  type RunLink,
   type SkillCounts,
   type UsageEntry,
 } from '@ai-obs/protocol';
@@ -177,6 +178,32 @@ export function normalizeOrchestrationId(id: string | null | undefined): string 
   return v && AGENT_GROUP_RE.test(v) ? v : undefined;
 }
 
+/**
+ * `flow_key` as stored (ADR-0020): the slugged `<item>` of a `<stage>:<item>` label. Same rule as
+ * normalizeOrchestrationId: trimmed, clipped to 128; absent, blank or path-like / free text → undefined (NULL).
+ */
+export function normalizeFlowKey(key: string | null | undefined): string | undefined {
+  return normalizeOrchestrationId(key);
+}
+
+/**
+ * Incoming `links` of a run as stored (ADR-0020): one edge per source × kind (first wins), and never a link from
+ * the run to itself. Undefined when nothing is left.
+ */
+export function normalizeRunLinks(links: readonly RunLink[] | undefined, runId: string): RunLink[] | undefined {
+  if (!links) return undefined;
+  const seen = new Set<string>();
+  const out: RunLink[] = [];
+  for (const l of links) {
+    if (l.from_run_id === runId) continue;
+    const k = `${l.kind}:${l.from_run_id}`; // kind has no colon, so the key is unambiguous
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push({ from_run_id: l.from_run_id, kind: l.kind });
+  }
+  return out.length > 0 ? out : undefined;
+}
+
 /** Known outcome signals only; unknown strings (possibly free text) are dropped, duplicates collapsed. */
 export function normalizeOutcome(o: Outcome): Outcome {
   return { ...o, signals: [...new Set(o.signals.filter((s) => KNOWN_SIGNALS.has(s)))] };
@@ -210,9 +237,11 @@ export function enforceLimits(event: IngestEvent, naming: ProjectNamingMode = 'p
       if (tools === null) return tooBig('tools');
       const used = usageFields(event, naming);
       if (typeof used === 'string') return tooBig(used);
-      const { agent_group: rawGroup, orchestration_id: rawOrch, ...rest } = event;
+      const { agent_group: rawGroup, orchestration_id: rawOrch, flow_key: rawFlow, links: rawLinks, ...rest } = event;
       const agentGroup = normalizeAgentGroup(rawGroup, event.agent_type);
       const orchestrationId = normalizeOrchestrationId(rawOrch);
+      const flowKey = normalizeFlowKey(rawFlow);
+      const links = normalizeRunLinks(rawLinks, event.run_id);
       return {
         ok: true,
         event: {
@@ -220,6 +249,8 @@ export function enforceLimits(event: IngestEvent, naming: ProjectNamingMode = 'p
           agent_type: normalizeAgentType(event.agent_type),
           ...(agentGroup ? { agent_group: agentGroup } : {}),
           ...(orchestrationId ? { orchestration_id: orchestrationId } : {}),
+          ...(flowKey ? { flow_key: flowKey } : {}),
+          ...(links ? { links } : {}),
           ...(tools ? { tools } : {}),
           ...used,
           outcome: normalizeOutcome(event.outcome),

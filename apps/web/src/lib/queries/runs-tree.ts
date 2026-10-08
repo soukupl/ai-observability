@@ -7,6 +7,15 @@ export interface RunRow {
   agentType: string;
   /** agentGroupOf(agent_type, stored agent_group) — the same group as on the Agents page. */
   agentGroup: string;
+  /**
+   * The workflow run the agent belongs to (ADR-0019); from agg_turn_runs on both paths. Null for Agent-tool runs and
+   * rows from before ADR-0019, where the flow falls back to `flowOrchestrationId` (workflow agents by type / group).
+   */
+  orchestrationId: string | null;
+  /** 0-based ordinal of the agent's phase inside its orchestration (ADR-0020); null when unknown. */
+  stageIndex: number | null;
+  /** The `<item>` of a `<stage>:<item>` label, slugged (ADR-0020); null when the label does not follow it. */
+  flowKey: string | null;
   depth: number;
   model: string | null;
   effort: string | null;

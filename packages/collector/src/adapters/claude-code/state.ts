@@ -29,7 +29,25 @@ export interface StoredTurn {
   human?: boolean;
   /** sub-agents whose run event was sent for this turn (dropped with the turn; never capped) */
   emitted?: string[];
+  /**
+   * What run links need of the runs sent for this turn (ADR-0020), so runs sent in a later pass link to
+   * them: [run id, parent run id, orchestration id, flow key, start ms, end ms, incoming links sent]. The
+   * last element (`kind|from` pairs, sorted, comma-joined; '' = none) tells when a later run changes a sent
+   * run's incoming links, so that run is re-sent. Absent in state written by older collectors (then no
+   * links are computed for the turn).
+   */
+  runSpans?: RunSpan[];
 }
+
+export type RunSpan = [
+  runId: string,
+  parentRunId: string | null,
+  orchestrationId: string | null,
+  flowKey: string | null,
+  startedMs: number,
+  endedMs: number,
+  linksSent?: string,
+];
 
 export interface SessionState {
   v: 1;

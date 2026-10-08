@@ -22,6 +22,13 @@ export const MCP_LATENCY_BUCKETS_MS = [1_000, 5_000, 30_000, 120_000] as const;
 export const SKILL_SOURCES = ['model', 'user'] as const;
 export type SkillSource = (typeof SKILL_SOURCES)[number];
 
+/** Agent flow (ADR-0020): kinds of edges between runs of one turn, and the incoming edges one run event may carry. */
+export const RUN_LINK_KINDS = ['item', 'sequence'] as const;
+export type RunLinkKind = (typeof RUN_LINK_KINDS)[number];
+export const MAX_RUN_LINKS = 32;
+/** Highest `stage_index` of a run (a phase ordinal inside one orchestration). */
+export const MAX_STAGE_INDEX = 10_000;
+
 /**
  * Reported phases (BRIEF §5.4). `delegating` time is deliberately absent: waiting for
  * sub-agents is excluded from the parent run and counted in the child run instead.

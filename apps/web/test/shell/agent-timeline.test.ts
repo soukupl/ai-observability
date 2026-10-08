@@ -136,8 +136,12 @@ describe('row mapping', () => {
       agentType: 'workflow:impl-m08-t02b', agentGroup: 'workflow:impl', orchestrationId: null, parentRunId: null, depth: 1, tokens: 116, outcome: 'failed',
     });
     expect(mapTimelineRun({ ...base, parent_run_id: 'r0', agent_type: 'workflow:x', agent_group: 'workflow:verify', orchestration_id: 'wf_01' })).toMatchObject({
-      agentGroup: 'workflow:verify', orchestrationId: 'wf_01', parentRunId: 'r0',
+      agentGroup: 'workflow:verify', orchestrationId: 'wf_01', parentRunId: 'r0', stageIndex: null, flowKey: null,
     });
+    expect(mapTimelineRun({ ...base, agent_type: 'workflow:verify:bugs', agent_group: null, orchestration_id: 'wf_01', stage_index: 2, flow_key: 'bugs' })).toMatchObject({
+      stageIndex: 2, flowKey: 'bugs',
+    });
+    expect(mapTimelineRun({ ...base, agent_type: 'x', stage_index: '0' }).stageIndex).toBe(0);
   });
 });
 
@@ -182,7 +186,10 @@ describe.skipIf(skipReason !== null)(skipReason ? `agent timeline - SKIPPED: ${s
       expect(r.agentGroup).toBe('general-purpose');
       expect(d.runs.find((p) => p.id === r.parentRunId)?.turnId).toBe(r.turnId);
     }
-    expect(d.truncated).toEqual({ turns: false, runs: false });
+    expect(d.truncated).toEqual({ turns: false, runs: false, links: false });
+    // The seed has no siblings (one depth-1 run per turn, at most one child): no links stored or derived.
+    expect(d.links).toEqual([]);
+    expect(d.runs.every((r) => r.stageIndex === null && r.flowKey === null)).toBe(true);
     expect(d.turns.filter((t) => t.isMine)).toHaveLength(1);
   });
 
@@ -217,6 +224,57 @@ describe.skipIf(skipReason !== null)(skipReason ? `agent timeline - SKIPPED: ${s
     expect(beta.turns.map((t) => t.projectName)).toEqual(['beta', 'beta']);
     const betaAgg = await run(A, 'admin', (ctx) => getAgentTimeline(ctx, { ...R30, projectId: A.projects.beta!, effort: 'high' }, {}));
     expect(betaAgg.ignoredFilters).toEqual(['effort']);
+  });
+
+  it('returns stored links and derived sequence links on both paths; stage / flow fields come through', async () => {
+    // The 10:00 turn of 2026-10-05: add two workflow agents (review:bugs -> verify:bugs, stored `item` link) and an
+    // Agent-tool sibling of the Explore run that starts after it ended (derived `sequence` link Explore -> Plan).
+    const owner = connect();
+    const turnStart = '2026-10-05T10:00:00Z';
+    const at = (s: number) => new Date(Date.parse(turnStart) + s * 1000).toISOString();
+    const seed = async (fx: Fixture) => {
+      const add = (ext: string, type: string, group: string | null, orch: string | null, stage: number | null, flow: string | null, from: number, to: number) =>
+        owner.execute(sql`insert into runs (company_id, team_id, user_id, turn_id, turn_external_id, external_id, agent_type, agent_group,
+            orchestration_id, stage_index, flow_key, depth, model, started_at, ended_at, duration_ms, outcome)
+          select r.company_id, r.team_id, r.user_id, r.turn_id, r.turn_external_id, ${ext}, ${type}, ${group}, ${orch}, ${stage}, ${flow}, 1,
+            r.model, ${at(from)}::timestamptz, ${at(to)}::timestamptz, ${(to - from) * 1000}, 'success'
+          from runs r join turns t on t.id = r.turn_id
+          where t.company_id = ${fx.id}::uuid and t.started_at = ${turnStart}::timestamptz and r.depth = 1 and r.external_id = 'r1'`);
+      await add('w1', 'workflow:review:bugs', 'workflow:review', 'wf_t', 0, 'bugs', 3, 5);
+      await add('w2', 'workflow:verify:bugs', 'workflow:verify', 'wf_t', 1, 'bugs', 6, 8);
+      await add('p1', 'Plan', null, null, null, null, 100, 110);
+      await owner.execute(sql`insert into run_links (company_id, turn_id, turn_external_id, from_run_id, to_run_id, from_external_id, to_external_id, kind)
+        select f.company_id, f.turn_id, f.turn_external_id, f.id, t.id, 'w1', 'w2', 'item'
+        from runs f join runs t on t.turn_id = f.turn_id and t.external_id = 'w2'
+        where f.company_id = ${fx.id}::uuid and f.external_id = 'w1'`);
+    };
+    const cleanup = (fx: Fixture) => owner.execute(sql`delete from runs where company_id = ${fx.id}::uuid and external_id in ('w1', 'w2', 'p1')`);
+    await seed(A);
+    await seed(B);
+    try {
+      const sp = { day: '2026-10-05' };
+      const d = await run(B, 'admin', (ctx) => getAgentTimeline(ctx, R30, sp));
+      const a = await run(A, 'admin', (ctx) => getAgentTimeline(ctx, R30, sp));
+      const byType = (x: typeof d, t: string) => x.runs.find((r) => r.agentType === t)!;
+      expect(byType(d, 'workflow:verify:bugs')).toMatchObject({ stageIndex: 1, flowKey: 'bugs', orchestrationId: 'wf_t', agentGroup: 'workflow:verify' });
+      const turnId = byType(d, 'Plan').turnId;
+      const explore = d.runs.find((r) => r.turnId === turnId && r.agentType === 'Explore')!;
+      expect(d.links).toEqual([
+        { fromRunId: byType(d, 'workflow:review:bugs').id, toRunId: byType(d, 'workflow:verify:bugs').id, kind: 'item' },
+        { fromRunId: explore.id, toRunId: byType(d, 'Plan').id, kind: 'sequence' },
+      ]);
+      expect(d.truncated.links).toBe(false);
+      expect(canon(a)).toEqual(canon(d));
+      expect(a.links).toHaveLength(2);
+      // A member who cannot see the turn sees none of its links.
+      const m1 = await run(B, 'm1', (ctx) => getAgentTimeline(ctx, R30, sp));
+      const visible = new Set(m1.runs.map((r) => r.id));
+      expect(m1.links.every((l) => visible.has(l.fromRunId) && visible.has(l.toRunId))).toBe(true);
+      expect(m1.links.some((l) => l.kind === 'item')).toBe(false);
+    } finally {
+      await cleanup(A);
+      await cleanup(B);
+    }
   });
 
   it('a run that outlives its turn keeps its parent turn in a later window (background agents)', async () => {

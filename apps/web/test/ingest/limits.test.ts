@@ -10,6 +10,8 @@ import {
   enforceLimits,
   normalizeAgentGroup,
   normalizeAgentType,
+  normalizeFlowKey,
+  normalizeRunLinks,
   normalizeOrchestrationId,
   normalizeTools,
 } from '../../src/lib/ingest/limits';
@@ -129,6 +131,39 @@ describe('enforceLimits', () => {
     expect(normalizeOrchestrationId('0b0a6a8e-7d4b-4c1a-9b5e-3f2d1c0b9a87')).toBe('0b0a6a8e-7d4b-4c1a-9b5e-3f2d1c0b9a87');
     expect(normalizeOrchestrationId('/tmp/run')).toBeUndefined();
     expect(normalizeOrchestrationId('i'.repeat(200))).toBe('i'.repeat(128));
+  });
+
+  it('normalizeFlowKey / normalizeRunLinks (ADR-0020): trimmed key, path-like → undefined; links deduplicated without self-links', () => {
+    expect(normalizeFlowKey(undefined)).toBeUndefined();
+    expect(normalizeFlowKey('  ')).toBeUndefined();
+    expect(normalizeFlowKey(' bugs ')).toBe('bugs');
+    expect(normalizeFlowKey('/Users/me/x')).toBeUndefined();
+    expect(normalizeFlowKey('free text')).toBeUndefined();
+    expect(normalizeFlowKey('k'.repeat(200))).toBe('k'.repeat(128));
+    expect(normalizeRunLinks(undefined, 'r')).toBeUndefined();
+    expect(normalizeRunLinks([{ from_run_id: 'r', kind: 'item' }], 'r')).toBeUndefined();
+    expect(
+      normalizeRunLinks(
+        [
+          { from_run_id: 'a', kind: 'item' },
+          { from_run_id: 'a', kind: 'item' },
+          { from_run_id: 'a', kind: 'sequence' },
+          { from_run_id: 'r', kind: 'sequence' },
+        ],
+        'r',
+      ),
+    ).toEqual([
+      { from_run_id: 'a', kind: 'item' },
+      { from_run_id: 'a', kind: 'sequence' },
+    ]);
+  });
+
+  it('enforceLimits normalises a run\'s flow_key / links and drops them when unusable', () => {
+    const run = (extra: object) => parse({ ...ev.run('t', 'r', null, 1), ...extra } as never);
+    const a = enforceLimits(run({ stage_index: 3, flow_key: ' data ', links: [{ from_run_id: 'q', kind: 'item' }, { from_run_id: 'q', kind: 'item' }] }));
+    expect(a.ok && a.event.type === 'run' && [a.event.stage_index, a.event.flow_key, a.event.links]).toEqual([3, 'data', [{ from_run_id: 'q', kind: 'item' }]]);
+    const b = enforceLimits(run({ flow_key: 'a b', links: [{ from_run_id: 'r', kind: 'item' }] }));
+    expect(b.ok && b.event.type === 'run' && ['flow_key' in b.event, 'links' in b.event]).toEqual([false, false]);
   });
 
   it('enforceLimits normalises a run\'s agent_group / orchestration_id and drops them when unusable', () => {

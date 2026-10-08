@@ -163,6 +163,7 @@ a real multi-agent session:
   `spawn_agent` outputs gets the child's id and depth 2, and so on up to depth 5
 - `agent_type` = `agent_role`, else the hook's `agent_type`, else `default`
 - `agent_group` = the same role / type; omitted when it fell back to `default`
+- no `stage_index`, `flow_key` or `links` (ADR-0020): Codex records nothing to derive them from yet
 
 The turn's `usage` = main agent + all descendants. A `SubagentStop` that arrives after the parent turn
 was sent re-resolves the children, emits the `run` and re-sends the `turn` with merged usage. The resend

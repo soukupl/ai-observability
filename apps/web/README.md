@@ -150,6 +150,10 @@ Resolution rules:
   `started_at`, project, version, and back-fills the project (and mapped team) of turns that came first.
 - **Runs** before their turn keep `turn_id` null and are linked (with team / user) when the turn arrives;
   children before their parent are linked when the parent arrives.
+- **Run links** (ADR-0020): a run event stores `stage_index` and `flow_key` (trimmed, ≤ 128, path-like or free text →
+  NULL) and **replaces** the run's incoming links in `run_links` (de-duplicated, self-links dropped). A link whose source
+  run has not arrived keeps `from_run_id` NULL and is resolved when that run arrives; `turn_id` is set with the runs'
+  when the turn arrives. Reads skip unresolved links.
 - **Usage rows**: the turn event's `usage` is the **whole turn, sub-agents included** (as in the protocol
   fixture). It is stored as the turn's rows (`turn_id` set, `run_id` null) and summed into the turn's token
   columns; each run's usage is stored as rows with `run_id` set and `turn_id` **null**. So
@@ -324,7 +328,7 @@ Page helpers (`parseGroup`, hour/share formatting, chart rows) live in `src/app/
 ### Agents (`/agents`)
 
 KPI tiles (sub-agent spawns with the number of agent groups and types, spawns per turn, sub-agent tokens), the **agent
-timeline**, an `HBarChart` of tokens by agent group, the depth histogram (a note when the aggregate path only has avg / max
+timeline**, the **agent flow**, an `HBarChart` of tokens by agent group, the depth histogram (a note when the aggregate path only has avg / max
 depth) and `AgentGroupsTable`: one row per agent group (spawns, tokens, token share, success, unknown share, depth) that
 expands to its agent types. "Spawns per turn" is spawns / turns, not the share of turns that used a sub-agent (no such
 query exists). The CSV has one row per agent type with its `agent_group`.
@@ -351,6 +355,21 @@ query exists). The CSV has one row per agent type with its `agent_group`.
   Lane sublabels are `harness · HH:MM` (start of the first turn in the window) so two sessions of one project differ. In
   aggregates-only mode `sessionId` is a per-window pseudonym from `agg_timeline_turns`. The lane gutter is sticky
   (narrower below 560 px).
+- **Agent flow (ADR-0020):** a second card under the timeline, same window and zoom. `getAgentTimeline` also returns the
+  window's `links` (stored `run_links` under RLS, or `agg_timeline_links` in aggregates-only mode; at most 10,000,
+  flagged in `truncated.links`), passed through `deriveSequenceLinks` (`src/lib/queries/run-links.ts`), which adds
+  `sequence` links on read for Agent-tool runs without a stored incoming link (each run follows the sibling of the same
+  parent and turn that ended last before it started; overlapping siblings are not chained; of two siblings starting at
+  the same instant only the lower id leads). `agents/flow-view.ts` (`flowGraph`) maps it to `AgentFlow` props
+  (`components/charts/AgentFlow.tsx`, pure layout in `agent-flow-layout.ts`): one lane per orchestration (workflow run;
+  old workflow rows without an orchestration, told by type `workflow:*` / `workflow-subagent` or a `workflow` group,
+  share one pseudo lane per turn, `flowOrchestrationId`) and one per turn for
+  its Agent-tool runs, ordered by first start and capped at 40 ("+N more lanes" note). Rows inside a workflow lane are
+  its stages (`stage_index`, compacted, named by the most common phase; no ordinal → by agent group, else one row; an
+  "unstaged" row for the rest). Pills are agents coloured by group (same `groupOrder` as the timeline); arrows run from
+  the source's end to the target's start (`item` solid, `sequence` dashed). Hover highlights the whole chain, a node
+  links to its turn. Turn detail has the same card ("Flow", `turnFlow` in `turns/_helpers.ts`, hidden when the turn has
+  no runs; `agg_turn_runs` returns the orchestration, so the aggregate turn path draws the same lanes as the raw one).
 
 ### Insights on existing views (ADR-0017, ADR-0018)
 

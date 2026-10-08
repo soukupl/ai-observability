@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Database } from '@ai-obs/db';
 import { defaultFilters, type Filters } from '../../src/lib/filters';
@@ -396,6 +397,57 @@ describe.skipIf(skipReason !== null)(skipReason ? `dashboard queries - SKIPPED: 
       const ownDetail = await run(A, 'admin', (ctx) => getTurnDetail(ctx, own.id));
       expect(ownDetail!.limited).toBe(false);
       expect(ownDetail!.turn.isMine).toBe(true);
+    });
+
+    it('turn detail: stage / flow / orchestration fields and links (stored + derived) on both paths', async () => {
+      // Two workflow agents with a stored `item` link and an Agent-tool sibling after the Explore run (derived
+      // `sequence` link), on B's admin turn (direct path) and A's m2 turn seen by A's admin (aggregate path).
+      const owner = connect();
+      const seed = async (fx: Fixture, turnId: string) => {
+        const add = (ext: string, type: string, group: string | null, orch: string | null, stage: number | null, flow: string | null, from: number, to: number) =>
+          owner.execute(sql`insert into runs (company_id, team_id, user_id, turn_id, turn_external_id, external_id, agent_type, agent_group,
+              orchestration_id, stage_index, flow_key, depth, model, started_at, ended_at, duration_ms, outcome)
+            select r.company_id, r.team_id, r.user_id, r.turn_id, r.turn_external_id, ${ext}, ${type}, ${group}, ${orch}, ${stage}, ${flow}, 1,
+              r.model, t.started_at + make_interval(secs => ${from}), t.started_at + make_interval(secs => ${to}), ${(to - from) * 1000}, 'success'
+            from runs r join turns t on t.id = r.turn_id
+            where t.id = ${turnId}::uuid and r.external_id = 'r1'`);
+        await add('w1', 'workflow:review:bugs', 'workflow:review', 'wf_t', 0, 'bugs', 3, 5);
+        await add('w2', 'workflow:verify:bugs', 'workflow:verify', 'wf_t', 1, 'bugs', 6, 8);
+        await add('p1', 'Plan', null, null, null, null, 200, 210);
+        await owner.execute(sql`insert into run_links (company_id, turn_id, turn_external_id, from_run_id, to_run_id, from_external_id, to_external_id, kind)
+          select f.company_id, f.turn_id, f.turn_external_id, f.id, t.id, 'w1', 'w2', 'item'
+          from runs f join runs t on t.turn_id = f.turn_id and t.external_id = 'w2'
+          where f.turn_id = ${turnId}::uuid and f.external_id = 'w1'`);
+      };
+      const cleanup = (fx: Fixture) => owner.execute(sql`delete from runs where company_id = ${fx.id}::uuid and external_id in ('w1', 'w2', 'p1')`);
+      const own = B.turnIds.find((t) => t.userKey === 'admin')!;
+      const other = A.turnIds.find((t) => t.userKey === 'm2')!;
+      await seed(B, own.id);
+      await seed(A, other.id);
+      try {
+        const expectLinks = (d: Awaited<ReturnType<typeof getTurnDetail>>) => {
+          const id = (t: string) => d!.runs.find((r) => r.agentType === t)!.id;
+          expect(d!.links).toEqual([
+            { fromRunId: id('workflow:review:bugs'), toRunId: id('workflow:verify:bugs'), kind: 'item' },
+            { fromRunId: id('Explore'), toRunId: id('Plan'), kind: 'sequence' },
+          ]);
+        };
+        const direct = await run(B, 'admin', (ctx) => getTurnDetail(ctx, own.id));
+        expect(direct!.limited).toBe(false);
+        expect(direct!.runs.find((r) => r.agentType === 'workflow:verify:bugs')).toMatchObject({ stageIndex: 1, flowKey: 'bugs', orchestrationId: 'wf_t' });
+        expect(direct!.runs.find((r) => r.agentType === 'Explore')).toMatchObject({ stageIndex: null, flowKey: null, orchestrationId: null });
+        expectLinks(direct);
+        const agg = await run(A, 'admin', (ctx) => getTurnDetail(ctx, other.id, other.startedMs));
+        expect(agg!.limited).toBe(true);
+        // agg_turn_runs returns the orchestration, stage and flow like the raw path.
+        expect(agg!.runs.find((r) => r.agentType === 'workflow:verify:bugs')).toMatchObject({ stageIndex: 1, flowKey: 'bugs', orchestrationId: 'wf_t' });
+        expectLinks(agg);
+        // A member never sees links of a turn they cannot open.
+        expect(await run(B, 'm1', (ctx) => getTurnDetail(ctx, own.id))).toBeNull();
+      } finally {
+        await cleanup(A);
+        await cleanup(B);
+      }
     });
 
     it('a member cannot open another user\'s turn; a malformed id is null', async () => {

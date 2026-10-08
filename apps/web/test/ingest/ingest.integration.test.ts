@@ -91,9 +91,13 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
       const [r] = await q(sql`select *, input_tokens::int from runs where external_id = 'agent-a1'`);
       expect(r).toMatchObject({
         turn_id: t!.id, team_id: w.teams.mobile, user_id: w.users.alice, depth: 1, input_tokens: 300, skills: {},
-        agent_group: 'Explore', orchestration_id: 'batch-1',
+        agent_group: 'Explore', orchestration_id: 'batch-1', stage_index: 1, flow_key: 'data',
       });
       expect(Object.keys(r!.mcp as object)).toHaveLength(1);
+      // Its source (agent-a0) is not in the batch: the link waits with from_run_id NULL (ADR-0020).
+      expect(await q(sql`select turn_id, from_run_id, from_external_id, to_external_id, kind from run_links where to_run_id = ${r!.id}`)).toEqual([
+        { turn_id: t!.id, from_run_id: null, from_external_id: 'agent-a0', to_external_id: 'agent-a1', kind: 'item' },
+      ]);
 
       const u = await q<{ turn_id: string | null; run_id: string | null; input_tokens: number }>(
         sql`select turn_id, run_id, model, input_tokens::int from usage where turn_id = ${t!.id} or run_id = ${r!.id} order by model`,
@@ -604,6 +608,92 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
       const again = { ...ev.run('grp2-t', 'grp2-r', null, 1), agent_group: 'workflow:verify' } as IngestEventInput;
       expect((await post(w.tokens.alice, batch([again]))).body).toMatchObject({ accepted: 1, rejected: [] });
       expect(await runRow('grp2-r')).toMatchObject({ agent_group: 'workflow:verify', orchestration_id: null });
+    });
+  });
+
+  describe('agent flow links (ADR-0020)', () => {
+    type Link = { kind: string; from_external_id: string; from_run_id: string | null; turn_id: string | null };
+    const runId = async (ext: string) => (await q<{ id: string }>(sql`select id from runs where external_id = ${ext}`))[0]!.id;
+    const linksTo = (ext: string) =>
+      q<Link>(sql`select l.kind, l.from_external_id, l.from_run_id, l.turn_id from run_links l
+        join runs r on r.id = l.to_run_id where r.external_id = ${ext} order by l.kind, l.from_external_id`);
+    const flowRun = (turn: string, id: string, extra: Record<string, unknown> = {}) =>
+      ({ ...ev.run(turn, id, null, 1), ...extra }) as IngestEventInput;
+    const turnRowId = async (turn: string) =>
+      (await q<{ id: string }>(sql`select id from turns where external_id = ${`claude-code:${turn}`}`))[0]!.id;
+
+    it('stores links with resolved ids (deduplicated, no self-link) and resolves a link to a run that arrives later', async () => {
+      const b = flowRun('fl-t', 'fl-b', {
+        stage_index: 2,
+        flow_key: 'bugs',
+        links: [
+          { from_run_id: 'fl-a', kind: 'item' },
+          { from_run_id: 'fl-a', kind: 'item' },
+          { from_run_id: 'fl-b', kind: 'item' },
+          { from_run_id: 'fl-c', kind: 'sequence' },
+        ],
+      });
+      const res = await post(w.tokens.alice, batch([ev.turn('fl-s', 'fl-t'), flowRun('fl-t', 'fl-a'), b]));
+      expect(res.body).toMatchObject({ accepted: 3, rejected: [] });
+      const turnId = await turnRowId('fl-t');
+      const a = await runId('fl-a');
+      expect(await linksTo('fl-b')).toEqual([
+        { kind: 'item', from_external_id: 'fl-a', from_run_id: a, turn_id: turnId },
+        { kind: 'sequence', from_external_id: 'fl-c', from_run_id: null, turn_id: turnId },
+      ]);
+      const [row] = await q(sql`select stage_index, flow_key from runs where external_id = 'fl-b'`);
+      expect(row).toEqual({ stage_index: 2, flow_key: 'bugs' });
+
+      expect((await post(w.tokens.alice, batch([flowRun('fl-t', 'fl-c')]))).body).toMatchObject({ accepted: 1, rejected: [] });
+      const c = await runId('fl-c');
+      expect((await linksTo('fl-b')).map((l) => l.from_run_id)).toEqual([a, c]);
+    });
+
+    it('a re-sent run replaces its incoming links; one without links clears them', async () => {
+      const run = (links?: Array<{ from_run_id: string; kind: 'item' | 'sequence' }>) =>
+        flowRun('fl2-t', 'fl2-b', links ? { links } : {});
+      await post(w.tokens.alice, batch([ev.turn('fl2-s', 'fl2-t'), flowRun('fl2-t', 'fl2-a'), flowRun('fl2-t', 'fl2-x'),
+        run([{ from_run_id: 'fl2-a', kind: 'item' }, { from_run_id: 'fl2-x', kind: 'sequence' }])]));
+      expect((await linksTo('fl2-b')).map((l) => `${l.kind}:${l.from_external_id}`)).toEqual(['item:fl2-a', 'sequence:fl2-x']);
+      expect((await post(w.tokens.alice, batch([run([{ from_run_id: 'fl2-x', kind: 'item' }])]))).body).toMatchObject({ accepted: 1 });
+      expect(await linksTo('fl2-b')).toEqual([
+        { kind: 'item', from_external_id: 'fl2-x', from_run_id: await runId('fl2-x'), turn_id: await turnRowId('fl2-t') },
+      ]);
+      expect((await post(w.tokens.alice, batch([run()]))).body).toMatchObject({ accepted: 1 });
+      expect(await linksTo('fl2-b')).toEqual([]);
+      // The source run's own links are untouched, and re-sending the source keeps the edge resolved.
+      await post(w.tokens.alice, batch([run([{ from_run_id: 'fl2-a', kind: 'item' }])]));
+      await post(w.tokens.alice, batch([flowRun('fl2-t', 'fl2-a')]));
+      expect((await linksTo('fl2-b')).map((l) => l.from_run_id)).toEqual([await runId('fl2-a')]);
+    });
+
+    it('links of runs that arrive before their turn get the turn id when it arrives', async () => {
+      const b = flowRun('fl3-t', 'fl3-b', { links: [{ from_run_id: 'fl3-a', kind: 'sequence' }] });
+      await post(w.tokens.alice, batch([b]));
+      expect(await linksTo('fl3-b')).toEqual([{ kind: 'sequence', from_external_id: 'fl3-a', from_run_id: null, turn_id: null }]);
+      await post(w.tokens.alice, batch([flowRun('fl3-t', 'fl3-a')]));
+      await post(w.tokens.alice, batch([ev.turn('fl3-s', 'fl3-t')]));
+      expect(await linksTo('fl3-b')).toEqual([
+        { kind: 'sequence', from_external_id: 'fl3-a', from_run_id: await runId('fl3-a'), turn_id: await turnRowId('fl3-t') },
+      ]);
+    });
+
+    it('a link from the run to itself is dropped, and flow_key is sanitised (trimmed; path-like or absent → NULL)', async () => {
+      const self = flowRun('fl4-t', 'fl4-a', { flow_key: '  data  ', links: [{ from_run_id: 'fl4-a', kind: 'item' }] });
+      const pathLike = flowRun('fl4-t', 'fl4-b', { flow_key: '/Users/me/secret' });
+      const bare = flowRun('fl4-t', 'fl4-c');
+      expect((await post(w.tokens.alice, batch([ev.turn('fl4-s', 'fl4-t'), self, pathLike, bare]))).body).toMatchObject({
+        accepted: 4,
+        rejected: [],
+      });
+      expect(await linksTo('fl4-a')).toEqual([]);
+      const flow = await q(sql`select external_id, stage_index, flow_key from runs where turn_external_id = 'claude-code:fl4-t'
+        order by external_id`);
+      expect(flow).toEqual([
+        { external_id: 'fl4-a', stage_index: null, flow_key: 'data' },
+        { external_id: 'fl4-b', stage_index: null, flow_key: null },
+        { external_id: 'fl4-c', stage_index: null, flow_key: null },
+      ]);
     });
   });
 

@@ -8,8 +8,9 @@ import { aggArgs, dims, turnConds, type Dims } from './providers';
 import { addDays, dayString, rawRange, rangeFor, type ResolvedRange } from './range';
 import { agentGroupOf } from './agent-groups';
 import { buildRunTree, type RunNode, type RunRow } from './runs-tree';
+import { deriveSequenceLinks, flowOrchestrationId, mapRunLink, type RunLink } from './run-links';
 import { canSeeUsers, type QueryCtx } from './scope';
-import { addTokens, AGG_PAGE, costTokens, emptyTokens, num, rows, tokensOf, where, type TokenTotals } from './sqlutil';
+import { addTokens, AGG_PAGE, costTokens, emptyTokens, num, numOrNull, rows, tokensOf, where, type TokenTotals } from './sqlutil';
 
 export interface TurnListRow {
   id: string;
@@ -370,6 +371,12 @@ export interface TurnDetail {
   runs: RunRow[];
   /** Parent -> child tree of the runs (the main agent is the implicit root). */
   tree: RunNode[];
+  /**
+   * Links between the turn's runs (ADR-0020): the stored ones (run_links under RLS, or agg_turn_links when the turn is
+   * seen through the aggregate functions) plus `sequence` links derived for Agent-tool runs without a stored one.
+   * Both ends are runs of this turn.
+   */
+  links: RunLink[];
   /** Per model usage of the turn (direct path only; null when the viewer cannot read the usage rows). */
   usage: { model: string; effort: string | null; tokens: TokenTotals; cost: CostValue }[] | null;
   /** true = someone else's turn seen through the aggregate functions: no phases / tools / signals. */
@@ -449,13 +456,27 @@ export async function getTurnDetail(ctx: QueryCtx, turnId: string, atMs?: number
     ctx.tx,
     sql`select id, parent_run_id, agent_type, depth, model, effort, (extract(epoch from started_at) * 1000)::bigint as started_ms,
           (extract(epoch from ended_at) * 1000)::bigint as ended_ms, duration_ms, input_tokens, output_tokens, cache_read_tokens,
-          cache_write_tokens, reasoning_tokens, phases_ms, tools, outcome, agent_group from agg_turn_runs(${turnId}::uuid)`,
+          cache_write_tokens, reasoning_tokens, phases_ms, tools, outcome, agent_group, stage_index, flow_key, orchestration_id
+        from agg_turn_runs(${turnId}::uuid)`,
   );
+  // Stored links from the table when the viewer can read the turn's rows, else through agg_turn_links.
+  const linkRows = !limited
+    ? await rows<Record<string, unknown>>(
+        ctx.tx,
+        sql`select l.from_run_id, l.to_run_id, l.kind from run_links l join runs r on r.id = l.to_run_id
+            where r.turn_id = ${turnId}::uuid and r.company_id = ${ctx.viewer.companyId}::uuid and l.company_id = r.company_id
+              and l.from_run_id is not null
+            order by r.started_at, l.from_run_id`,
+      )
+    : await rows<Record<string, unknown>>(ctx.tx, sql`select from_run_id, to_run_id, kind from agg_turn_links(${turnId}::uuid)`);
   const runs: RunRow[] = runRows.map((r) => ({
     id: String(r.id),
     parentRunId: (r.parent_run_id as string | null) ?? null,
     agentType: String(r.agent_type),
     agentGroup: agentGroupOf(String(r.agent_type), (r.agent_group as string | null) ?? null),
+    orchestrationId: (r.orchestration_id as string | null) ?? null,
+    stageIndex: numOrNull(r.stage_index),
+    flowKey: (r.flow_key as string | null) ?? null,
     depth: Number(r.depth),
     model: (r.model as string | null) ?? null,
     effort: (r.effort as string | null) ?? null,
@@ -467,6 +488,12 @@ export async function getTurnDetail(ctx: QueryCtx, turnId: string, atMs?: number
     tools: (r.tools as Record<string, number>) ?? {},
     outcome: r.outcome as Outcome,
   }));
+  const runIds = new Set(runs.map((r) => r.id));
+  const stored = linkRows.map(mapRunLink).filter((l): l is RunLink => l !== null && runIds.has(l.fromRunId) && runIds.has(l.toRunId));
+  const links = deriveSequenceLinks(
+    runs.map((r) => ({ id: r.id, parentRunId: r.parentRunId, orchestrationId: flowOrchestrationId(r), startedMs: r.startedMs, endedMs: r.endedMs })),
+    stored,
+  );
   const tree = buildRunTree(runs, base.startedMs);
 
   let usage: TurnDetail['usage'] = null;
@@ -497,7 +524,7 @@ export async function getTurnDetail(ctx: QueryCtx, turnId: string, atMs?: number
   }
 
   const turn = { ...base, ...extra } as TurnDetail['turn'];
-  return { turn, runs, tree, usage, limited };
+  return { turn, runs, tree, links, usage, limited };
 }
 
 async function findViaAgg(ctx: QueryCtx, turnId: string, atMs?: number): Promise<Record<string, unknown> | null> {

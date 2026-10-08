@@ -3,7 +3,7 @@ import { buildRunTree, type RunRow } from '../../src/lib/queries/runs-tree';
 
 const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, total: 0 };
 const run = (id: string, parent: string | null, startedMs: number, over: Partial<RunRow> = {}): RunRow => ({
-  id, parentRunId: parent, agentType: id, agentGroup: id, depth: parent ? 2 : 1, model: null, effort: null, startedMs, endedMs: startedMs + 1000,
+  id, parentRunId: parent, agentType: id, agentGroup: id, orchestrationId: null, stageIndex: null, flowKey: null, depth: parent ? 2 : 1, model: null, effort: null, startedMs, endedMs: startedMs + 1000,
   durationMs: 1000, tokens, phasesMs: {}, tools: {}, outcome: 'success', ...over,
 });
 

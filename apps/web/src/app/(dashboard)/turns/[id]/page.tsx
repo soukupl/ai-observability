@@ -3,6 +3,7 @@ import { notFound } from 'next/navigation';
 import { AttributionBadge, Badge, OutcomeBadge } from '@/components/Badge';
 import { Card } from '@/components/Card';
 import { StackedBar100 } from '@/components/charts/StackedBar100';
+import { AgentFlow } from '@/components/charts/AgentFlow';
 import { AgentGraph } from '@/components/charts/AgentGraph';
 import { formatCost, formatDateTime, formatDuration, formatInt, formatTokens, formatUsageName } from '@/components/format';
 import { PageHeader } from '@/components/PageHeader';
@@ -10,7 +11,7 @@ import { RunTree } from '@/components/RunTree';
 import { requireUser } from '@/lib/auth/session';
 import { withDashboardContext } from '@/lib/queries/page';
 import { getTurnDetail } from '@/lib/queries/turns';
-import { parseStartedMs, phaseRow, toRunTree, turnGraph } from '../_helpers';
+import { parseStartedMs, phaseRow, toRunTree, turnFlow, turnGraph } from '../_helpers';
 
 export const metadata = { title: 'Turn' };
 
@@ -21,6 +22,23 @@ function Fact({ label, children }: { label: string; children: React.ReactNode })
     <div className="min-w-0">
       <dt className="text-xs text-zinc-500 dark:text-zinc-400">{label}</dt>
       <dd className="mt-0.5 break-words text-sm text-zinc-900 dark:text-zinc-100">{children}</dd>
+    </div>
+  );
+}
+
+function FlowCard({ detail }: { detail: Parameters<typeof turnFlow>[0] }) {
+  const { hiddenLanes, ...flow } = turnFlow(detail);
+  return (
+    <div className="space-y-3">
+      {hiddenLanes > 0 && (
+        <p className="text-xs text-amber-700 dark:text-amber-400" role="note">
+          +{hiddenLanes} more lane{hiddenLanes === 1 ? '' : 's'} not drawn; the earliest are shown.
+        </p>
+      )}
+      <AgentFlow
+        {...flow}
+        ariaLabel={`Turn flow: ${flow.nodes.length} sub-agent run${flow.nodes.length === 1 ? '' : 's'} in ${flow.lanes.length} lane${flow.lanes.length === 1 ? '' : 's'}, ${flow.edges.length} link${flow.edges.length === 1 ? '' : 's'}`}
+      />
     </div>
   );
 }
@@ -182,6 +200,15 @@ export default async function TurnDetailPage({ params, searchParams }: Props) {
         >
           <AgentGraph {...turnGraph(detail)} />
         </Card>
+
+        {runs.length > 0 && (
+          <Card
+            title="Flow"
+            description="How this turn's sub-agents hand work to each other: one lane per workflow run (rows are its stages in launch order) and one for the agents the main agent spawned. A solid arrow links the stages of one item; a dashed arrow links an agent to the sibling that finished before it started. Hover an agent to follow its chain. Times are UTC."
+          >
+            <FlowCard detail={detail} />
+          </Card>
+        )}
 
         <Card title="Runs" description="Parent to child.">
           <RunTree root={toRunTree(detail)} />

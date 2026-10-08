@@ -9,6 +9,7 @@ export default function Loading() {
         ))}
       </div>
       <div className="h-80 animate-pulse rounded-xl bg-zinc-200 dark:bg-zinc-800" />
+      <div className="h-64 animate-pulse rounded-xl bg-zinc-200 dark:bg-zinc-800" />
       <div className="h-72 animate-pulse rounded-xl bg-zinc-200 dark:bg-zinc-800" />
     </div>
   );

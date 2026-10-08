@@ -1,6 +1,8 @@
 import { PHASE_RULES_VERSION, toPhasesMs, type PhaseTotals } from './analysis/phases.js';
 import { normalizeMcp, normalizeMcpStats, normalizeSkills } from './analysis/usage.js';
 import {
+  MAX_RUN_LINKS,
+  MAX_STAGE_INDEX,
   MAX_SUMMARY_LENGTH,
   type McpCounts,
   type McpStats,
@@ -8,6 +10,8 @@ import {
   type PhasesMs,
   type ProjectRef,
   type RunEvent,
+  type RunLink,
+  type RunLinkKind,
   type SessionEndEvent,
   type SessionStartEvent,
   type SkillCounts,
@@ -180,6 +184,53 @@ export function turnEvent(i: TurnInput): TurnEvent {
   };
 }
 
+/** Incoming link of a run: `fromRunId` is a run of the same turn whose result fed this one. */
+export interface RunLinkInput {
+  fromRunId: string;
+  kind: RunLinkKind;
+}
+
+/** Wire links: ids clipped, self-links and duplicates dropped, at most MAX_RUN_LINKS; empty → []. */
+export function normalizeRunLinks(runId: string, links: readonly RunLinkInput[] | null | undefined): RunLink[] {
+  const self = clip(runId, 256);
+  const out: RunLink[] = [];
+  const seen = new Set<string>();
+  for (const l of links ?? []) {
+    if (out.length >= MAX_RUN_LINKS) break;
+    if (!l.fromRunId || (l.kind !== 'item' && l.kind !== 'sequence')) continue;
+    const from = clip(l.fromRunId, 256);
+    const key = `${l.kind}|${from}`;
+    if (from === self || seen.has(key)) continue;
+    seen.add(key);
+    out.push({ from_run_id: from, kind: l.kind });
+  }
+  return out;
+}
+
+/** The flow fields of a run event, each omitted when unset (older servers never see them). */
+function flowOf(i: { runId: string; stageIndex?: number | null; flowKey?: string | null; links?: readonly RunLinkInput[] | null }): {
+  stage_index?: number;
+  flow_key?: string;
+  links?: RunLink[];
+} {
+  const stage = typeof i.stageIndex === 'number' && Number.isInteger(i.stageIndex) && i.stageIndex >= 0 ? Math.min(i.stageIndex, MAX_STAGE_INDEX) : null;
+  const flow = i.flowKey ? clip(i.flowKey.trim(), 128) : '';
+  const links = normalizeRunLinks(i.runId, i.links);
+  return { ...(stage !== null ? { stage_index: stage } : {}), ...(flow ? { flow_key: flow } : {}), ...(links.length ? { links } : {}) };
+}
+
+/**
+ * The run event with these incoming links (replacing any it had; none → no `links` field). The event id
+ * is unchanged: links are attached once all runs of the turn are known, before the event is queued.
+ */
+export function withRunLinks(e: RunEvent, links: readonly RunLinkInput[] | null | undefined): RunEvent {
+  const out: RunEvent = { ...e };
+  delete out.links;
+  const wire = normalizeRunLinks(e.run_id, links);
+  if (wire.length) out.links = wire;
+  return out;
+}
+
 export interface RunInput extends Common {
   turnId: string;
   runId: string;
@@ -191,6 +242,12 @@ export interface RunInput extends Common {
   agentGroup?: string | null;
   /** workflow / batch run that launched the agent */
   orchestrationId?: string | null;
+  /** 0-based ordinal of the agent's stage inside its orchestration; omitted when unknown */
+  stageIndex?: number | null;
+  /** the item the agent worked on (slug); omitted when unknown */
+  flowKey?: string | null;
+  /** incoming links (self-links and duplicates dropped, ≤ 32) */
+  links?: readonly RunLinkInput[] | null;
   /** 1 = spawned by the main agent */
   depth: number;
   startedAt: TimeInput;
@@ -219,6 +276,7 @@ export function runEvent(i: RunInput): RunEvent {
     agent_type: clip(i.agentType || 'unknown', 128),
     ...(i.agentGroup ? { agent_group: clip(i.agentGroup, 128) } : {}),
     ...(i.orchestrationId ? { orchestration_id: clip(i.orchestrationId, 128) } : {}),
+    ...flowOf(i),
     depth: int(i.depth),
     started_at: iso(start),
     ended_at: iso(end),

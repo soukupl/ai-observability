@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { cleanupHomes } from '../helpers.js';
 import { at, SESSION, threeTurnSession, TranscriptBuilder, text, toolUse } from './fixture.js';
 import { assertValid, byType, setup, type Harness } from './helpers.js';
-import { workflowAgentGroup, workflowAgentType, type AgentMeta } from '../../src/adapters/claude-code/subagents.js';
+import { flowKeyOf, workflowAgentGroup, workflowAgentType, type AgentMeta } from '../../src/adapters/claude-code/subagents.js';
 // The dashboard's grouping rule (pure, dependency-free): the collector must produce the same groups (ADR-0019).
 import { agentGroupOf } from '../../../../apps/web/src/lib/queries/agent-groups.js';
 
@@ -35,12 +35,20 @@ function launchTurn(h: Harness): string {
   return file;
 }
 
-function writeWfAgent(h: Harness, id: string, label: string, usage: { in: number; out: number }, model = SONNET, extraMeta: Record<string, unknown> = {}) {
+function writeWfAgent(
+  h: Harness,
+  id: string,
+  label: string,
+  usage: { in: number; out: number },
+  model = SONNET,
+  extraMeta: Record<string, unknown> = {},
+  span: { start: number; end: number } = { start: 10, end: 20 },
+) {
   const dir = join(h.projectDir, SESSION, 'subagents', 'workflows', WF);
   mkdirSync(dir, { recursive: true });
   const sub = new TranscriptBuilder(SESSION, { agentId: id });
-  sub.prompt(10, `${id}-p`, 'do the task');
-  sub.assistant(20, `msg_${id}`, model, usage, [text('done')], 'high');
+  sub.prompt(span.start, `${id}-p`, 'do the task');
+  sub.assistant(span.end, `msg_${id}`, model, usage, [text('done')], 'high');
   writeFileSync(join(dir, `agent-${id}.jsonl`), sub.text());
   writeFileSync(
     join(dir, `agent-${id}.meta.json`),
@@ -121,7 +129,7 @@ describe('claude-code adapter: Workflow sub-agents', () => {
   it('without a phase the group matches what the dashboard derives from the stored agent type (parity)', () => {
     const meta = (label: string | null, agentType: string | null = null): AgentMeta => ({
       agentId: 'x', agentType, toolUseId: null, parentAgentId: null, spawnDepth: null, file: '', workflowId: WF,
-      label, workflowPhase: null, finished: false, failed: false,
+      label, workflowPhase: null, stageIndex: null, finished: false, failed: false,
     });
     const cases: [string | null, string][] = [
       ['Fix(m8) brief', 'workflow:fix'],
@@ -188,6 +196,153 @@ describe('claude-code adapter: Workflow sub-agents', () => {
     appendFileSync(join(h.projectDir, `${SESSION}.jsonl`), '');
     await h.hook('Stop', at(30));
     expect(byType(h.events, 'run').every((r) => !r.ext)).toBe(true);
+  });
+});
+
+describe('claude-code adapter: workflow agent flow (ADR-0020)', () => {
+  /** `<stage>:<item>` agents; phase per stage; start / end in fixture seconds */
+  const AGENTS: Array<[id: string, label: string, phase: string, start: number, end: number]> = [
+    ['i1data', 'impl:data', 'Impl', 10, 20],
+    ['i2ui00', 'impl:UI', 'Impl', 11, 21],
+    ['v1data', 'verify:data', 'Verify', 22, 30],
+    ['v2ui00', 'verify:UI', 'Verify', 23, 31],
+    ['f1data', 'fix:data', 'Fix', 32, 40],
+    ['plain0', 'Fix(m8) brief', 'Fix', 33, 41],
+  ];
+  const write = (h: Harness, ids: string[]) => {
+    for (const [id, label, phase, start, end] of AGENTS) {
+      if (ids.includes(id)) writeWfAgent(h, id, label, { in: 1, out: 1 }, SONNET, { workflowPhase: phase }, { start, end });
+    }
+    // launch order: the phase order of the run is the order of first `started` per phase
+    journal(h, [
+      { type: 'launched' },
+      ...AGENTS.filter(([id]) => ids.includes(id)).flatMap(([id, label, phase]) => [
+        { type: 'started', key: `k-${id}`, agentId: id, label, phase },
+        { type: 'result', key: `k-${id}`, agentId: id, result: 'never read' },
+      ]),
+    ]);
+  };
+
+  it('stage_index follows the phase order, flow_key comes from the label, item links chain one item in start order', async () => {
+    const h = setup();
+    launchTurn(h);
+    await h.hook('Stop', at(4));
+    write(h, AGENTS.map(([id]) => id));
+    wfStatus(h, 'completed');
+    await h.hook('Stop', at(50));
+    const runs = byType(h.events, 'run');
+    const row = (id: string) => runs.find((r) => r.run_id === id)!;
+    expect(AGENTS.map(([id]) => [id, row(id).stage_index, row(id).flow_key ?? null])).toEqual([
+      ['i1data', 0, 'data'],
+      ['i2ui00', 0, 'ui'],
+      ['v1data', 1, 'data'],
+      ['v2ui00', 1, 'ui'],
+      ['f1data', 2, 'data'],
+      ['plain0', 2, null],
+    ]);
+    expect(AGENTS.map(([id]) => [id, row(id).links ?? []])).toEqual([
+      ['i1data', []],
+      ['i2ui00', []],
+      ['v1data', [{ from_run_id: 'i1data', kind: 'item' }]],
+      ['v2ui00', [{ from_run_id: 'i2ui00', kind: 'item' }]],
+      ['f1data', [{ from_run_id: 'v1data', kind: 'item' }]],
+      ['plain0', []],
+    ]);
+    assertValid(h.events);
+  });
+
+  it('agents that finish in a later pass link to the runs sent earlier', async () => {
+    const h = setup();
+    launchTurn(h);
+    await h.hook('Stop', at(4));
+    write(h, ['i1data', 'i2ui00']);
+    await h.hook('UserPromptSubmit', at(25), { prompt: 'meanwhile' });
+    expect(byType(h.events, 'run').map((r) => [r.run_id, r.links ?? []])).toEqual([['i1data', []], ['i2ui00', []]]);
+    write(h, ['i1data', 'i2ui00', 'v1data', 'f1data']);
+    wfStatus(h, 'completed');
+    await h.hook('Stop', at(45));
+    const runs = byType(h.events, 'run');
+    expect(runs).toHaveLength(4);
+    expect(runs.map((r) => r.run_id).slice(0, 2)).toEqual(['i1data', 'i2ui00']);
+    expect(Object.fromEntries(runs.map((r) => [r.run_id, r.links ?? []]))).toEqual({
+      i1data: [],
+      i2ui00: [],
+      v1data: [{ from_run_id: 'i1data', kind: 'item' }],
+      f1data: [{ from_run_id: 'v1data', kind: 'item' }],
+    });
+    assertValid(h.events);
+  });
+
+  it('a run sent before the earlier-started run of its item is re-sent with the item link (new event id)', async () => {
+    const h = setup();
+    launchTurn(h);
+    await h.hook('Stop', at(4));
+    // o1late starts first but finishes last; o2fast (same item) starts later and finishes first
+    writeWfAgent(h, 'o1late', 'review:data', { in: 1, out: 1 }, SONNET, { workflowPhase: 'Review' }, { start: 10, end: 40 });
+    writeWfAgent(h, 'o2fast', 'review:data', { in: 1, out: 1 }, SONNET, { workflowPhase: 'Review' }, { start: 11, end: 15 });
+    const started = [
+      { type: 'launched' },
+      { type: 'started', key: 'k1', agentId: 'o1late', label: 'review:data', phase: 'Review' },
+      { type: 'started', key: 'k2', agentId: 'o2fast', label: 'review:data', phase: 'Review' },
+    ];
+    journal(h, [...started, { type: 'result', key: 'k2', agentId: 'o2fast', result: 'x' }]);
+    await h.hook('UserPromptSubmit', at(20), { prompt: 'meanwhile' });
+    const first = byType(h.events, 'run');
+    expect(first.map((r) => [r.run_id, r.links ?? []])).toEqual([['o2fast', []]]);
+    const turnUsage = () => byType(h.events, 'turn').at(-1)!.usage;
+
+    journal(h, [...started, { type: 'result', key: 'k2', agentId: 'o2fast', result: 'x' }, { type: 'result', key: 'k1', agentId: 'o1late', result: 'x' }]);
+    wfStatus(h, 'completed');
+    await h.hook('Stop', at(45));
+    const runs = byType(h.events, 'run');
+    expect(runs.map((r) => [r.run_id, r.links ?? []])).toEqual([
+      ['o2fast', []],
+      ['o1late', []],
+      ['o2fast', [{ from_run_id: 'o1late', kind: 'item' }]],
+    ]);
+    // the re-send is not deduplicated by ingest, and is otherwise the same run
+    expect(runs[2]!.event_id).not.toBe(runs[0]!.event_id);
+    const { event_id: _a, links: _l, ...again } = runs[2]!;
+    const { event_id: _b, ...orig } = runs[0]!;
+    expect(again).toEqual(orig);
+    // its usage is not counted twice in the turn (one sonnet request per agent)
+    expect(turnUsage().find((x) => x.model === SONNET)!.requests).toBe(2);
+    assertValid(h.events);
+
+    // nothing changed since: a later pass does not re-send it again
+    const n = h.events.length;
+    await h.hook('UserPromptSubmit', at(50), { prompt: 'again' });
+    expect(byType(h.events.slice(n), 'run')).toEqual([]);
+  });
+
+  it('no stage_index without a journal or a phase; workflow agents never get sequence links', async () => {
+    const h = setup();
+    launchTurn(h);
+    await h.hook('Stop', at(4));
+    writeWfAgent(h, 'n1aaa', 'impl:data', { in: 1, out: 1 }, SONNET, {}, { start: 10, end: 12 });
+    writeWfAgent(h, 'n2bbb', 'review', { in: 1, out: 1 }, SONNET, { workflowPhase: undefined }, { start: 13, end: 15 });
+    wfStatus(h, 'completed');
+    await h.hook('Stop', at(30));
+    const runs = byType(h.events, 'run');
+    expect(runs.map((r) => [r.run_id, r.stage_index, r.flow_key, r.links])).toEqual([
+      ['n1aaa', undefined, 'data', undefined],
+      ['n2bbb', undefined, undefined, undefined],
+    ]);
+  });
+
+  it('flowKeyOf: the slugged <item> of a <stage>:<item> label', () => {
+    const cases: [string | null, string | null][] = [
+      ['impl:data', 'data'],
+      ['verify: Data Layer', 'data-layer'],
+      ['review:bugs:2', 'bugs-2'],
+      ['impl-data', null],
+      [':data', null],
+      ['impl:', null],
+      ['impl:???', null],
+      [null, null],
+      [`impl:${'x'.repeat(100)}`, 'x'.repeat(64)],
+    ];
+    for (const [label, key] of cases) expect(flowKeyOf(label), String(label)).toBe(key);
   });
 });
 

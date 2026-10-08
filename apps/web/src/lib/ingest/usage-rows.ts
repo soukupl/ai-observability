@@ -34,7 +34,8 @@ export async function replaceUsage(
 
 /**
  * Re-points everything hanging off a turn at the turn's current owner: its usage rows, its runs
- * (also linking runs that arrived before the turn) and their usage rows.
+ * (also linking runs that arrived before the turn) and their usage rows. Run links (ADR-0020) carry no owner,
+ * only the turn id, which is linked here like runs.turn_id.
  */
 export async function propagateTurnOwner(
   tx: Tx,
@@ -46,4 +47,6 @@ export async function propagateTurnOwner(
     where turn_external_id = ${turn.key}`);
   await tx.execute(sql`update usage set team_id = ${turn.teamId}::uuid, user_id = ${turn.userId}::uuid
     where run_id in (select id from runs where turn_external_id = ${turn.key})`);
+  await tx.execute(sql`update run_links set turn_id = ${turn.id}::uuid
+    where turn_external_id = ${turn.key} and turn_id is distinct from ${turn.id}::uuid`);
 }

@@ -19,3 +19,4 @@
 - [ADR-0017: Outcome-based insights (wasted spend, skill impact, effort advisor) and outcome-split rollups](0017-outcome-insights.md)
 - [ADR-0018: Runaway alerts after a turn ends, evaluated by the worker](0018-runaway-alerts.md)
 - [ADR-0019: Agent groups and orchestration ids on runs; git-graph agent timeline](0019-agent-groups-and-timeline.md)
+- [ADR-0020: Agent flow — stage index, flow key and typed links between sub-agent runs](0020-agent-flow-links.md)

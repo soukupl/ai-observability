@@ -3,6 +3,7 @@ import type { batchEnvelope, collectorConfigResponse, ingestResponse } from './b
 import type {
   ingestEvent,
   runEvent,
+  runLink,
   sessionEndEvent,
   sessionStartEvent,
   turnEvent,
@@ -22,6 +23,8 @@ export type McpStats = z.infer<typeof mcpStats>;
 export type SessionStartEvent = z.infer<typeof sessionStartEvent>;
 export type TurnEvent = z.infer<typeof turnEvent>;
 export type RunEvent = z.infer<typeof runEvent>;
+/** One incoming edge of a run (ADR-0020). */
+export type RunLink = z.infer<typeof runLink>;
 export type TurnOutcomeEvent = z.infer<typeof turnOutcomeEvent>;
 export type TurnSummaryEvent = z.infer<typeof turnSummaryEvent>;
 export type SessionEndEvent = z.infer<typeof sessionEndEvent>;

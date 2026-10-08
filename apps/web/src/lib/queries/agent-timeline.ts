@@ -4,8 +4,9 @@ import { agentGroupOf } from './agent-groups';
 import { listProjects } from './lookups';
 import { aggArgs, dims, turnConds, type Dims } from './providers';
 import { addDays, rawRange, rangeFor, type ResolvedRange } from './range';
+import { deriveSequenceLinks, flowOrchestrationId, mapRunLink, type RunLink } from './run-links';
 import type { QueryCtx } from './scope';
-import { num, rows, tokensOf, where } from './sqlutil';
+import { num, numOrNull, rows, tokensOf, where } from './sqlutil';
 
 /**
  * Agent timeline (ADR-0019): the turns and sub-agent runs that overlap one UTC day window (optionally
@@ -59,6 +60,10 @@ export interface TimelineRun {
   agentType: string;
   agentGroup: string;
   orchestrationId: string | null;
+  /** 0-based ordinal of the agent's phase inside its orchestration (ADR-0020); null when unknown. */
+  stageIndex: number | null;
+  /** The `<item>` of a `<stage>:<item>` label, slugged (ADR-0020); null when the label does not follow it. */
+  flowKey: string | null;
   depth: number;
   model: string | null;
   startedMs: number;
@@ -72,7 +77,12 @@ export interface AgentTimelineResult {
   window: TimelineWindow;
   turns: TimelineTurn[];
   runs: TimelineRun[];
-  truncated: { turns: boolean; runs: boolean };
+  /**
+   * Links between the window's runs (ADR-0020), both ends in `runs`: the stored ones plus `sequence` links derived for
+   * Agent-tool runs without a stored incoming link.
+   */
+  links: RunLink[];
+  truncated: { turns: boolean; runs: boolean; links: boolean };
   /** UTC days inside the filter range that have turns, ascending; drives prev / next */
   days: string[];
   ignoredFilters: string[];
@@ -81,6 +91,8 @@ export interface AgentTimelineResult {
 /** Most turns / runs one window returns; more are cut (oldest kept) and flagged as truncated. */
 export const TIMELINE_MAX_TURNS = 1000;
 export const TIMELINE_MAX_RUNS = 5000;
+/** Most stored links one window reads (agg_timeline_links caps p_limit at 10 000 + 1). */
+export const TIMELINE_MAX_LINKS = 10_000;
 /** How far before the window a turn may have started and still overlap it. */
 export const TIMELINE_LOOKBACK_MS = 86_400_000;
 
@@ -188,6 +200,8 @@ export function mapTimelineRun(r: Record<string, unknown>): TimelineRun {
     agentType,
     agentGroup: agentGroupOf(agentType, str(r.agent_group)),
     orchestrationId: str(r.orchestration_id),
+    stageIndex: numOrNull(r.stage_index),
+    flowKey: str(r.flow_key),
     depth: num(r.depth),
     model: str(r.model),
     startedMs: num(r.started_ms),
@@ -235,10 +249,11 @@ export async function getAgentTimeline(ctx: QueryCtx, f: Filters, sp: Record<str
 
   let turnRows: Record<string, unknown>[];
   let runRows: Record<string, unknown>[];
+  let linkRows: Record<string, unknown>[];
   if (ctx.agg) {
     // The functions apply the look-back themselves: they take the window itself.
     const args = aggArgs({ ...d, fromIso, toIso }, 'ts');
-    [turnRows, runRows] = await Promise.all([
+    [turnRows, runRows, linkRows] = await Promise.all([
       rows<Record<string, unknown>>(
         ctx.tx,
         sql`select id, session_id, project_id, harness, model, ${MS('started_at')} as started_ms, ${MS('ended_at')} as ended_ms,
@@ -247,14 +262,18 @@ export async function getAgentTimeline(ctx: QueryCtx, f: Filters, sp: Record<str
       ),
       rows<Record<string, unknown>>(
         ctx.tx,
-        sql`select id, turn_id, parent_run_id, agent_type, agent_group, orchestration_id, depth, model,
+        sql`select id, turn_id, parent_run_id, agent_type, agent_group, orchestration_id, stage_index, flow_key, depth, model,
               ${MS('started_at')} as started_ms, ${MS('ended_at')} as ended_ms, duration_ms, ${TOKEN_COLS('')}, outcome
             from agg_timeline_runs(${args}, ${TIMELINE_MAX_RUNS + 1}::integer)`,
+      ),
+      rows<Record<string, unknown>>(
+        ctx.tx,
+        sql`select from_run_id, to_run_id, kind from agg_timeline_links(${args}, ${TIMELINE_MAX_LINKS + 1}::integer)`,
       ),
     ]);
   } else {
     const conds = turnConds(ctx, w);
-    [turnRows, runRows] = await Promise.all([
+    [turnRows, runRows, linkRows] = await Promise.all([
       rows<Record<string, unknown>>(
         ctx.tx,
         sql`select t.id, t.session_id, t.project_id, t.harness, t.model, ${MS('t.started_at')} as started_ms, ${MS('t.ended_at')} as ended_ms,
@@ -268,11 +287,20 @@ export async function getAgentTimeline(ctx: QueryCtx, f: Filters, sp: Record<str
       ),
       rows<Record<string, unknown>>(
         ctx.tx,
-        sql`select r.id, r.turn_id, r.parent_run_id, r.agent_type, r.agent_group, r.orchestration_id, r.depth, r.model,
+        sql`select r.id, r.turn_id, r.parent_run_id, r.agent_type, r.agent_group, r.orchestration_id, r.stage_index, r.flow_key, r.depth, r.model,
               ${MS('r.started_at')} as started_ms, ${MS('r.ended_at')} as ended_ms, r.duration_ms, ${TOKEN_COLS('r.')}, r.outcome
             from turns t join runs r on r.turn_id = t.id and r.company_id = t.company_id
             ${where([...conds, sql`r.started_at < ${toIso}::timestamptz`, sql`r.ended_at > ${fromIso}::timestamptz`])}
             order by r.started_at, r.id limit ${TIMELINE_MAX_RUNS + 1}`,
+      ),
+      // Links whose target run is in the window (visibility follows the target run, as the run_links policy does).
+      rows<Record<string, unknown>>(
+        ctx.tx,
+        sql`select l.from_run_id, l.to_run_id, l.kind
+            from turns t join runs r on r.turn_id = t.id and r.company_id = t.company_id
+              join run_links l on l.to_run_id = r.id and l.company_id = r.company_id
+            ${where([...conds, sql`r.started_at < ${toIso}::timestamptz`, sql`r.ended_at > ${fromIso}::timestamptz`, sql`l.from_run_id is not null`])}
+            order by r.started_at, r.id, l.from_run_id, l.kind limit ${TIMELINE_MAX_LINKS + 1}`,
       ),
     ]);
   }
@@ -288,11 +316,27 @@ export async function getAgentTimeline(ctx: QueryCtx, f: Filters, sp: Record<str
   // A run is drawn on its turn's lane: drop runs whose turn was cut off by the row cap.
   const turnIds = new Set(turns.map((x) => x.id));
   const runs = windowRuns.filter((x) => turnIds.has(x.turnId));
+  // Links: both ends must be runs of the result (a source that ended before the window is not drawn).
+  const l = capRows(linkRows, TIMELINE_MAX_LINKS);
+  const runIds = new Set(runs.map((x) => x.id));
+  const stored = l.rows.map(mapRunLink).filter((x): x is RunLink => x !== null && runIds.has(x.fromRunId) && runIds.has(x.toRunId));
+  const links = deriveSequenceLinks(
+    runs.map((x) => ({
+      id: x.id,
+      turnId: x.turnId,
+      parentRunId: x.parentRunId,
+      orchestrationId: flowOrchestrationId(x),
+      startedMs: x.startedMs,
+      endedMs: x.endedMs,
+    })),
+    stored,
+  );
   return {
     window,
     turns,
     runs,
-    truncated: { turns: t.truncated, runs: r.truncated },
+    links,
+    truncated: { turns: t.truncated, runs: r.truncated, links: l.truncated },
     days,
     ignoredFilters: ctx.agg && d.effort ? ['effort'] : [],
   };

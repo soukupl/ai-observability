@@ -3,6 +3,7 @@ import type { RunTreeNode } from '@/components/RunTree';
 import type { RunNode } from '@/lib/queries/runs-tree';
 import type { AgentGraphProps } from '@/components/charts/AgentGraph';
 import { agentRunLabel } from '../../../lib/queries/agent-groups';
+import { turnFlowParts, type FlowGraph } from '../agents/flow-view';
 
 export const OUTCOME_VALUES = ['success', 'failed', 'abandoned', 'unknown'] as const;
 export type OutcomeFilter = (typeof OUTCOME_VALUES)[number];
@@ -93,18 +94,26 @@ export function phaseRow(phases: Record<string, number> | null): { keys: string[
 }
 
 /**
+ * Axis of the turn's charts: the turn span, widened to every run (a run normally lies inside the turn; one that does
+ * not must not be clipped), padded by 2% on each side (at least a second).
+ */
+function turnAxis(d: Pick<TurnDetail, 'turn' | 'runs'>): { startMs: number; endMs: number; fromMs: number; toMs: number } {
+  const startMs = d.turn.startedMs;
+  const endMs = Math.max(d.turn.endedMs, startMs + d.turn.durationMs);
+  const first = Math.min(startMs, ...d.runs.map((r) => r.startedMs));
+  const last = Math.max(endMs, ...d.runs.map((r) => r.endedMs));
+  const pad = Math.max(1000, Math.round((last - first) * 0.02));
+  return { startMs, endMs, fromMs: first - pad, toMs: last + pad };
+}
+
+/**
  * The turn as a one-lane agent graph (same component as the Agents timeline, ADR-0019): the turn is the trunk, its
  * runs branch off it. The axis is the turn padded by 2% on each side (at least a second), with no zoom. The lane is
  * the turn's project (and harness), like a session lane on the Agents timeline.
  */
 export function turnGraph(d: Pick<TurnDetail, 'turn' | 'runs'>): Omit<AgentGraphProps, 'onZoom'> {
   const { turn } = d;
-  const startMs = turn.startedMs;
-  const endMs = Math.max(turn.endedMs, startMs + turn.durationMs);
-  // Runs normally lie inside the turn; widen the axis if one does not, so no branch is clipped.
-  const first = Math.min(startMs, ...d.runs.map((r) => r.startedMs));
-  const last = Math.max(endMs, ...d.runs.map((r) => r.endedMs));
-  const pad = Math.max(1000, Math.round((last - first) * 0.02));
+  const { startMs, endMs, fromMs, toMs } = turnAxis(d);
   const project = turn.projectName ?? (turn.projectId ? 'unknown project' : 'no project');
   return {
     lanes: [{ id: 'turn', label: project, sublabel: turn.harness, colorIndex: 0 }],
@@ -121,9 +130,31 @@ export function turnGraph(d: Pick<TurnDetail, 'turn' | 'runs'>): Omit<AgentGraph
       outcome: r.outcome,
       model: r.model,
     })),
-    fromMs: first - pad,
-    toMs: last + pad,
+    fromMs,
+    toMs,
     projectLegend: [{ label: project, colorIndex: 0 }],
     ariaLabel: `Turn timeline: main agent and ${d.runs.length} sub-agent run${d.runs.length === 1 ? '' : 's'}`,
   };
+}
+
+/**
+ * The turn's Agent flow (ADR-0020): one lane per orchestration (workflow run) of the turn, rows = its stages, and one
+ * "main agent spawns" lane for the Agent-tool runs; edges = the turn's links. Same axis as turnGraph. Nodes do not
+ * link anywhere (the page is already the turn).
+ */
+export function turnFlow(d: Pick<TurnDetail, 'turn' | 'runs' | 'links'>): FlowGraph {
+  const { fromMs, toMs } = turnAxis(d);
+  const runs = d.runs.map((r) => ({
+    id: r.id,
+    turnId: d.turn.id,
+    agentType: r.agentType,
+    agentGroup: r.agentGroup,
+    orchestrationId: r.orchestrationId ?? null,
+    stageIndex: r.stageIndex ?? null,
+    startedMs: r.startedMs,
+    endedMs: r.endedMs,
+    outcome: r.outcome,
+    model: r.model,
+  }));
+  return { ...turnFlowParts(d.turn, runs, d.links), fromMs, toMs };
 }

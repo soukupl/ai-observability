@@ -5,6 +5,7 @@ import { KpiTile } from '@/components/KpiTile';
 import { PageHeader } from '@/components/PageHeader';
 import { exportUrl } from '@/components/export-url';
 import { formatInt, formatTokens } from '@/components/format';
+import { AgentFlow } from '@/components/charts/AgentFlow';
 import { HBarChart } from '@/components/charts/HBarChart';
 import { AgentGraphWithZoom, TimelineWindowControls } from '@/components/charts/TimelineWindowControls';
 import { requireUser } from '@/lib/auth/session';
@@ -17,6 +18,7 @@ import { withDashboardContext } from '@/lib/queries/page';
 import { addDays } from '@/lib/queries/range';
 import { canSeeUsers } from '@/lib/queries/scope';
 import { depthBars, groupAgentRows, spawnsPerTurn, tokenBars } from './agents-view';
+import { FLOW_MAX_LANES, flowGraph } from './flow-view';
 import { timelineGraph, timelineNav } from './timeline-view';
 
 export const metadata = { title: 'Agents' };
@@ -39,10 +41,9 @@ export default async function AgentsPage({ searchParams }: { searchParams: Searc
   const perTurn = spawnsPerTurn(agents.totalSpawns, kpis.turns);
   const subTokens = agents.rows.reduce((s, r) => s + r.tokens.total, 0);
   const ignored = [...new Set([...agents.ignoredFilters, ...kpis.ignoredFilters, ...timeline.ignoredFilters])];
-  const graph = timelineGraph(
-    timeline,
-    groups.map((g) => g.group),
-  );
+  const groupOrder = groups.map((g) => g.group);
+  const graph = timelineGraph(timeline, groupOrder);
+  const { hiddenLanes, ...flow } = flowGraph(timeline, groupOrder);
   const nav = timelineNav('/agents', sp, timeline);
   const cut = timeline.truncated.turns || timeline.truncated.runs;
   const timelineCard = (
@@ -59,6 +60,23 @@ export default async function AgentsPage({ searchParams }: { searchParams: Searc
           </p>
         )}
         <AgentGraphWithZoom graph={graph} day={timeline.window.day} />
+      </div>
+    </Card>
+  );
+  const flowCard = (
+    <Card
+      title="Agent flow"
+      description="How sub-agents hand work to each other. One lane per workflow run and one per turn for the agents it spawned directly; rows inside a workflow lane are its stages in launch order. Each pill is an agent from start to end, coloured by agent group. A solid arrow links the stages of one item (impl:x → verify:x); a dashed arrow links an agent to the sibling that finished before it started. Hover an agent to follow its chain. Same window and zoom as the timeline above; times are UTC."
+    >
+      <div className="space-y-3">
+        {(hiddenLanes > 0 || timeline.truncated.links) && (
+          <p className="text-xs text-amber-700 dark:text-amber-400" role="note">
+            {hiddenLanes > 0 && `+${formatInt(hiddenLanes)} more lane${hiddenLanes === 1 ? '' : 's'} not drawn (the first ${FLOW_MAX_LANES} by start are shown). `}
+            {timeline.truncated.links && 'This window has more than 10,000 links; only the earliest are drawn. '}
+            Zoom in on the timeline or narrow the filters to see all of them.
+          </p>
+        )}
+        <AgentFlow {...flow} ariaLabel={`Agent flow: ${formatInt(flow.nodes.length)} sub-agent runs in ${formatInt(flow.lanes.length)} lanes, ${formatInt(flow.edges.length)} links`} />
       </div>
     </Card>
   );
@@ -83,6 +101,7 @@ export default async function AgentsPage({ searchParams }: { searchParams: Searc
             </p>
           </Card>
           {timelineCard}
+          {flowCard}
         </div>
       ) : (
         <div className="space-y-4">
@@ -97,6 +116,7 @@ export default async function AgentsPage({ searchParams }: { searchParams: Searc
             <KpiTile label="Sub-agent tokens" value={formatTokens(subTokens)} sub="tokens used by sub-agent runs" />
           </div>
           {timelineCard}
+          {flowCard}
           <Card title="Tokens by agent group" description="Tokens used by sub-agent runs of each group.">
             <HBarChart data={bars} valueFormat="tokens" ariaLabel="Tokens by agent group" />
           </Card>

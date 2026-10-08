@@ -172,6 +172,7 @@ The real hook and transcript format (field names, version 2.1.289) is documented
 | `analyze.ts` | One stretch of activity: tokens, phases, tools, edits, checks, interrupts |
 | `transcript.ts` | Byte-cursor JSONL reader; slims each line to ids, numbers and phase decisions |
 | `subagents.ts` | `subagents/agent-<id>.jsonl` + `.meta.json`, and `subagents/workflows/<wf_id>/agent-*.jsonl` + `journal.jsonl` → `run` events |
+| `run-links.ts` | Agent flow links between the runs of one turn (`item` / `sequence`, ADR-0020) |
 | `settings.ts` / `detect.ts` | `settings.json` merge, version (`claude --version`, cached 6 h) |
 
 How the adapter works:
@@ -207,6 +208,8 @@ How the adapter works:
     reported for the parent.
   - **Background sub-agents** that finish after `Stop` are sent at their `SubagentStop`, together
     with a re-sent turn.
+  - **Flow:** each run carries `links` to the sibling it followed (`sequence`: same parent, the
+    sibling with the latest end not after its start; parallel siblings are not chained).
 - **Workflow sub-agents.** The Workflow tool runs its agents in the background, under
   `<session>/subagents/workflows/<wf_id>/agent-*.jsonl`. Without these, their tokens would be missing.
   - **Linking:** the Workflow tool result (`taskType: local_workflow`, `runId: wf_…`) ties the run to
@@ -219,7 +222,15 @@ How the adapter works:
     `workflow` when empty; the same rule the dashboard applies to rows without a group), and
     `orchestration_id` is the workflow run id (`wf_…`). `ext` has `workflow_id`, `workflow_phase` and
     `workflow_label`. The script, the journal's results and the workflow `.json` are never read
-    beyond the agent ids and the final `status`.
+    beyond the agent ids, the phases of `started` records and the final `status`.
+  - **Flow (ADR-0020):** `stage_index` is the order in which the agent's phase first started in the
+    journal (0-based); `flow_key` is the `<item>` of a `<stage>:<item>` label (`impl:data` → `data`,
+    slugged, ≤ 64); `links` chains the agents of one workflow with the same `flow_key` in start order
+    (`item`: `impl:data → verify:data → fix:data`). Links are computed over every run of the turn sent
+    so far, so agents finishing in a later pass link back to earlier ones; an agent already sent whose
+    incoming links change (a same-item agent that started earlier finished later) is re-sent with them
+    under a new event id. Details in
+    [FORMAT.md](src/adapters/claude-code/FORMAT.md#agent-flow-fields-stage_index-flow_key-links-adr-0020).
   - **When:** an agent is sent when the workflow journal (`journal.jsonl`) says it returned or
     failed, when its `SubagentStop` arrives, when the workflow is over (`<session>/workflows/<wf_id>.json`
     has a `status` other than `running`) or at `SessionEnd`. This is checked after every hook, so

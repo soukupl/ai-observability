@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { MAX_RUN_LINKS, MAX_STAGE_INDEX, RUN_LINK_KINDS } from './constants.js';
 import {
   count,
   effort,
@@ -67,6 +68,9 @@ export const turnEvent = z
   })
   .refine(endsAfterStart, endsAfterStartMsg);
 
+/** One incoming edge of a run (ADR-0020). */
+export const runLink = z.object({ from_run_id: nonEmptyId, kind: z.enum(RUN_LINK_KINDS) });
+
 export const runEvent = z
   .object({
     ...base,
@@ -79,6 +83,15 @@ export const runEvent = z
     agent_group: z.string().min(1).max(128).optional(),
     /** Batch / workflow run that launched the agent (`wf_…`); optional, additive to v1 (ADR-0019). */
     orchestration_id: z.string().min(1).max(128).optional(),
+    /** 0-based ordinal of the agent's phase inside its orchestration; optional, additive to v1 (ADR-0020). */
+    stage_index: z.int().min(0).max(MAX_STAGE_INDEX).optional(),
+    /** The item named by the label convention `<stage>:<item>`, slugged; optional, additive to v1 (ADR-0020). */
+    flow_key: z.string().min(1).max(128).optional(),
+    /**
+     * Incoming edges: runs of the same turn whose result fed this run (`item`: same workflow item, earlier stage;
+     * `sequence`: earlier sibling Agent-tool spawn). Carried by the target run; optional, additive to v1 (ADR-0020).
+     */
+    links: z.array(runLink).max(MAX_RUN_LINKS).optional(),
     depth: count,
     started_at: timestamp,
     ended_at: timestamp,

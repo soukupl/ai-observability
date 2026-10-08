@@ -134,6 +134,39 @@ describe('validateBatch', () => {
     expect(res.rejected.map((r) => r.event_id)).toEqual([id(62), id(63), id(64)]);
   });
 
+  it('accepts a run with and without stage_index / flow_key / links and rejects out-of-range values (ADR-0020)', () => {
+    const run = fixture().events.find((e) => e.type === 'run')! as Record<string, unknown>;
+    const id = (n: number) => `01J9ZQ8Y3N4X5V6W7Z8A9B0C${String(n).padStart(2, '0')}`;
+    const { stage_index: _s, flow_key: _f, links: _l, ...bare } = run;
+    const link = (n: number) => ({ from_run_id: `agent-${n}`, kind: 'sequence' });
+    const res = validateBatch(
+      withEvents([
+        { ...run, event_id: id(70) },
+        { ...bare, event_id: id(71) },
+        { ...run, event_id: id(72), stage_index: 0, links: Array.from({ length: 32 }, (_, i) => link(i)) },
+        { ...run, event_id: id(73), stage_index: -1 },
+        { ...run, event_id: id(74), stage_index: 10_001 },
+        { ...run, event_id: id(75), stage_index: 1.5 },
+        { ...run, event_id: id(76), flow_key: '' },
+        { ...run, event_id: id(77), flow_key: 'k'.repeat(129) },
+        { ...run, event_id: id(78), links: Array.from({ length: 33 }, (_, i) => link(i)) },
+        { ...run, event_id: id(79), links: [{ from_run_id: 'agent-x', kind: 'continues' }] },
+        { ...run, event_id: id(80), links: [{ from_run_id: '', kind: 'item' }] },
+      ]),
+    );
+    if (!res.ok) throw new Error(res.error);
+    expect(res.events).toHaveLength(3);
+    const [withFields, without, many] = res.events;
+    expect(withFields?.type === 'run' && [withFields.stage_index, withFields.flow_key, withFields.links]).toEqual([
+      1,
+      'data',
+      [{ from_run_id: 'agent-a0', kind: 'item' }],
+    ]);
+    expect(without?.type === 'run' && [without.stage_index, without.flow_key, without.links]).toEqual([undefined, undefined, undefined]);
+    expect(many?.type === 'run' && [many.stage_index, many.links?.length]).toEqual([0, 32]);
+    expect(res.rejected.map((r) => r.event_id)).toEqual([73, 74, 75, 76, 77, 78, 79, 80].map(id));
+  });
+
   it('rejects skill / MCP names with whitespace and too many entries', () => {
     const turn = fixture().events[1]! as Record<string, unknown>;
     const id = (n: number) => `01J9ZQ8Y3N4X5V6W7Z8A9B0C${String(n).padStart(2, '0')}`;

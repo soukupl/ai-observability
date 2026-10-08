@@ -1,4 +1,15 @@
-import { validateBatch, type IngestBatchInput, type IngestEventInput, MAX_BATCH_BYTES, MAX_BATCH_EVENTS, MAX_SUMMARY_LENGTH, PHASES, SCHEMA_VERSION } from '@ai-obs/protocol';
+import {
+  validateBatch,
+  type IngestBatchInput,
+  type IngestEventInput,
+  MAX_BATCH_BYTES,
+  MAX_BATCH_EVENTS,
+  MAX_RUN_LINKS,
+  MAX_STAGE_INDEX,
+  MAX_SUMMARY_LENGTH,
+  PHASES,
+  SCHEMA_VERSION,
+} from '@ai-obs/protocol';
 import { describe, expect, it } from 'vitest';
 import { provisionalOutcome } from '../src/analysis/outcome.js';
 import { emptyPhaseTotals } from '../src/analysis/phases.js';
@@ -25,6 +36,11 @@ function allEvents(): local.IngestEvent[] {
       startedAt: new Date('2026-10-05T10:01:00Z'), endedAt: Date.parse('2026-10-05T10:02:00Z'), model: 'claude-haiku-4-5', effort: null,
       usage, phases, outcome: provisionalOutcome({ lastCheck: { kind: 'testing', exitCode: 0 } }),
     }),
+    runEvent({
+      harness, turnId: 't1', runId: 'agent-2', parentRunId: null, agentType: 'workflow:verify-data', agentGroup: 'workflow:verify',
+      orchestrationId: 'wf_1', stageIndex: 1, flowKey: 'data', links: [{ fromRunId: 'agent-1', kind: 'item' }, { fromRunId: 'agent-1', kind: 'sequence' }],
+      depth: 1, startedAt: '2026-10-05T10:02:00Z', endedAt: '2026-10-05T10:03:00Z', usage, phases, outcome: provisionalOutcome({}),
+    }),
     turnOutcomeEvent({ harness, turnId: 't1', outcome: { status: 'failed', signals: ['next_prompt_correction'], provisional: false }, at: '2026-10-05T10:05:00Z' }),
     turnSummaryEvent({ harness, turnId: 't1', summary: 'Added JWT refresh to auth middleware '.repeat(10), at: '2026-10-05T10:30:00Z' })!,
     sessionEndEvent({ harness, sessionId: 's1', reason: 'exit', at: '2026-10-05T10:30:00Z' }),
@@ -39,14 +55,20 @@ describe('collector events conform to @ai-obs/protocol', () => {
     expect(r.ok).toBe(true);
     if (r.ok) {
       expect(r.rejected).toEqual([]);
-      expect(r.events).toHaveLength(6);
+      expect(r.events).toHaveLength(7);
+      // the flow fields survive validation (ADR-0020)
+      expect(r.events.find((e) => e.type === 'run' && e.run_id === 'agent-2')).toMatchObject({
+        stage_index: 1,
+        flow_key: 'data',
+        links: [{ from_run_id: 'agent-1', kind: 'item' }, { from_run_id: 'agent-1', kind: 'sequence' }],
+      });
     }
   });
 
   it('local types are assignable to the protocol input types (compile-time)', () => {
     const events: IngestEventInput[] = allEvents();
     const batch: IngestBatchInput = buildEnvelope(buildConfig({ endpoint: 'https://x.io', token: 'aiobs_t_x' }), allEvents());
-    expect(events.length + batch.events.length).toBe(12);
+    expect(events.length + batch.events.length).toBe(14);
   });
 
   it('constants match', () => {
@@ -55,10 +77,12 @@ describe('collector events conform to @ai-obs/protocol', () => {
     expect(local.MAX_BATCH_BYTES).toBe(MAX_BATCH_BYTES);
     expect(local.MAX_SUMMARY_LENGTH).toBe(MAX_SUMMARY_LENGTH);
     expect([...local.PHASES]).toEqual([...PHASES]);
+    expect(local.MAX_RUN_LINKS).toBe(MAX_RUN_LINKS);
+    expect(local.MAX_STAGE_INDEX).toBe(MAX_STAGE_INDEX);
   });
 
   it('drops delegating, rounds phases, clamps end ≥ start, truncates summary, collapses MCP tools', () => {
-    const [, turn, , , summary] = allEvents() as [unknown, local.TurnEvent, unknown, unknown, local.TurnSummaryEvent];
+    const [, turn, , , , summary] = allEvents() as [unknown, local.TurnEvent, unknown, unknown, unknown, local.TurnSummaryEvent];
     expect(turn.phases_ms).toEqual({ thinking: 1000, coding: 2000 });
     expect(turn.tools).toEqual({ edit: 2, bash: 1, mcp: 1 });
     expect(summary.summary.length).toBeLessThanOrEqual(140);
