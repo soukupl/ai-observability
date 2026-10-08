@@ -64,3 +64,21 @@ describe('sub-agent-only models (review V2)', () => {
     expect(m.find((r) => r.model === 'a')!.turns).toBe(40);
   });
 });
+
+describe('friendly model names', () => {
+  const rows = [row('claude-opus-5-5', 'high', 10, 5, 1, 0, 1), row('claude-opus-5-5-20251101', 'high', 10, 3, 1, 0, 1), row(null, null, 1, 1, 1, 0, 1)];
+  it('adds provider and keeps the raw model id', () => {
+    const t = toTableRows(rows, 'effort');
+    expect(t.map((r) => r.model)).toEqual(['claude-opus-5-5', 'claude-opus-5-5-20251101', '(unknown)']);
+    expect(t.map((r) => r.provider)).toEqual(['Anthropic', 'Anthropic', '—']);
+  });
+  it('labels charts with friendly names, one bar per row, raw ids where names collide', () => {
+    expect(chartData(toTableRows(rows, 'effort'), 'effort', (r) => r.cost.usd)).toEqual([
+      { label: 'claude-opus-5-5 / high', value: 5 },
+      { label: 'claude-opus-5-5-20251101 / high', value: 3 },
+      { label: '(unknown) / (unknown)', value: 1 },
+    ]);
+    const single = [row('claude-opus-5-5', 'high', 10, 5, 1, 0, 1), row('claude-sonnet-5-5', 'low', 10, 3, 1, 0, 1)];
+    expect(chartData(toTableRows(single, 'model'), 'model', (r) => r.cost.usd).map((d) => d.label)).toEqual(['Opus 5.5', 'Sonnet 5.5']);
+  });
+});

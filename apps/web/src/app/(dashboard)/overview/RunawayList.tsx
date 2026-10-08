@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { Card } from '@/components/Card';
 import { formatCost, formatDateTime, formatDuration, formatTokens } from '@/components/format';
+import { formatModel } from '@/lib/model-name';
 import type { RunawayRow } from '@/lib/queries/runaways';
 
 const REASON: Record<string, string> = {
@@ -23,7 +24,7 @@ export function RunawayList({ rows }: { rows: RunawayRow[] }) {
               {formatDateTime(r.startedMs)}
             </Link>
             <span className="text-zinc-700 dark:text-zinc-300">
-              {[r.projectName, r.teamName && `team ${r.teamName}`, r.model].filter(Boolean).join(' · ')}
+              {[r.projectName, r.teamName && `team ${r.teamName}`, r.model && formatModel(r.model)].filter(Boolean).join(' · ')}
               {r.isMine && ' · yours'}
             </span>
             <span className="tabular-nums text-zinc-900 dark:text-zinc-100">

@@ -3,6 +3,7 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { useChartTheme } from '../chart-theme';
+import { formatModel } from '../../lib/model-name';
 import {
   chain,
   edgeChain,
@@ -172,7 +173,7 @@ export function AgentFlow({ lanes, nodes, edges, fromMs, toMs, groupOrder, ariaL
         <Row k="group" v={n.group} />
         {lane && <Row k="lane" v={lane.sublabel ? `${lane.label} · ${lane.sublabel}` : lane.label} />}
         {stage && <Row k="stage" v={stage} />}
-        {n.model && <Row k="model" v={n.model} />}
+        {n.model && <Row k="model" v={formatModel(n.model)} />}
         <Row k="start" v={clock(n.startMs)} />
         <Row k="duration" v={formatDuration(n.endMs - n.startMs)} />
         <Row k="outcome" v={n.outcome} />

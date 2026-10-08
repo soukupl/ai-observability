@@ -11,6 +11,7 @@ import { PageHeader } from '@/components/PageHeader';
 import { StackedBar100 } from '@/components/charts/StackedBar100';
 import { TokensAreaChart } from '@/components/charts/TokensAreaChart';
 import { formatCost, formatDuration, formatInt, formatPercent, formatTokens } from '@/components/format';
+import { formatModel, modelLabels } from '@/lib/model-name';
 import { requireUser } from '@/lib/auth/session';
 import { parseFilters } from '@/lib/filters';
 import { getEffortAdvice } from '@/lib/queries/effort';
@@ -84,7 +85,7 @@ export default async function ProjectDetailPage({ params, searchParams }: { para
       <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
         <KpiTile label="Turns" value={formatInt(kpis.turns)} />
         <KpiTile label="Tokens" value={formatTokens(kpis.tokens.total)} sub={`${formatTokens(kpis.tokens.input)} in · ${formatTokens(kpis.tokens.output)} out · ${formatTokens(kpis.tokens.cacheRead)} cache`} />
-        <KpiTile label="Est. cost" value={formatCost(kpis.cost)} sub={kpis.cost.partial ? `no price for ${kpis.cost.unknownModels.join(', ')}` : '≈ at API list prices'} />
+        <KpiTile label="Est. cost" value={formatCost(kpis.cost)} sub={kpis.cost.partial ? `no price for ${kpis.cost.unknownModels.map(formatModel).join(', ')}` : '≈ at API list prices'} />
         <KpiTile
           label="Success rate"
           value={formatPercent(success)}
@@ -96,7 +97,7 @@ export default async function ProjectDetailPage({ params, searchParams }: { para
 
       <div className="space-y-4">
         <Card title="Tokens over time" description="By model, per UTC day.">
-          {kpis.turns === 0 ? <Empty /> : <TokensAreaChart data={chartData} series={series.models} />}
+          {kpis.turns === 0 ? <Empty /> : <TokensAreaChart data={chartData} series={series.models} seriesLabels={modelLabels(series.models)} />}
         </Card>
         <Card title="Models and effort" description="A turn counts for its primary model. Cost is ≈ at API list prices.">
           <DataTable caption="Models and effort" columns={MODEL_COLUMNS} rows={modelTableRows(models.rows)} defaultSort={{ key: 'tokens', dir: 'desc' }} exportHref={exportUrl('models', f)} emptyMessage="No turns for this project in this range." />
@@ -120,7 +121,7 @@ export default async function ProjectDetailPage({ params, searchParams }: { para
               caption="Recent turns"
               columns={[
                 { key: 'started', header: 'Started', kind: 'datetime', hrefKey: 'href' },
-                { key: 'model', header: 'Model', kind: 'text' },
+                { key: 'model', header: 'Model', kind: 'model' },
                 { key: 'effort', header: 'Effort', kind: 'text' },
                 { key: 'tokens', header: 'Tokens', kind: 'tokens' },
                 { key: 'cost', header: '≈ Cost', kind: 'cost' },

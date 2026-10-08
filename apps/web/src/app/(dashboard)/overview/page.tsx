@@ -3,6 +3,7 @@ import { FilterBar } from '@/components/FilterBar';
 import { KpiTile } from '@/components/KpiTile';
 import { PageHeader } from '@/components/PageHeader';
 import { formatCost, formatDuration, formatInt, formatPercent, formatTokens } from '@/components/format';
+import { formatModel, modelLabels } from '@/lib/model-name';
 import { TokensAreaChart } from '@/components/charts/TokensAreaChart';
 import { exportUrl } from '@/components/export-url';
 import { requireUser } from '@/lib/auth/session';
@@ -60,7 +61,7 @@ export default async function OverviewPage({ searchParams }: { searchParams: Sea
         <KpiTile
           label="Est. cost"
           value={formatCost(kpis.cost)}
-          sub={kpis.cost.partial ? `no price for ${kpis.cost.unknownModels.join(', ')}` : 'at API list prices'}
+          sub={kpis.cost.partial ? `no price for ${kpis.cost.unknownModels.map(formatModel).join(', ')}` : 'at API list prices'}
           title="Estimated at API list prices from the price table; not an invoice."
         />
         <KpiTile
@@ -96,7 +97,7 @@ export default async function OverviewPage({ searchParams }: { searchParams: Sea
         {empty ? (
           <p className="py-10 text-center text-sm text-zinc-500 dark:text-zinc-400">No data in this range. Adjust the filters or the date range.</p>
         ) : (
-          <TokensAreaChart data={chartData} series={series.models} />
+          <TokensAreaChart data={chartData} series={series.models} seriesLabels={modelLabels(series.models)} />
         )}
       </Card>
       <OutcomeMix outcomes={kpis.outcomes} approximate={kpis.approximate} />

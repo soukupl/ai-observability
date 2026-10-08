@@ -44,7 +44,7 @@ export default async function PhasesPage({ searchParams }: { searchParams: Searc
     p.set('group', g);
     return `/phases?${p.toString()}`;
   };
-  const data = chartRows(phases.rows);
+  const data = chartRows(phases.rows, group);
   const label = GROUP_LABEL[group];
 
   return (
@@ -88,7 +88,7 @@ export default async function PhasesPage({ searchParams }: { searchParams: Searc
         </Card>
         {data.length > 0 && (
           <Card title="Hours and share">
-            <PhaseTable rows={phases.rows} groupLabel={label} exportHref={exportUrl('phases', filters, { group })} />
+            <PhaseTable rows={phases.rows} group={group} groupLabel={label} exportHref={exportUrl('phases', filters, { group })} />
           </Card>
         )}
         <PhaseRules version={versions} />

@@ -4,6 +4,7 @@ import { groupColorIndex } from '../../../components/charts/agent-graph-layout';
 import type { CostValue } from '../../../lib/cost';
 import type { TokenTotals } from '../../../lib/queries/sqlutil';
 import { formatCost, formatDuration, formatInt, formatTokens, formatUsageName } from '../../../components/format';
+import { modelLabels } from '../../../lib/model-name';
 
 /**
  * Pure data shaping of the Agent flows pages (brief docs/briefs/agent-flows-view.md, ADR-0020 amendment): list rows,
@@ -99,7 +100,7 @@ export function toFlowTableRows(flows: Flow[]) {
     durationMs: f.durationMs,
     tokens: f.tokens.total,
     cost: f.cost,
-    models: f.models.length > 0 ? f.models.join(', ') : null,
+    models: f.models.length > 0 ? friendlyModels(f.models) : null,
     outcome: f.outcome,
   }));
 }
@@ -140,9 +141,15 @@ export interface Fact {
   title?: string;
 }
 
+/** Friendly model names of a flow, one per id in order (so they pair with the efforts list), joined for display. */
+function friendlyModels(ids: string[]): string {
+  const names = modelLabels(ids);
+  return ids.map((id) => names[id] ?? id).join(', ');
+}
+
 /** Facts of a flow, in display order. */
 export function flowFacts(f: Flow): Fact[] {
-  const models = f.models.length > 0 ? f.models.join(', ') : '—';
+  const models = f.models.length > 0 ? friendlyModels(f.models) : '—';
   const efforts = f.efforts.length > 0 ? f.efforts.join(', ') : '—';
   return [
     { label: 'Outcome', value: f.outcome, kind: 'outcome' },

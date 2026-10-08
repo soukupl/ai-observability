@@ -6,6 +6,7 @@ import { StackedBar100 } from '@/components/charts/StackedBar100';
 import { AgentFlow } from '@/components/charts/AgentFlow';
 import { AgentGraph } from '@/components/charts/AgentGraph';
 import { formatCost, formatDateTime, formatDuration, formatInt, formatTokens, formatUsageName } from '@/components/format';
+import { ModelName } from '@/components/ModelName';
 import { PageHeader } from '@/components/PageHeader';
 import { RunTree } from '@/components/RunTree';
 import { requireUser } from '@/lib/auth/session';
@@ -90,7 +91,7 @@ export default async function TurnDetailPage({ params, searchParams }: Props) {
             <Fact label="Team">{turn.teamName ?? '—'}</Fact>
             <Fact label="Project">{turn.projectName ?? '—'}</Fact>
             <Fact label="Harness">{turn.harness}</Fact>
-            <Fact label="Model">{turn.model ?? '—'}</Fact>
+            <Fact label="Model"><ModelName id={turn.model} /></Fact>
             <Fact label="Effort">{turn.effort ?? '—'}</Fact>
             <Fact label="Duration">{formatDuration(turn.durationMs)}</Fact>
             <Fact label="≈ Cost (API list prices)">{formatCost(turn.cost)}</Fact>
@@ -128,7 +129,7 @@ export default async function TurnDetailPage({ params, searchParams }: Props) {
                 <tbody>
                   {usage.map((u) => (
                     <tr key={`${u.model}|${u.effort}`} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/60">
-                      <td className="px-2 py-2">{u.model}</td>
+                      <td className="px-2 py-2"><ModelName id={u.model} /></td>
                       <td className="px-2 py-2">{u.effort ?? '—'}</td>
                       <td className="px-2 py-2 text-right tabular-nums">{formatTokens(u.tokens.total)}</td>
                       <td className="px-2 py-2 text-right tabular-nums">{formatCost(u.cost)}</td>

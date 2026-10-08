@@ -1,3 +1,4 @@
+import { formatModel, modelLabels } from '../../../lib/model-name';
 import { PHASE_GROUPS, PHASES, type Phase, type PhaseGroup, type PhaseRow } from '../../../lib/queries/phases';
 
 export const GROUP_LABEL: Record<PhaseGroup, string> = { team: 'Team', project: 'Project', model: 'Model' };
@@ -25,9 +26,19 @@ export function formatShare(share: number): string {
   return p < 1 ? '<1%' : `${Math.round(p)}%`;
 }
 
-/** Rows with any time, as the chart wants them (absolute ms; the chart normalises to 100 %). */
-export function chartRows(rows: PhaseRow[]): { label: string; values: Record<Phase, number> }[] {
-  return rows.filter((r) => r.totalMs > 0).map((r) => ({ label: r.label, values: r.ms }));
+/** Display label of a phase row: friendly model name when grouped by model (the key stays the raw id). */
+export function rowLabel(r: { key?: string | null; label: string }, group?: PhaseGroup): string {
+  return group === 'model' && typeof r.key === 'string' ? formatModel(r.key) : r.label;
+}
+
+/**
+ * Rows with any time, as the chart wants them (absolute ms; the chart normalises to 100 %), in the rows' order.
+ * Grouped by model the labels are friendly names, unique per row (modelLabels: the raw id where names collide).
+ */
+export function chartRows(rows: PhaseRow[], group?: PhaseGroup): { label: string; values: Record<Phase, number> }[] {
+  const shown = rows.filter((r) => r.totalMs > 0);
+  const labels = group === 'model' ? modelLabels(shown.map((r) => r.key).filter((k): k is string => typeof k === 'string')) : {};
+  return shown.map((r) => ({ label: typeof r.key === 'string' ? (labels[r.key] ?? r.label) : r.label, values: r.ms }));
 }
 
 /** Time split over all rows combined (the "Total" line of the table). */

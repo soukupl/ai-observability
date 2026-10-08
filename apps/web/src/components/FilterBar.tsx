@@ -2,6 +2,7 @@
 
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useTransition, type ReactNode } from 'react';
+import { modelLabels } from '@/lib/model-name';
 import { defaultFilters, isValidDay, parseFilters, serializeFilters, type Filters, type RangeKind } from '@/lib/filters';
 
 /** Plain, serializable option lists the server passes in (see lib/queries loadFilterOptions). */
@@ -43,6 +44,7 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
  * params with parseFilters(), so views are linkable and the CSV export re-runs the exact filters.
  */
 export function FilterBar({ filters, options }: { filters: Filters; options: FilterBarOptions }) {
+  const modelNames = modelLabels(options.models); // friendly labels; values stay raw ids; raw id where names collide
   const router = useRouter();
   const pathname = usePathname();
   const current = useSearchParams();
@@ -152,7 +154,7 @@ export function FilterBar({ filters, options }: { filters: Filters; options: Fil
           <option value="">All models</option>
           {options.models.map((m) => (
             <option key={m} value={m}>
-              {m}
+              {modelNames[m] ?? m}
             </option>
           ))}
         </select>

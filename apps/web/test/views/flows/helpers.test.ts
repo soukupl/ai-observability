@@ -118,7 +118,7 @@ describe('flows list helpers', () => {
       durationMs: 100 * S,
       tokens: 200,
       cost: cost(1),
-      models: 'claude-opus',
+      models: 'Opus',
       outcome: 'success',
     });
     const seq = toFlowTableRows([flow({ kind: 'sequence', stages: [], models: [], turn: { ...flow().turn, projectId: null, projectName: null } })])[0]!;
@@ -154,7 +154,7 @@ describe('flow detail helpers', () => {
     expect(by.Started!.value).toBe('2026-10-08 10:00:00 UTC');
     expect(by.Duration!.value).toBe('1m 40s');
     expect(by.Stages!.value).toBe('impl → verify');
-    expect(by['Models · efforts']!.value).toBe('claude-opus · —');
+    expect(by['Models · efforts']!.value).toBe('Opus · —');
     expect(by.Kind!.value).toBe('workflow');
   });
 

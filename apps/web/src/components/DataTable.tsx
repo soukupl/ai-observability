@@ -5,22 +5,11 @@ import { useMemo, useState } from 'react';
 import type { CostValue } from '@/lib/cost';
 import { OutcomeBadge } from './Badge';
 import { Sparkline } from './charts/Sparkline';
+import { type CellKind, sortValue } from './data-table-sort';
 import { formatCost, formatDateTime, formatDuration, formatInt, formatPercent, formatTokens } from './format';
+import { ModelName } from './ModelName';
 
-/**
- * How a cell value is shown. Rows are plain serializable objects (a server page passes them to this
- * client component), so formatting is chosen by `kind` instead of a render function.
- *   text      string | null
- *   int       number
- *   tokens    number              compact: 1.2k, 3.4M
- *   cost      CostValue | number  "≈ $1.23", "n/a" when unknown
- *   percent   fraction 0..1
- *   duration  milliseconds
- *   datetime  epoch milliseconds (UTC)
- *   outcome   success | failed | abandoned | unknown
- *   sparkline number[]
- */
-export type CellKind = 'text' | 'int' | 'tokens' | 'cost' | 'percent' | 'duration' | 'datetime' | 'outcome' | 'sparkline';
+export type { CellKind };
 
 export interface Column {
   key: string;
@@ -37,20 +26,7 @@ export interface Column {
 
 export type Row = Record<string, unknown>;
 
-function sortValue(kind: CellKind, v: unknown): number | string | null {
-  if (v === null || v === undefined) return null;
-  switch (kind) {
-    case 'cost':
-      return typeof v === 'number' ? v : (v as CostValue).usd;
-    case 'sparkline':
-      return (v as number[]).reduce((a, b) => a + b, 0);
-    case 'text':
-    case 'outcome':
-      return String(v).toLowerCase();
-    default:
-      return typeof v === 'number' ? v : Number(v);
-  }
-}
+const LEFT_KINDS: ReadonlySet<CellKind> = new Set<CellKind>(['text', 'model', 'outcome']);
 
 function Cell({ kind, value }: { kind: CellKind; value: unknown }) {
   switch (kind) {
@@ -70,6 +46,8 @@ function Cell({ kind, value }: { kind: CellKind; value: unknown }) {
       return value ? <OutcomeBadge outcome={String(value)} /> : <>—</>;
     case 'sparkline':
       return <Sparkline values={(value as number[]) ?? []} />;
+    case 'model':
+      return <ModelName id={value === null || value === undefined ? null : String(value)} />;
     default:
       return <>{value === null || value === undefined || value === '' ? '—' : String(value)}</>;
   }
@@ -114,7 +92,7 @@ export function DataTable({
   }, [rows, columns, sort]);
 
   function toggle(col: Column) {
-    setSort((s) => (s?.key === col.key ? { key: col.key, dir: s.dir === 'asc' ? 'desc' : 'asc' } : { key: col.key, dir: col.kind === 'text' || !col.kind ? 'asc' : 'desc' }));
+    setSort((s) => (s?.key === col.key ? { key: col.key, dir: s.dir === 'asc' ? 'desc' : 'asc' } : { key: col.key, dir: !col.kind || col.kind === 'text' || col.kind === 'model' ? 'asc' : 'desc' }));
   }
 
   return (
@@ -143,7 +121,7 @@ export function DataTable({
                 {columns.map((c) => {
                   const kind = c.kind ?? 'text';
                   const sortable = c.sortable ?? kind !== 'sparkline';
-                  const right = (c.align ?? (kind === 'text' || kind === 'outcome' ? 'left' : 'right')) === 'right';
+                  const right = (c.align ?? (LEFT_KINDS.has(kind) ? 'left' : 'right')) === 'right';
                   const active = sort?.key === c.key;
                   return (
                     <th
@@ -173,7 +151,7 @@ export function DataTable({
                 <tr key={rowKey ? String(row[rowKey]) : i} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/60">
                   {columns.map((c) => {
                     const kind = c.kind ?? 'text';
-                    const right = (c.align ?? (kind === 'text' || kind === 'outcome' ? 'left' : 'right')) === 'right';
+                    const right = (c.align ?? (LEFT_KINDS.has(kind) ? 'left' : 'right')) === 'right';
                     const href = c.hrefKey ? (row[c.hrefKey] as string | undefined) : undefined;
                     const content = <Cell kind={kind} value={row[c.key]} />;
                     return (

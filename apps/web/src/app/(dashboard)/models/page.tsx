@@ -52,7 +52,8 @@ export default async function ModelsPage({ searchParams }: { searchParams: Searc
   const rows = withWasted(toTableRows(result.rows, group), wasted.byModel, group);
 
   const columns: Column[] = [
-    { key: 'model', header: 'Model', kind: 'text' },
+    { key: 'provider', header: 'Provider', kind: 'text' },
+    { key: 'model', header: 'Model', kind: 'model' },
     ...(group === 'effort' ? [{ key: 'effort', header: 'Effort', kind: 'text' } as Column] : []),
     { key: 'turns', header: 'Primary turns', kind: 'int', align: 'right', hint: PRIMARY_TURNS_HINT },
     { key: 'input', header: 'Input', kind: 'tokens', align: 'right', hint: 'Excludes cache reads and writes.' },

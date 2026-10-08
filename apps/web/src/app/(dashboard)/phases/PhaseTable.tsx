@@ -1,8 +1,9 @@
-import { PHASES, type PhaseRow } from '@/lib/queries/phases';
-import { formatHours, formatShare, totalRow } from './helpers';
+import { modelTitle } from '@/lib/model-name';
+import { PHASES, type PhaseGroup, type PhaseRow } from '@/lib/queries/phases';
+import { formatHours, formatShare, rowLabel, totalRow } from './helpers';
 
 /** Same numbers as the chart: hours and share of the row's time per phase. Scrolls inside its wrapper. */
-export function PhaseTable({ rows, groupLabel, exportHref }: { rows: PhaseRow[]; groupLabel: string; exportHref: string }) {
+export function PhaseTable({ rows, group, groupLabel, exportHref }: { rows: PhaseRow[]; group: PhaseGroup; groupLabel: string; exportHref: string }) {
   const total = totalRow(rows);
   const cell = 'whitespace-nowrap px-2 py-2 text-right align-middle tabular-nums';
   return (
@@ -34,7 +35,7 @@ export function PhaseTable({ rows, groupLabel, exportHref }: { rows: PhaseRow[];
                 key={r.rowKey}
                 className={`border-b border-zinc-100 last:border-0 dark:border-zinc-800/60 ${i === all.length - 1 && all.length > 2 ? 'font-semibold' : ''}`}
               >
-                <th scope="row" className="whitespace-nowrap px-2 py-2 text-left font-medium text-zinc-900 dark:text-zinc-100">{r.label}</th>
+                <th scope="row" className="whitespace-nowrap px-2 py-2 text-left font-medium text-zinc-900 dark:text-zinc-100" title={group === 'model' && 'key' in r && typeof r.key === 'string' ? modelTitle(r.key) : undefined}>{rowLabel(r, group)}</th>
                 {PHASES.map((p) => (
                   <td key={p} className={cell}>
                     {formatHours(r.ms[p])} <span className="text-xs text-zinc-500 dark:text-zinc-400">{formatShare(r.share[p])}</span>

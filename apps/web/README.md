@@ -205,7 +205,7 @@ return <><FilterBar filters={filters} options={data.options} /> … </>;
 
 Import components by path (`@/components/KpiTile`); there is no barrel, so client code never pulls in
 server modules. Client components take **serializable props only**: `DataTable` formats by column `kind`
-(`tokens`, `cost`, `percent`, `duration`, `datetime`, `outcome`, `sparkline`, …) and charts by
+(`tokens`, `cost`, `model`, `percent`, `duration`, `datetime`, `outcome`, `sparkline`, …) and charts by
 `valueFormat` (`tokens | int | cost | duration | percent`), never by function. Export buttons use
 `exportUrl(view, filters)`.
 
@@ -272,6 +272,8 @@ part of output). Turn lists, turn headers and the turns CSV price each usage row
 at its primary model (DP-02). A model without a price gives `usd: null` ("n/a"), never `$0`; a total over several
 models is `partial` (shown as `≈ $12.50+`) when some had no price. `formatCost` always prefixes "≈".
 
+Model ids are shown as friendly names (`claude-opus-5-5` → "Opus 5.5", raw id in the `title` tooltip) by the pure parser `src/lib/model-name.ts` (ADR-0021), mostly through the `model` column kind. Filters, URL params, chart series keys and the CSV keep the raw id; an unknown id is shown verbatim.
+
 ### CSV export
 
 `GET /api/export?view=<overview|projects|models|phases|agents|skills-mcp|turns|flows|budgets>&<filters>` (+ `group=team|project|model`
@@ -311,7 +313,7 @@ hash with the hint "name it in Admin → Projects". Unknown ids / other companie
 
 ### Models & effort (`/models`)
 
-Table from `getModelsEffort` (tokens by kind, ≈ cost, success and unknown share, median time, **primary turns**: turns whose primary model is this one; tokens and cost include sub-agent runs, so a model used only by sub-agents shows "—" there with a footnote) plus two `HBarChart`
+Table from `getModelsEffort` (a **Provider** column - Anthropic, OpenAI, Google, "—" when unknown - beside the friendly model name; tokens by kind, ≈ cost, success and unknown share, median time, **primary turns**: turns whose primary model is this one; tokens and cost include sub-agent runs, so a model used only by sub-agents shows "—" there with a footnote) plus two `HBarChart`
 cards (cost and tokens by model). `?group=effort|model` switches between model × effort (default) and model only (helpers in
 `models/group.ts`); the CSV export is always model × effort. Grouped by model, success / unknown shares are re-weighted by
 turns (approximate) and the median is shown only for models with a single effort level. The median is "—" only when raw turns are gone (range past retention) or for a forced rollup source; on long ranges inside retention it is computed from raw turns.

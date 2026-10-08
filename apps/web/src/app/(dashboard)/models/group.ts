@@ -1,3 +1,4 @@
+import { modelLabels, modelProvider } from '../../../lib/model-name';
 import type { CostValue } from '@/lib/cost';
 import type { ModelRow } from '@/lib/queries/models';
 import { modelKey, sumParts, wastedShare, type WastedPart } from '../../../lib/queries/wasted';
@@ -13,7 +14,10 @@ export const PRIMARY_TURNS_HINT =
 
 export type TableRow = {
   key: string;
+  /** Raw model id (grouping / wasted-join key); display formatting happens in the column and chart labels. */
   model: string;
+  /** Provider display name for the Provider column; — when unknown. */
+  provider: string;
   effort: string;
   /** Turns whose primary model is this row; null (shown as —) for a row that has tokens but no such turn (sub-agent-only). */
   turns: number | null;
@@ -56,6 +60,7 @@ function collapse(rows: ModelRow[], group: Grouping): TableRow[] {
   const base = (r: ModelRow): TableRow => ({
     key: `${r.model ?? ''}|${r.effort ?? ''}`,
     model: r.model ?? UNKNOWN_LABEL,
+    provider: modelProvider(r.model),
     effort: r.effort ?? UNKNOWN_LABEL,
     turns: r.turns,
     input: r.tokens.input,
@@ -104,10 +109,15 @@ function collapse(rows: ModelRow[], group: Grouping): TableRow[] {
     .sort((a, b) => (b.cost.usd ?? -1) - (a.cost.usd ?? -1) || b.total - a.total);
 }
 
-/** Chart data: one bar per table row, label "model" or "model / effort"; zero/unknown values dropped. */
+/**
+ * Chart data: one bar per table row, label "Model" or "Model / effort" with friendly names (modelLabels: the raw
+ * id where two ids share a name); zero/unknown values dropped.
+ */
 export function chartData(rows: TableRow[], group: Grouping, pick: (r: TableRow) => number | null, limit = 12) {
+  const names = modelLabels(rows.map((r) => r.model));
+  const name = (r: TableRow) => names[r.model] ?? r.model;
   return rows
-    .map((r) => ({ label: group === 'model' ? r.model : `${r.model} / ${r.effort}`, value: pick(r) }))
+    .map((r) => ({ label: group === 'model' ? name(r) : `${name(r)} / ${r.effort}`, value: pick(r) }))
     .filter((d): d is { label: string; value: number } => d.value !== null && d.value > 0)
     .sort((a, b) => b.value - a.value)
     .slice(0, limit);

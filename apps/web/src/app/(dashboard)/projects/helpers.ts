@@ -58,7 +58,7 @@ export function projectTableRows(rows: ProjectRow[], f: Filters, wasted?: Readon
 }
 
 export const MODEL_COLUMNS: Column[] = [
-  { key: 'model', header: 'Model', kind: 'text' },
+  { key: 'model', header: 'Model', kind: 'model' },
   { key: 'effort', header: 'Effort', kind: 'text' },
   { key: 'turns', header: 'Turns', kind: 'int' },
   { key: 'tokens', header: 'Tokens', kind: 'tokens' },
@@ -70,7 +70,7 @@ export const MODEL_COLUMNS: Column[] = [
 
 export function modelTableRows(rows: ModelRow[]): Row[] {
   return rows.map((r) => ({
-    model: r.model ?? 'unknown model',
+    model: r.model ?? 'unknown model', // raw id: the 'model' column kind formats it
     effort: r.effort,
     turns: r.turns,
     tokens: r.tokens.total,

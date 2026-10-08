@@ -2,6 +2,7 @@
 
 import { useEffect, useId, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { useChartTheme } from '../chart-theme';
+import { formatModel } from '../../lib/model-name';
 import {
   backgroundEnds,
   branchPath,
@@ -255,7 +256,7 @@ export function AgentGraph({ lanes, turns, runs, fromMs, toMs, projectLegend, gr
                     <div className="mb-0.5 truncate font-semibold">{run.label}</div>
                     <Row k="group" v={run.group} />
                     {turn && laneLine(turn.laneId)}
-                    {run.model && <Row k="model" v={run.model} />}
+                    {run.model && <Row k="model" v={formatModel(run.model)} />}
                     <Row k="start" v={clock(run.startMs)} />
                     <Row k="duration" v={formatDuration(run.endMs - run.startMs)} />
                     <Row k="outcome" v={run.outcome} />

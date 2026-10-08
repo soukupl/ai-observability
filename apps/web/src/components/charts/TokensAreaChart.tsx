@@ -13,12 +13,15 @@ export function TokensAreaChart({
   series,
   height = 280,
   valueFormat = 'tokens',
+  seriesLabels,
   ariaLabel = 'Stacked area chart of tokens over time by model',
 }: {
   data: SeriesRow[];
   series: string[];
   height?: number;
   valueFormat?: ValueFormat;
+  /** Display names by series key (e.g. friendly model names); keys stay the raw data keys. */
+  seriesLabels?: Record<string, string>;
   ariaLabel?: string;
 }) {
   const t = useChartTheme();
@@ -42,7 +45,7 @@ export function TokensAreaChart({
           />
           <Legend wrapperStyle={{ fontSize: 12, color: t.text }} />
           {series.map((s, i) => (
-            <Area key={s} type="linear" dataKey={s} stackId="tokens" stroke={t.color(i, s)} fill={t.color(i, s)} fillOpacity={0.6} isAnimationActive={false} />
+            <Area key={s} type="linear" dataKey={s} name={seriesLabels?.[s] ?? s} stackId="tokens" stroke={t.color(i, s)} fill={t.color(i, s)} fillOpacity={0.6} isAnimationActive={false} />
           ))}
         </AreaChart>
       </ResponsiveContainer>

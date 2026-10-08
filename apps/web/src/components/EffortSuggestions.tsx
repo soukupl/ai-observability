@@ -2,6 +2,7 @@ import type { EffortAdvice } from '@/lib/queries/effort';
 import { ADVISOR_RULES } from '@/lib/effort-advisor';
 import { Card } from './Card';
 import { formatCost, formatDuration, formatInt, formatPercent } from './format';
+import { ModelName } from './ModelName';
 
 /** "Suggestions" card of the effort advisor (docs/briefs/effort-advisor.md); `showProject` lists the project per row. */
 export function EffortSuggestions({ advice, showProject = true }: { advice: EffortAdvice; showProject?: boolean }) {
@@ -30,7 +31,7 @@ export function EffortSuggestions({ advice, showProject = true }: { advice: Effo
             >
               <p className="font-medium text-zinc-900 dark:text-zinc-100">
                 {showProject && <span>{s.projectName ?? 'No project'} · </span>}
-                {s.model}: <code>{s.to.effort}</code> instead of <code>{s.from.effort}</code> would have cost ≈ {formatPercent(s.costReduction)} less
+                <ModelName id={s.model} />: <code>{s.to.effort}</code> instead of <code>{s.from.effort}</code> would have cost ≈ {formatPercent(s.costReduction)} less
                 per turn, {formatCost(s.savingsUsd)} over {formatInt(s.from.turns)} turns.
               </p>
               <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">

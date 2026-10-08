@@ -38,6 +38,15 @@ describe('rows', () => {
   it('chartRows drops empty rows', () => {
     expect(chartRows(rows).map((r) => r.label)).toEqual(['a', 'b']);
   });
+  it('chartRows shows friendly model names only when grouped by model; one row per id, raw id where names collide', () => {
+    const models = [mk('claude-opus-5-5', { coding: 1000 }), mk('claude-sonnet-4-5', { coding: 500 }), mk('claude-sonnet-4-5-20250929', { testing: 250 })];
+    expect(chartRows(models, 'team').map((r) => r.label)).toEqual(['claude-opus-5-5', 'claude-sonnet-4-5', 'claude-sonnet-4-5-20250929']);
+    const byModel = chartRows(models, 'model');
+    expect(byModel.map((r) => r.label)).toEqual(['Opus 5.5', 'claude-sonnet-4-5', 'claude-sonnet-4-5-20250929']);
+    expect(byModel.map((r) => r.values.coding)).toEqual([1000, 500, 0]);
+    expect(chartRows([mk('claude-haiku-4-5', { coding: 1 })], 'model')[0]!.label).toBe('Haiku 4.5');
+    expect(chartRows([{ ...mk('(unknown model)', { coding: 1 }), key: null }], 'model')[0]!.label).toBe('(unknown model)');
+  });
   it('totalRow sums and normalises', () => {
     const t = totalRow(rows);
     expect(t.totalMs).toBe(4 * 3_600_000);

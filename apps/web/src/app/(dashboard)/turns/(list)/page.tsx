@@ -34,7 +34,7 @@ export default async function TurnsPage({ searchParams }: { searchParams: Search
     ...(showUser ? [{ key: 'user', header: 'User', kind: 'text' as const }] : []),
     { key: 'project', header: 'Project', kind: 'text' },
     { key: 'harness', header: 'Harness', kind: 'text' },
-    { key: 'model', header: 'Model', kind: 'text' },
+    { key: 'model', header: 'Model', kind: 'model' },
     { key: 'effort', header: 'Effort', kind: 'text' },
     { key: 'durationMs', header: 'Duration', kind: 'duration' },
     { key: 'tokens', header: 'Tokens', kind: 'tokens' },

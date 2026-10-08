@@ -31,7 +31,7 @@ const stepColumns: Column[] = [
   { key: 'stage', header: 'Stage', kind: 'text' },
   { key: 'label', header: 'Step', kind: 'text' },
   { key: 'group', header: 'Group', kind: 'text' },
-  { key: 'model', header: 'Model', kind: 'text' },
+  { key: 'model', header: 'Model', kind: 'model' },
   { key: 'effort', header: 'Effort', kind: 'text' },
   { key: 'startedMs', header: 'Start (UTC)', kind: 'datetime' },
   { key: 'offsetMs', header: '+ Offset', kind: 'duration', hint: 'Time from the flow start' },

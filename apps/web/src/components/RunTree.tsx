@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { OutcomeBadge } from './Badge';
+import { formatModelEffort, modelTitle } from '../lib/model-name';
 import { formatDuration, formatTokens } from './format';
 
 export interface RunTreeNode {
@@ -19,7 +20,7 @@ function Node({ node }: { node: RunTreeNode }): ReactNode {
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md px-2 py-1.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/50">
         <span className="font-medium">{node.label}</span>
         {(node.model || node.effort) && (
-          <span className="text-xs text-zinc-500 dark:text-zinc-400">{[node.model, node.effort].filter(Boolean).join(' · ')}</span>
+          <span className="text-xs text-zinc-500 dark:text-zinc-400" title={node.model ? modelTitle(node.model) : undefined}>{formatModelEffort(node.model, node.effort)}</span>
         )}
         <span className="text-xs tabular-nums text-zinc-500 dark:text-zinc-400">{formatDuration(node.durationMs)}</span>
         <span className="text-xs tabular-nums text-zinc-500 dark:text-zinc-400">{formatTokens(node.tokens)} tokens</span>
