@@ -25,6 +25,10 @@ export interface RunRow {
   tokens: TokenTotals;
   phasesMs: Record<string, number>;
   tools: Record<string, number>;
+  /** Skill uses of the run (name -> model / user invocations); null when the row did not carry them. */
+  skills: Record<string, { model: number; user: number }> | null;
+  /** MCP calls of the run (server -> tool -> calls); null when the row did not carry them. */
+  mcp: Record<string, Record<string, number>> | null;
   outcome: Outcome;
 }
 

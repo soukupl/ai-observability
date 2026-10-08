@@ -12,7 +12,7 @@ export const dynamic = 'force-dynamic';
 const OUTCOMES = ['success', 'failed', 'abandoned', 'unknown'] as const;
 
 /**
- * GET /api/export?view=<projects|models|phases|agents|turns|overview|budgets>&<filters>
+ * GET /api/export?view=<projects|models|phases|agents|turns|flows|overview|budgets>&<filters>
  * Re-runs the view's query under the caller's RLS context and visibility mode (so a CSV can never show
  * more than the screen), streams it as CSV, and records an `export` row in audit_log (BRIEF §8).
  */
@@ -31,7 +31,7 @@ export async function GET(req: Request): Promise<Response> {
   const group = params.get('group');
   if (view === 'phases' && isPhaseGroup(group)) opts.group = group;
   const outcome = params.get('outcome');
-  if (view === 'turns' && (OUTCOMES as readonly string[]).includes(outcome ?? '')) opts.outcome = outcome as (typeof OUTCOMES)[number];
+  if ((view === 'turns' || view === 'flows') && (OUTCOMES as readonly string[]).includes(outcome ?? '')) opts.outcome = outcome as (typeof OUTCOMES)[number];
 
   const companyId = viewer.companyId;
   const { table, range } = await withUserDb(user, async (tx) => {
@@ -60,7 +60,7 @@ export async function GET(req: Request): Promise<Response> {
       'Content-Disposition': `attachment; filename="${filename}"`,
       'Cache-Control': 'no-store',
       'X-Content-Type-Options': 'nosniff',
-      // The turns CSV ends with a TRUNCATED marker row when the export cap was hit (DP-11).
+      // The turns / flows CSV ends with a TRUNCATED marker row when the export cap was hit (DP-11).
       ...(table.truncated ? { 'X-Truncated': 'true' } : {}),
     },
   });

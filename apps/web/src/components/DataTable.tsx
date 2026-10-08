@@ -177,7 +177,7 @@ export function DataTable({
                     const href = c.hrefKey ? (row[c.hrefKey] as string | undefined) : undefined;
                     const content = <Cell kind={kind} value={row[c.key]} />;
                     return (
-                      <td key={c.key} className={`px-2 py-2 align-middle tabular-nums ${right ? 'text-right' : 'text-left'}`}>
+                      <td key={c.key} className={`px-2 py-2 align-middle tabular-nums ${right ? 'text-right' : 'text-left'}${kind === 'cost' ? ' whitespace-nowrap' : ''}`}>
                         {href ? (
                           <Link href={href} className="font-medium text-blue-700 hover:underline dark:text-blue-400">
                             {content}

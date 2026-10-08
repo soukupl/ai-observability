@@ -4,6 +4,7 @@ import type { CostValue } from '../cost';
 import type { Filters } from '../filters';
 import { getAgents } from './agents';
 import { getBudgetProgress } from './budgets';
+import { FLOW_MAX_RUNS, listFlows } from './flows';
 import { getModelsEffort } from './models';
 import { getPhases, PHASES, type PhaseGroup, PHASE_GROUPS } from './phases';
 import { getProjects } from './projects';
@@ -15,7 +16,7 @@ import { getTokenSeries } from './timeseries';
 import { exportTurns } from './turns';
 
 /** Table views that have a CSV export (BRIEF §8: every table view). */
-export const EXPORT_VIEWS = ['overview', 'projects', 'models', 'phases', 'agents', 'skills-mcp', 'turns', 'budgets'] as const;
+export const EXPORT_VIEWS = ['overview', 'projects', 'models', 'phases', 'agents', 'skills-mcp', 'turns', 'flows', 'budgets'] as const;
 export type ExportView = (typeof EXPORT_VIEWS)[number];
 
 export interface CsvTable {
@@ -31,7 +32,7 @@ export interface CsvTable {
 export interface ExportOptions {
   /** phases: team | project | model */
   group?: PhaseGroup;
-  /** turns: outcome filter */
+  /** turns, flows: outcome filter */
   outcome?: Outcome | null;
   /** turns: row cap (default EXPORT_MAX_ROWS); newest rows are kept. */
   maxRows?: number;
@@ -168,6 +169,33 @@ export async function buildExportTable(ctx: QueryCtx, view: ExportView, f: Filte
         // A visible last row: a cut-off export must not look complete.
         const note: CsvCell[] = headers.map(() => '');
         note[0] = `TRUNCATED: only the newest ${turns.length} turns are listed; narrow the range or filters to export the rest`;
+        body.push(note);
+      }
+      return { headers, rows: body, truncated };
+    }
+    case 'flows': {
+      const { flows, truncated } = await listFlows(ctx, f, opts.outcome ?? null);
+      const headers = [
+        'started_at', 'project', 'flow', 'kind', 'steps', 'stages', 'duration_ms', ...TOKEN_HEADERS, 'est_cost_usd', 'models', 'outcome', 'turn_id', 'key',
+      ];
+      const body = flows.map((x): CsvCell[] => [
+        iso(x.startedMs),
+        x.turn.projectName,
+        x.name,
+        x.kind,
+        x.steps.length,
+        x.stages.join(' → '),
+        x.durationMs,
+        ...tokenCells(x.tokens),
+        usd(x.cost),
+        x.models.join(', '),
+        x.outcome,
+        x.turnId,
+        x.key,
+      ]);
+      if (truncated) {
+        const note: CsvCell[] = headers.map(() => '');
+        note[0] = `TRUNCATED: the range has more than ${FLOW_MAX_RUNS} sub-agent runs; only flows of the oldest runs are listed; narrow the range or filters to export the rest`;
         body.push(note);
       }
       return { headers, rows: body, truncated };

@@ -40,3 +40,14 @@ agents. The owner labels workflow agents `<stage>:<item>`, which names the chain
 - The label convention is a soft contract: agents without `<stage>:<item>` labels get phase rows but no `item` edges.
 - Links are intra-turn by construction (every sub-agent of a turn, workflow agents included, belongs to the turn that
   launched it), so no cross-turn joins are needed.
+
+## Amendment 2026-10-08: the "Agent flows" view and the flow definition
+
+- **Decided by:** owner ("create a new section Agent flows … list full flows (more than one step) with detail page",
+  2026-10-08); definitions by Claude ([brief](../briefs/agent-flows-view.md)).
+- A **flow** is a set of ≥ 2 sub-agent runs of one turn: one Workflow-tool run (`orchestration_id`), all legacy
+  `workflow:*` runs of a turn (pre-ADR-0019 data), or a connected component of Agent-tool runs over `sequence` / `item`
+  links. Steps are runs; stages come from `stage_index` or the agent-group fallback. Flow outcome is the worst step
+  outcome; ≈ cost sums per-step costs at the run's primary model price.
+- New view `/flows` (list, CSV) and `/flows/<turnId>/<key>` (detail), read from raw runs (`agg_flow_runs` in
+  aggregates-only mode, migration 0013). Flows are computed in the query layer, not stored.

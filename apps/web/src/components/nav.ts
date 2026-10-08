@@ -12,6 +12,7 @@ export const VIEW_NAV: readonly NavItem[] = [
   { href: '/models', label: 'Models & effort', title: 'Cost, tokens and success per model and effort level' },
   { href: '/phases', label: 'Phases', title: 'Where the time goes: thinking, coding, testing, …' },
   { href: '/agents', label: 'Agents', title: 'Sub-agent usage' },
+  { href: '/flows', label: 'Agent flows', title: 'Multi-step sub-agent flows: steps, tokens, time, models, phases' },
   { href: '/skills-mcp', label: 'Skills & MCP', title: 'Which skills and MCP servers are used, and how often' },
   { href: '/turns', label: 'Turns', title: 'Explore single turns with their run timeline' },
 ];

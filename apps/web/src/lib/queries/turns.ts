@@ -456,7 +456,8 @@ export async function getTurnDetail(ctx: QueryCtx, turnId: string, atMs?: number
     ctx.tx,
     sql`select id, parent_run_id, agent_type, depth, model, effort, (extract(epoch from started_at) * 1000)::bigint as started_ms,
           (extract(epoch from ended_at) * 1000)::bigint as ended_ms, duration_ms, input_tokens, output_tokens, cache_read_tokens,
-          cache_write_tokens, reasoning_tokens, phases_ms, tools, outcome, agent_group, stage_index, flow_key, orchestration_id
+          cache_write_tokens, reasoning_tokens, phases_ms, tools, outcome, agent_group, stage_index, flow_key, orchestration_id,
+          skills, mcp
         from agg_turn_runs(${turnId}::uuid)`,
   );
   // Stored links from the table when the viewer can read the turn's rows, else through agg_turn_links.
@@ -486,6 +487,8 @@ export async function getTurnDetail(ctx: QueryCtx, turnId: string, atMs?: number
     tokens: tokensOf(r),
     phasesMs: (r.phases_ms as Record<string, number>) ?? {},
     tools: (r.tools as Record<string, number>) ?? {},
+    skills: (r.skills as Record<string, { model: number; user: number }> | null) ?? null,
+    mcp: (r.mcp as Record<string, Record<string, number>> | null) ?? null,
     outcome: r.outcome as Outcome,
   }));
   const runIds = new Set(runs.map((r) => r.id));

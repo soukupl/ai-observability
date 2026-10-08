@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { CSV_BOM, csvEscape, csvStream, toCsv } from '../../src/lib/csv';
+import { EXPORT_VIEWS, isExportView } from '../../src/lib/queries/exports';
 
 describe('csv', () => {
   it('quotes commas, quotes and line breaks (RFC 4180)', () => {
@@ -46,5 +47,10 @@ describe('csv', () => {
     const text = new TextDecoder('utf-8', { ignoreBOM: true }).decode(Buffer.concat(chunks));
     expect(text).toBe(toCsv(['n', 'text'], rows));
     expect(chunks.length).toBeGreaterThan(5);
+  });
+
+  it('the Agent flows view has a CSV export', () => {
+    expect(EXPORT_VIEWS).toContain('flows');
+    expect(isExportView('flows')).toBe(true);
   });
 });

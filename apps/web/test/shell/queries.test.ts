@@ -8,6 +8,8 @@ import {
   getAgents,
   getEffortAdvice,
   getEffortCells,
+  getFlowDetail,
+  getFlows,
   getBudgetProgress,
   getKpis,
   getModelsEffort,
@@ -444,6 +446,99 @@ describe.skipIf(skipReason !== null)(skipReason ? `dashboard queries - SKIPPED: 
         expectLinks(agg);
         // A member never sees links of a turn they cannot open.
         expect(await run(B, 'm1', (ctx) => getTurnDetail(ctx, own.id))).toBeNull();
+      } finally {
+        await cleanup(A);
+        await cleanup(B);
+      }
+    });
+
+    it('agent flows: list (direct = aggregate path), outcome filter, totals, detail, visibility, CSV', async () => {
+      // A two-stage workflow (stored `item` link, failed second step, a skill on the first) and an Agent-tool run after
+      // the Explore run (derived `sequence` link) on m2's turn in B (direct path) and in A (aggregate path): identical data, so both paths must agree.
+      const owner = connect();
+      const seed = async (turnId: string) => {
+        const add = (ext: string, type: string, group: string | null, orch: string | null, stage: number | null, from: number, to: number, outcome: string, skills: string) =>
+          owner.execute(sql`insert into runs (company_id, team_id, user_id, turn_id, turn_external_id, external_id, agent_type, agent_group,
+              orchestration_id, stage_index, depth, model, started_at, ended_at, duration_ms, input_tokens, output_tokens, outcome, skills)
+            select r.company_id, r.team_id, r.user_id, r.turn_id, r.turn_external_id, ${ext}, ${type}, ${group}, ${orch}, ${stage}, 1,
+              r.model, t.started_at + make_interval(secs => ${from}), t.started_at + make_interval(secs => ${to}), ${(to - from) * 1000},
+              1000, 100, ${outcome}::outcome, ${skills}::jsonb
+            from runs r join turns t on t.id = r.turn_id
+            where t.id = ${turnId}::uuid and r.external_id = 'r1'`);
+        await add('fw1', 'workflow:review:bugs', 'workflow:review', 'wf_f', 0, 3, 5, 'success', '{"tdd":{"model":1,"user":0}}');
+        await add('fw2', 'workflow:verify:bugs', 'workflow:verify', 'wf_f', 1, 6, 8, 'failed', '{}');
+        await add('fp1', 'Plan', null, null, null, 200, 210, 'success', '{}');
+        await owner.execute(sql`insert into run_links (company_id, turn_id, turn_external_id, from_run_id, to_run_id, from_external_id, to_external_id, kind)
+          select f.company_id, f.turn_id, f.turn_external_id, f.id, t.id, 'fw1', 'fw2', 'item'
+          from runs f join runs t on t.turn_id = f.turn_id and t.external_id = 'fw2'
+          where f.turn_id = ${turnId}::uuid and f.external_id = 'fw1'`);
+      };
+      const cleanup = (fx: Fixture) => owner.execute(sql`delete from runs where company_id = ${fx.id}::uuid and external_id in ('fw1', 'fw2', 'fp1')`);
+      const own = B.turnIds.find((t) => t.userKey === 'm2')!;
+      const other = A.turnIds.find((t) => t.userKey === 'm2')!;
+      await seed(own.id);
+      await seed(other.id);
+      try {
+        const direct = await run(B, 'admin', (ctx) => getFlows(ctx, R30, { page: 1, outcome: null }));
+        const agg = await run(A, 'admin', (ctx) => getFlows(ctx, R30, { page: 1, outcome: null }));
+        expect(direct.total).toBe(2);
+        expect(direct.truncated).toBe(false);
+        expect(direct.flows.every((x) => x.turnId === own.id && !x.turn.isMine && x.turn.projectName === 'beta')).toBe(true);
+        const wf = direct.flows.find((x) => x.kind === 'workflow')!;
+        expect(wf).toMatchObject({ key: 'wf_f', name: 'review → verify', stages: ['review', 'verify'], outcome: 'failed' });
+        expect(wf.steps.map((x) => [x.label, x.stageName, x.inLinks])).toEqual([
+          ['review:bugs', 'review', []],
+          ['verify:bugs', 'verify', [{ fromRunId: wf.steps[0]!.runId, kind: 'item' }]],
+        ]);
+        expect(wf.skills).toEqual({ tdd: { model: 1, user: 0 } });
+        const seq = direct.flows.find((x) => x.kind === 'sequence')!;
+        expect(seq.steps.map((x) => x.agentType)).toEqual(['Explore', 'Plan']);
+        expect(seq.key).toBe(`seq-${[...seq.steps.map((x) => x.runId)].sort()[0]}`);
+        expect(seq.outcome).toBe('success');
+        expect(direct.totals).toMatchObject({ flows: 2, steps: 4 });
+        expect(direct.totals.tokens.total).toBe(wf.tokens.total + seq.tokens.total);
+        expect(direct.totals.cost.usd).toBeCloseTo((wf.cost.usd ?? 0) + (seq.cost.usd ?? 0), 9);
+        // The aggregate path gives the same flows (no skills / phases there) for someone else's turn.
+        const shape = (r: typeof direct) =>
+          canon(r.flows.map((x) => ({ kind: x.kind, name: x.name, stages: x.stages, steps: x.steps.length, tokens: x.tokens, cost: x.cost, outcome: x.outcome, models: x.models, durationMs: x.durationMs })));
+        expect(shape(agg)).toEqual(shape(direct));
+        expect(agg.flows.every((x) => x.turnId === other.id && !x.turn.isMine && x.skills === null)).toBe(true);
+        expect(agg.totals).toEqual(direct.totals);
+        // outcome filter, paging
+        const failed = await run(B, 'admin', (ctx) => getFlows(ctx, R30, { page: 1, outcome: 'failed' }));
+        expect(failed.flows.map((x) => x.kind)).toEqual(['workflow']);
+        expect(failed.totals.flows).toBe(1);
+        const page2 = await run(B, 'admin', (ctx) => getFlows(ctx, R30, { page: 2, outcome: null, pageSize: 1 }));
+        expect(page2).toMatchObject({ total: 2, page: 2, pageSize: 1 });
+        expect(page2.flows.map((x) => x.id)).toEqual([direct.flows[1]!.id]);
+        // A member sees only flows of turns they may see; effort is not applied on the aggregate path.
+        expect((await run(B, 'm1', (ctx) => getFlows(ctx, R30, { page: 1, outcome: null }))).total).toBe(0);
+        expect((await run(A, 'admin', (ctx) => getFlows(ctx, f({ effort: 'low' }), { page: 1, outcome: null }))).ignoredFilters).toEqual(['effort']);
+
+        // Detail on both paths, by key.
+        const dWf = await run(B, 'admin', (ctx) => getFlowDetail(ctx, own.id, 'wf_f'));
+        expect(canon(dWf)).toEqual(canon(wf));
+        const dSeq = await run(B, 'admin', (ctx) => getFlowDetail(ctx, own.id, seq.key));
+        expect(dSeq!.steps.map((x) => x.runId)).toEqual(seq.steps.map((x) => x.runId));
+        const aWf = await run(A, 'admin', (ctx) => getFlowDetail(ctx, other.id, 'wf_f', other.startedMs));
+        expect(aWf).toMatchObject({ kind: 'workflow', stages: ['review', 'verify'], outcome: 'failed' });
+        // agg_turn_runs carries the runs' skills, so the limited detail shows them too.
+        expect(aWf!.skills).toEqual({ tdd: { model: 1, user: 0 } });
+        expect(await run(B, 'admin', (ctx) => getFlowDetail(ctx, own.id, 'nope'))).toBeNull();
+        expect(await run(B, 'admin', (ctx) => getFlowDetail(ctx, own.id, 'a/b'))).toBeNull();
+        expect(await run(B, 'admin', (ctx) => getFlowDetail(ctx, 'not-a-uuid', 'wf_f'))).toBeNull();
+        expect(await run(B, 'm1', (ctx) => getFlowDetail(ctx, own.id, 'wf_f'))).toBeNull();
+
+        // CSV
+        const csv = await run(B, 'admin', (ctx) => buildExportTable(ctx, 'flows', R30));
+        expect(csv.headers).toEqual([
+          'started_at', 'project', 'flow', 'kind', 'steps', 'stages', 'duration_ms', 'input_tokens', 'output_tokens', 'cache_read_tokens',
+          'cache_write_tokens', 'reasoning_tokens', 'total_tokens', 'est_cost_usd', 'models', 'outcome', 'turn_id', 'key',
+        ]);
+        expect(csv.rows).toHaveLength(2);
+        expect(csv.rows.find((r) => r[3] === 'workflow')).toEqual(expect.arrayContaining(['beta', 'review → verify', 2, 'failed', own.id, 'wf_f']));
+        const csvFailed = await run(B, 'admin', (ctx) => buildExportTable(ctx, 'flows', R30, { outcome: 'failed' }));
+        expect(csvFailed.rows).toHaveLength(1);
       } finally {
         await cleanup(A);
         await cleanup(B);

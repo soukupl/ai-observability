@@ -161,7 +161,7 @@ describe.skipIf(skipReason !== null)(skipReason ? `RLS — SKIPPED: ${skipReason
       expect(list.filter((x) => x.is_mine)).toHaveLength(1);
       const userIds = new Set(Object.values(A.people).map((p) => p.id));
       for (const fn of ['agg_turn_list', 'agg_turns_daily', 'agg_usage_daily', 'agg_turns_by_project', 'agg_turns_by_model', 'agg_agents',
-        'agg_timeline_turns', 'agg_timeline_runs', 'agg_timeline_links']) {
+        'agg_timeline_turns', 'agg_timeline_runs', 'agg_timeline_links', 'agg_flow_runs', 'agg_flow_links']) {
         const out = await rows(lead, sql`select * from ${sql.identifier(fn)}(${FROM}, ${TO})`);
         for (const row of out) {
           expect(Object.keys(row)).not.toContain('user_id');
@@ -356,9 +356,10 @@ describe.skipIf(skipReason !== null)(skipReason ? `RLS — SKIPPED: ${skipReason
           await tx.execute(sql`set local role app_definer`);
           const [r1] = [...(await tx.execute(sql`select id from runs where turn_id = ${turnId}::uuid`))] as { id: string }[];
           const [r2] = [...(await tx.execute(sql`insert into runs (company_id, team_id, user_id, turn_id, turn_external_id,
-              external_id, agent_type, depth, started_at, ended_at, stage_index, flow_key, orchestration_id)
+              external_id, agent_type, depth, started_at, ended_at, stage_index, flow_key, orchestration_id, skills, mcp)
             select company_id, team_id, user_id, turn_id, turn_external_id, 'r2', 'workflow', 1,
-              started_at + interval '1 second', started_at + interval '2 seconds', 1, 'data', 'wf_r2'
+              started_at + interval '1 second', started_at + interval '2 seconds', 1, 'data', 'wf_r2',
+              '{"review": {"model": 1, "user": 0}}'::jsonb, '{"github": {"get_issue": 2}}'::jsonb
             from runs where id = ${r1!.id}::uuid returning id`))] as { id: string }[];
           await tx.execute(sql`insert into run_links (company_id, turn_id, turn_external_id, from_run_id, to_run_id,
               from_external_id, to_external_id, kind)
@@ -415,6 +416,82 @@ describe.skipIf(skipReason !== null)(skipReason ? `RLS — SKIPPED: ${skipReason
           expect(Object.keys(row)).toEqual(['from_run_id', 'to_run_id', 'kind']);
           expect(Object.values(row).some((v) => userIds.has(v as string))).toBe(false);
         }
+      }
+    });
+
+    it('agg_turn_runs appends skills / mcp after orchestration_id (agent flows view)', async () => {
+      const admin = A.people.admin!;
+      const { turnId, r2 } = extra.get(A.id)!;
+      const out = await rows(admin, sql`select * from agg_turn_runs(${turnId}::uuid)`);
+      expect(out).toHaveLength(2);
+      expect(Object.keys(out[0]!).slice(-5)).toEqual(['stage_index', 'flow_key', 'orchestration_id', 'skills', 'mcp']);
+      expect(out.find((r) => r.id === r2)).toMatchObject({
+        skills: { review: { model: 1, user: 0 } }, mcp: { github: { get_issue: 2 } } });
+      expect(out.find((r) => r.id !== r2)).toMatchObject({ skills: {}, mcp: {} });
+    });
+
+    it('agg_flow_runs / agg_flow_links: the aggregates-only admin gets the company scope, filters and limit apply, never user ids', async () => {
+      const admin = A.people.admin!;
+      const lead = A.people.lead!;
+      const { turnId, r1, r2 } = extra.get(A.id)!;
+      const allRuns = A.turns.size + 1; // one run per turn plus r2
+      const runs = await rows(admin, sql`select * from agg_flow_runs(${FROM}, ${TO})`);
+      expect(runs).toHaveLength(allRuns);
+      expect(Object.keys(runs[0]!)).toEqual(['id', 'turn_id', 'parent_run_id', 'agent_type', 'agent_group',
+        'orchestration_id', 'stage_index', 'flow_key', 'depth', 'model', 'effort', 'started_at', 'ended_at', 'duration_ms',
+        'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens', 'reasoning_tokens', 'outcome',
+        'turn_started_at', 'turn_project_id', 'turn_harness', 'turn_summary', 'turn_is_mine']);
+      const starts = runs.map((r) => new Date(r.started_at as string).getTime());
+      expect([...starts].sort((a, b) => a - b)).toEqual(starts);
+      expect(runs.find((r) => r.id === r2)).toMatchObject({ turn_id: turnId, agent_type: 'workflow', stage_index: 1,
+        flow_key: 'data', orchestration_id: 'wf_r2', turn_harness: 'claude-code', turn_summary: 'Did a thing',
+        turn_project_id: null, turn_is_mine: false });
+      expect(runs.filter((r) => r.turn_is_mine)).toHaveLength(1);
+      const userIds = new Set(Object.values(A.people).map((p) => p.id));
+      for (const row of runs) expect(Object.values(row).some((v) => userIds.has(v as string))).toBe(false);
+      // Lead: led team a1 only (m2's primary team is a2); member m2: own turn only; another company: nothing.
+      expect(await rows(lead, sql`select id from agg_flow_runs(${FROM}, ${TO})`)).toHaveLength(allRuns - 1);
+      const m2Runs = await rows(A.people.m2!, sql`select turn_is_mine from agg_flow_runs(${FROM}, ${TO})`);
+      expect(m2Runs).toEqual([{ turn_is_mine: true }]);
+      expect(await rows(B.people.admin!, sql`select id from agg_flow_runs(${FROM}, ${TO}) where id in (${r1}::uuid, ${r2}::uuid)`)).toEqual([]);
+      // Team / harness / model filters and the limit (capped at the default + 1).
+      expect(await rows(admin, sql`select id from agg_flow_runs(${FROM}, ${TO}, ${A.teams.a2!}::uuid)`)).toHaveLength(1);
+      expect(await rows(admin, sql`select id from agg_flow_runs(${FROM}, ${TO}, p_harness => 'codex')`)).toEqual([]);
+      expect(await rows(admin, sql`select id from agg_flow_runs(${FROM}, ${TO}, p_model => 'claude-opus-5-5')`)).toHaveLength(allRuns);
+      expect(await rows(admin, sql`select id from agg_flow_runs(${FROM}, ${TO}, p_limit => 1)`)).toHaveLength(1);
+      expect(await rows(admin, sql`select id from agg_flow_runs(${FROM}, ${TO}, p_limit => 0)`)).toEqual([]);
+      expect(await rows(admin, sql`select id from agg_flow_runs(${FROM}, ${TO}, p_limit => -5)`)).toEqual([]);
+      // The range selects by the TURN's start: a window that starts after the turn began drops all of its runs.
+      const turnStart = new Date(runs.find((r) => r.id === r2)!.turn_started_at as string).getTime();
+      const justAfter = new Date(turnStart + 1).toISOString();
+      const later = await rows(admin, sql`select id from agg_flow_runs(${justAfter}::timestamptz, ${TO})`);
+      expect(later.map((r) => r.id)).not.toContain(r2);
+
+      // Links: the resolved edge only (the link with a missing source is left out), same scope and filters.
+      const edge = { from_run_id: r1, to_run_id: r2, kind: 'item' };
+      expect(await rows(admin, sql`select * from agg_flow_links(${FROM}, ${TO})`)).toEqual([edge]);
+      expect(await rows(lead, sql`select * from agg_flow_links(${FROM}, ${TO})`)).toEqual([edge]);
+      expect(await rows(admin, sql`select * from agg_flow_links(${FROM}, ${TO}, ${A.teams.a2!}::uuid)`)).toEqual([]);
+      expect(await rows(admin, sql`select * from agg_flow_links(${FROM}, ${TO}, p_limit => 0)`)).toEqual([]);
+      expect(await rows(admin, sql`select * from agg_flow_links(${justAfter}::timestamptz, ${TO})`)).toEqual([]);
+      expect(await rows(A.people.m2!, sql`select * from agg_flow_links(${FROM}, ${TO})`)).toEqual([]);
+      expect(await rows(B.people.admin!, sql`select * from agg_flow_links(${FROM}, ${TO}) where to_run_id = ${r2}::uuid`)).toEqual([]);
+
+      // Project filter: move m1's turn into a project; only its runs / links match.
+      const owner = connectOwner();
+      const [project] = [...(await owner.execute(sql`insert into projects (company_id, key)
+        values (${A.id}::uuid, 'github.com/acme/flows') returning id`))] as { id: string }[];
+      await owner.execute(sql`update turns set project_id = ${project!.id}::uuid where id = ${turnId}::uuid`);
+      try {
+        const inProject = await rows(admin, sql`select id, turn_project_id from agg_flow_runs(${FROM}, ${TO}, null, ${project!.id}::uuid)`);
+        expect(inProject.map((r) => r.id).sort()).toEqual([r1, r2].sort());
+        expect(inProject.every((r) => r.turn_project_id === project!.id)).toBe(true);
+        expect(await rows(admin, sql`select * from agg_flow_links(${FROM}, ${TO}, null, ${project!.id}::uuid)`)).toEqual([edge]);
+        const otherProject = '00000000-0000-4000-8000-000000000000';
+        expect(await rows(admin, sql`select * from agg_flow_links(${FROM}, ${TO}, null, ${otherProject}::uuid)`)).toEqual([]);
+      } finally {
+        await owner.execute(sql`update turns set project_id = null where id = ${turnId}::uuid`);
+        await owner.execute(sql`delete from projects where id = ${project!.id}::uuid`);
       }
     });
 

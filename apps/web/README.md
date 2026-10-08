@@ -274,8 +274,8 @@ models is `partial` (shown as `≈ $12.50+`) when some had no price. `formatCost
 
 ### CSV export
 
-`GET /api/export?view=<overview|projects|models|phases|agents|skills-mcp|turns|budgets>&<filters>` (+ `group=team|project|model`
-for phases, `outcome=` for turns) re-runs the view's query inside `withUserDb`, so it can show no more than the
+`GET /api/export?view=<overview|projects|models|phases|agents|skills-mcp|turns|flows|budgets>&<filters>` (+ `group=team|project|model`
+for phases, `outcome=` for turns and flows) re-runs the view's query inside `withUserDb`, so it can show no more than the
 screen, streams UTF-8 CSV (BOM, CRLF, RFC 4180 quoting, formula starters neutralised) and appends an
 `audit_log` row `{action: 'export', target: view, meta: {filters, rows, …}}`. Turn exports are paged by keyset (stable with ties on the start time) and capped at 50,000 rows; a capped export ends with a `TRUNCATED: only the newest N turns…` row, sends `X-Truncated: true` and records `truncated: true` in the audit meta (the row count includes the marker row). Only telemetry views are exported: the admin tables (members, teams, tokens, projects) are administration data, not telemetry, and have no CSV (BRIEF §8 covers the dashboard views); the audit log has its own export.
 Costs are USD with 6 decimals and empty when unknown.
@@ -370,6 +370,29 @@ query exists). The CSV has one row per agent type with its `agent_group`.
   the source's end to the target's start (`item` solid, `sequence` dashed). Hover highlights the whole chain, a node
   links to its turn. Turn detail has the same card ("Flow", `turnFlow` in `turns/_helpers.ts`, hidden when the turn has
   no runs; `agg_turn_runs` returns the orchestration, so the aggregate turn path draws the same lanes as the raw one).
+
+### Agent flows (`/flows`, `/flows/[turnId]/[key]`, ADR-0020 amendment)
+
+A **flow** is a set of at least two sub-agent runs of one turn, computed on read by `buildFlows`
+(`src/lib/queries/flows.ts`, brief `docs/briefs/agent-flows-view.md`), never stored: one flow per Workflow-tool run
+(`orchestration_id`, kind `workflow`; key = that id, or `orch-<smallest run id>` when the id is not URL-safe or looks
+like a legacy / sequence key), all legacy `workflow:*` runs of a turn without an orchestration (key `workflow`,
+kind `legacy-workflow`), and connected components of the remaining runs over stored and derived links (key
+`seq-<smallest run id>`, kind `sequence`). Steps are ordered by stage, then start; stages come from `stage_index` or the
+first-start fallback shared with the agent flow card (`src/lib/queries/flow-stages.ts`). The flow outcome is failed if
+any step failed, else abandoned if any was, else success when every step succeeded, else unknown; ≈ cost sums each step
+at its model's price on its UTC day; skills and MCP calls are summed over the steps (`mergeUses`).
+
+- **List** (`getFlows`): runs of the turns that started in the range, joined to turns (`turnConds`) with `run_links`
+  under RLS, or `agg_flow_runs` / `agg_flow_links` in aggregates-only mode (migration 0013; no user ids, effort filter
+  ignored, no phases / skills / MCP per step). At most 20,000 runs are read (`truncated` and a note when cut). Outcome
+  chips, 50 flows per page and the KPI tiles (`totals`: flows, steps, tokens, ≈ cost over every matching flow) are
+  computed in TS. CSV: `view=flows`.
+- **Detail** (`getFlowDetail`): reuses `getTurnDetail` (so `agg_turn_runs`, which now also returns `skills` / `mcp`, in
+  aggregates-only mode) and picks the flow by key (`/^[A-Za-z0-9_.:-]{1,128}$/`, URL-encoded). Facts, a one-lane
+  `AgentFlow` of the flow's steps and links, a steps table (stage, model, effort, offset, duration, tokens, ≈ cost,
+  skills, MCP calls, outcome), Skills & MCP, time by stage and phases per step (`StackedBar100`). Pure shaping lives in
+  `src/app/(dashboard)/flows/_helpers.ts`.
 
 ### Insights on existing views (ADR-0017, ADR-0018)
 

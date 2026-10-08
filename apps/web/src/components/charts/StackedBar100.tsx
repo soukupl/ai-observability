@@ -16,6 +16,7 @@ export function StackedBar100({
   valueFormat,
   barHeight = 34,
   labelWidth = 130,
+  colorIndex,
   ariaLabel = '100 percent stacked bars',
 }: {
   rows: StackedRow[];
@@ -24,12 +25,25 @@ export function StackedBar100({
   valueFormat: ValueFormat;
   barHeight?: number;
   labelWidth?: number;
+  /**
+   * Palette index per key (null = the grey "other"), so a key can keep the colour another chart gives it (e.g. a stage
+   * of the Agent flow card). Keys not in it fall back to their position / named colour.
+   */
+  colorIndex?: Record<string, number | null>;
   ariaLabel?: string;
 }) {
   const t = useChartTheme();
   const data = rows.map((r) => ({ label: r.label, ...r.values }));
   const totals = new Map(rows.map((r) => [r.label, Object.values(r.values).reduce((a, b) => a + b, 0)]));
   const height = Math.max(120, rows.length * barHeight + 70);
+  const order = new Map(keys.map((k, i) => [k, i]));
+  const fill = (k: string, i: number) => {
+    if (colorIndex && k in colorIndex) {
+      const c = colorIndex[k];
+      return c === null || c === undefined ? t.color(0, 'other') : t.color(c);
+    }
+    return t.color(i, k);
+  };
   return (
     <div role="img" aria-label={ariaLabel} style={{ width: '100%', height }}>
       <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 640, height }}>
@@ -46,9 +60,10 @@ export function StackedBar100({
             }}
             contentStyle={{ background: t.tooltipBg, border: `1px solid ${t.tooltipBorder}`, color: t.text, fontSize: 12 }}
           />
-          <Legend wrapperStyle={{ fontSize: 12, color: t.text }} />
+          {/* Legend in `keys` order (recharts sorts by name by default), like the bars. */}
+          <Legend wrapperStyle={{ fontSize: 12, color: t.text }} itemSorter={(item) => order.get(String(item.value)) ?? keys.length} />
           {keys.map((k, i) => (
-            <Bar key={k} dataKey={k} stackId="share" fill={t.color(i, k)} isAnimationActive={false} />
+            <Bar key={k} dataKey={k} stackId="share" fill={fill(k, i)} isAnimationActive={false} />
           ))}
         </BarChart>
       </ResponsiveContainer>
