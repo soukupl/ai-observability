@@ -3,6 +3,7 @@
 import { useActionState, useState, type ReactNode } from 'react';
 import { IDLE, type TokenReveal } from '@/lib/admin/types';
 import { ActionMessage, type FormAction } from './ActionForm';
+import { CompanyField } from './CompanyScope';
 import { buttonCls } from './ui';
 
 function Copy({ text, label }: { text: string; label: string }) {
@@ -49,12 +50,13 @@ function Reveal({ token }: { token: TokenReveal }) {
   );
 }
 
-/** Token creation: fields as children, the plaintext + install command appear after success. */
+/** Token creation (user or company token): fields as children, the plaintext + install command appear after success. */
 export function TokenCreateForm({ action, children, submitLabel }: { action: FormAction; children: ReactNode; submitLabel: string }) {
   const [state, formAction, pending] = useActionState(action, IDLE);
   return (
     <div className="min-w-0">
       <form action={formAction} className="flex flex-wrap items-end gap-2">
+        <CompanyField />
         {children}
         <button type="submit" disabled={pending} className={buttonCls.primary}>
           {pending ? '…' : submitLabel}

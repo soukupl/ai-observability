@@ -2,6 +2,7 @@
 
 import { useActionState, type ReactNode } from 'react';
 import { IDLE, type ActionState } from '@/lib/admin/types';
+import { CompanyField } from './CompanyScope';
 import { buttonCls, type ButtonTone } from './ui';
 
 export type FormAction = (prev: ActionState, fd: FormData) => Promise<ActionState>;
@@ -38,6 +39,7 @@ export function ActionForm({
   return (
     <div className="min-w-0">
       <form action={formAction} className={className}>
+        <CompanyField />
         {children}
         <button type="submit" disabled={pending} className={buttonCls[tone]}>
           {pending ? '…' : submitLabel}

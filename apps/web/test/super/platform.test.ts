@@ -63,8 +63,10 @@ describe.skipIf(skipReason !== null)(skipReason ? `super console — SKIPPED: ${
     const cid = c!.id as string;
     existing = { companyId: cid };
     const [t] = await asOwner(sql`insert into teams (company_id, name) values (${cid}, 'Core') returning id`);
-    await asOwner(sql`insert into users (company_id, email, company_role) values (${cid}, 'boss@existing.example', 'admin')`);
-    await asOwner(sql`insert into users (company_id, email, company_role, primary_team_id) values (${cid}, 'dev@existing.example', 'member', ${t!.id})`);
+    const [boss] = await asOwner(sql`insert into users (email) values ('boss@existing.example') returning id`);
+    await asOwner(sql`insert into company_memberships (company_id, user_id, company_role) values (${cid}, ${boss!.id}, 'admin')`);
+    const [dev] = await asOwner(sql`insert into users (email) values ('dev@existing.example') returning id`);
+    await asOwner(sql`insert into company_memberships (company_id, user_id, company_role, primary_team_id) values (${cid}, ${dev!.id}, 'member', ${t!.id})`);
   });
 
   afterAll(async () => {
@@ -102,27 +104,27 @@ describe.skipIf(skipReason !== null)(skipReason ? `super console — SKIPPED: ${
 
     const mail = outbox.at(-1)!;
     expect(mail.to).toBe('hank@globex.example');
-    expect(mail.text).toContain('https://obs.example/login');
+    // New addresses join on the sign-up step; existing accounts continue to /invitations (D9).
+    expect(mail.text).toContain('https://obs.example/login?next=%2Finvitations');
 
     // the user picks the invitation on /signup (explicit consent, SEC-1): they become the company admin
     const [pending] = (await web.execute(sql`select invitation_id from auth_pending_invitations('hank@globex.example')`)) as unknown as Array<{ invitation_id: string }>;
     const [accepted] = (await web.execute(
-      sql`select auth_accept_invitation('hank@globex.example', 'Hank', ${pending!.invitation_id}::uuid) as id`,
+      sql`select * from auth_accept_invitation('hank@globex.example', 'Hank', ${pending!.invitation_id}::uuid)`,
     )) as unknown as Row[];
-    expect(accepted!.id).toBeTruthy();
+    expect(accepted).toMatchObject({ user_id: expect.any(String), company_id: id });
     const after = await getCompanyDetail(platform, id);
     expect(after!.adminEmails).toEqual(['hank@globex.example']);
     expect(after!.users).toBe(1);
   });
 
-  it('rejects bad input, duplicate slugs, taken and super-admin e-mails (nothing is written)', async () => {
+  it('rejects bad input, duplicate slugs and super-admin e-mails (nothing is written)', async () => {
     const before = (await listCompanies(platform)).length;
     const base = { name: 'Initech', slug: 'initech', plan: 'free', adminEmail: 'milton@initech.example' };
     expect(await createCompany(deps, actor, { ...base, name: '' })).toMatchObject({ ok: false });
     expect(await createCompany(deps, actor, { ...base, plan: 'enterprise' })).toMatchObject({ ok: false });
     expect(await createCompany(deps, actor, { ...base, adminEmail: 'nope' })).toMatchObject({ ok: false });
     expect(await createCompany(deps, actor, { ...base, slug: 'existing' })).toMatchObject({ ok: false, error: expect.stringContaining('already taken') });
-    expect(await createCompany(deps, actor, { ...base, adminEmail: 'boss@existing.example' })).toMatchObject({ ok: false, error: expect.stringContaining('already belongs') });
     expect(await createCompany(deps, actor, { ...base, adminEmail: 'root@platform.example' })).toMatchObject({ ok: false, error: expect.stringContaining('SUPER_ADMIN_EMAILS') });
     expect((await listCompanies(platform)).length).toBe(before);
   });
@@ -151,9 +153,10 @@ describe.skipIf(skipReason !== null)(skipReason ? `super console — SKIPPED: ${
   });
 
   it('warns (but still downgrades) when the new plan is below current usage (dod:C2)', async () => {
-    await asOwner(sql`insert into users (company_id, email, name, company_role) values
-      (${existing.companyId}, 'o1@existing.example', 'O1', 'member'), (${existing.companyId}, 'o2@existing.example', 'O2', 'member'),
-      (${existing.companyId}, 'o3@existing.example', 'O3', 'member'), (${existing.companyId}, 'o4@existing.example', 'O4', 'member')`);
+    await asOwner(sql`with u as (insert into users (email, name) values
+        ('o1@existing.example', 'O1'), ('o2@existing.example', 'O2'), ('o3@existing.example', 'O3'), ('o4@existing.example', 'O4')
+        returning id)
+      insert into company_memberships (company_id, user_id, company_role) select ${existing.companyId}, id, 'member' from u`);
     const res = await changePlan(deps, actor, existing.companyId, 'free');
     expect(res).toMatchObject({ ok: true, warning: expect.stringMatching(/users .*exceed the free limit of 3.*kept/) });
     expect((await getCompanyDetail(platform, existing.companyId))!.plan).toBe('free');
@@ -193,30 +196,65 @@ describe.skipIf(skipReason !== null)(skipReason ? `super console — SKIPPED: ${
     expect(await harness.pgErrorCode(platform.execute(sql`delete from turns`))).toBe('42501');
   });
 
-  // SEC-7 platform_email_in_use() and the SEC-6 narrowed audit_log policy come from migration 0004.
-  it('refuses to invite an existing non-admin member (invisible to app_platform) as an admin', async () => {
+  // ADR-0022: one login may belong to several companies, so existing users can be invited; the console learns only
+  // 'super_admin' / 'admin' (platform_invitee_status), never plain membership (SEC-7 successor).
+  it('platform_invitee_status discloses super admins and admins of the company only', async () => {
+    const one = async (e: string, c: string | null) =>
+      ((await platform.execute(sql`select platform_invitee_status(${e}::text, ${c}::uuid) as v`)) as unknown as Row[])[0]!.v;
+    expect(await one('root@platform.example', null)).toBe('super_admin');
+    expect(await one('root@platform.example', existing.companyId)).toBe('super_admin');
+    expect(await one(' BOSS@existing.example ', existing.companyId)).toBe('admin');
+    expect(await one('boss@existing.example', null)).toBeNull();
+    expect(await one('dev@existing.example', existing.companyId)).toBeNull(); // a plain member is never disclosed
+    expect(await one('nobody@nowhere.example', existing.companyId)).toBeNull();
     // the RLS-filtered view really does hide the member
-    const visible = (await platform.execute(sql`select email from users where lower(email) = 'dev@existing.example'`)) as unknown as Row[];
-    expect(visible).toHaveLength(0);
-    const before = (await listCompanies(platform)).length;
-    const r = await createCompany(deps, actor, { name: 'Umbrella', slug: 'umbrella', plan: 'free', adminEmail: 'Dev@Existing.example' });
-    expect(r).toMatchObject({ ok: false, error: expect.stringContaining('already belongs') });
-    expect((await listCompanies(platform)).length).toBe(before);
-
-    const sent = outbox.length;
-    expect(await inviteAdmin(deps, actor, existing.companyId, 'dev@existing.example')).toMatchObject({ ok: false, error: expect.stringContaining('already belongs') });
-    const [other] = await listCompanies(platform).then((l) => l.filter((c) => c.id !== existing.companyId));
-    expect(await inviteAdmin(deps, actor, other!.id, 'dev@existing.example')).toMatchObject({ ok: false });
-    expect(outbox.length).toBe(sent);
-    // an admin of the same company still gets the precise message
-    expect(await inviteAdmin(deps, actor, existing.companyId, 'boss@existing.example')).toMatchObject({ ok: false, error: expect.stringContaining('already an admin') });
+    expect(await platform.execute(sql`select email from users where lower(email) = 'dev@existing.example'`)).toHaveLength(0);
   });
 
-  it('platform_email_in_use answers only a boolean, for members, admins and unknown addresses', async () => {
-    const one = async (e: string) => ((await platform.execute(sql`select platform_email_in_use(${e}::text) as v`)) as unknown as Row[])[0]!.v;
-    expect(await one('dev@existing.example')).toBe(true);
-    expect(await one(' BOSS@existing.example ')).toBe(true);
-    expect(await one('nobody@nowhere.example')).toBe(false);
+  it('an existing user of another company can become the first admin of a new company', async () => {
+    const r = await createCompany(deps, actor, { name: 'Umbrella', slug: 'umbrella', plan: 'free', adminEmail: 'Boss@Existing.example' });
+    expect(r).toMatchObject({ ok: true });
+    const id = (r as { companyId: string }).companyId;
+    expect(outbox.at(-1)!.to).toBe('boss@existing.example');
+    // boss accepts while signed in (/invitations): a second membership on the same identity, no second user
+    const [inv] = (await web.execute(sql`select invitation_id from auth_pending_invitations('boss@existing.example')`)) as unknown as Row[];
+    const [accepted] = (await web.execute(
+      sql`select * from auth_accept_invitation('boss@existing.example', null, ${inv!.invitation_id as string}::uuid)`,
+    )) as unknown as Row[];
+    expect(accepted).toMatchObject({ company_id: id });
+    const n = await asOwner(sql`select count(*)::int as n from users where email = 'boss@existing.example'`);
+    expect(n[0]!.n).toBe(1);
+    const detail = (await getCompanyDetail(platform, id))!;
+    expect(detail).toMatchObject({ users: 1, adminEmails: ['boss@existing.example'] });
+    // last active is per company: not active in Umbrella until a session works there
+    expect(detail.admins).toEqual([{ email: 'boss@existing.example', name: null, lastActiveAt: null }]);
+    await asOwner(sql`update company_memberships set last_active_at = '2026-01-02T03:04:05Z' where company_id = ${id}`);
+    expect((await getCompanyDetail(platform, id))!.admins[0]!.lastActiveAt).toBe(Date.parse('2026-01-02T03:04:05Z'));
+    expect((await listCompanies(platform)).find((c) => c.id === id)!.adminEmails).toEqual(['boss@existing.example']);
+  });
+
+  it('inviteAdmin: refuses an existing admin and super admins, invites plain members without disclosing them', async () => {
+    const sent = outbox.length;
+    expect(await inviteAdmin(deps, actor, existing.companyId, 'boss@existing.example')).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('already an admin'),
+    });
+    // A super admin in the DB whose e-mail is no longer in SUPER_ADMIN_EMAILS is still refused (the DB flag counts).
+    await asOwner(sql`insert into users (email, is_super_admin) values ('old-root@platform.example', true)`);
+    expect(await inviteAdmin(deps, actor, existing.companyId, 'old-root@platform.example')).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('super admin'),
+    });
+    expect(await createCompany(deps, actor, { name: 'Soylent', slug: 'soylent', plan: 'free', adminEmail: 'old-root@platform.example' })).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('super admin'),
+    });
+    expect(outbox.length).toBe(sent);
+    // A plain member gets the same answer as a stranger; the invitation is simply never offered to them.
+    const r = await inviteAdmin(deps, actor, existing.companyId, 'dev@existing.example');
+    expect(r).toMatchObject({ ok: true, notice: expect.stringContaining('a company admin can promote them instead') });
+    expect(outbox.at(-1)!.to).toBe('dev@existing.example');
+    expect(await web.execute(sql`select * from auth_pending_invitations('dev@existing.example')`)).toHaveLength(0);
   });
 
   it('app_platform sees only platform.% and company-less audit rows (not a company\'s own audit trail)', async () => {

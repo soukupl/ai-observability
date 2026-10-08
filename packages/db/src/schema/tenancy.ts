@@ -63,25 +63,52 @@ export const teams = pgTable(
   (t) => [unique('teams_company_name_uq').on(t.companyId, t.name), unique('teams_company_id_uq').on(t.companyId, t.id)],
 );
 
-/** A person in exactly one company; super admins have no company (BRIEF §4). E-mails are stored lower-case. */
+/**
+ * A person (identity). Company access comes from company_memberships; super admins have none (BRIEF §4).
+ * E-mails are stored lower-case.
+ */
 export const users = pgTable(
   'users',
   {
     id: pk(),
-    companyId: uuid('company_id').references(() => companies.id, { onDelete: 'cascade' }),
     email: text('email').notNull(),
     name: text('name'),
-    companyRole: companyRoleEnum('company_role').notNull().default('member'),
-    primaryTeamId: uuid('primary_team_id').references(() => teams.id, { onDelete: 'set null' }),
     isSuperAdmin: boolean('is_super_admin').notNull().default(false),
     lastLoginAt: tstz('last_login_at'),
     createdAt: createdAt(),
   },
   (t) => [
     uniqueIndex('users_email_uq').on(sql`lower(${t.email})`),
-    unique('users_company_id_uq').on(t.companyId, t.id),
-    check('users_company_or_super_admin', sql`${t.companyId} is not null or ${t.isSuperAdmin}`),
     check('users_email_lower', sql`${t.email} = lower(${t.email})`),
+  ],
+);
+
+/** Membership of a user in a company: company role and primary team in that company (ADR-0022). */
+export const companyMemberships = pgTable(
+  'company_memberships',
+  {
+    id: pk(),
+    companyId: uuid('company_id')
+      .notNull()
+      .references(() => companies.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    companyRole: companyRoleEnum('company_role').notNull().default('member'),
+    /** Primary team in THIS company (composite FK; the SQL nulls only this column when the team goes). */
+    primaryTeamId: uuid('primary_team_id'),
+    /** Last time a dashboard session started in, or switched to, this company (trigger; D4). */
+    lastActiveAt: tstz('last_active_at'),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    unique('company_memberships_company_user_uq').on(t.companyId, t.userId),
+    index('company_memberships_user_idx').on(t.userId),
+    foreignKey({
+      name: 'company_memberships_primary_team_fk',
+      columns: [t.companyId, t.primaryTeamId],
+      foreignColumns: [teams.companyId, teams.id],
+    }).onDelete('set null'),
   ],
 );
 
@@ -99,7 +126,11 @@ export const teamMemberships = pgTable(
     unique('team_memberships_team_user_uq').on(t.teamId, t.userId),
     index('team_memberships_user_idx').on(t.userId),
     foreignKey({ columns: [t.companyId, t.teamId], foreignColumns: [teams.companyId, teams.id] }).onDelete('cascade'),
-    foreignKey({ columns: [t.companyId, t.userId], foreignColumns: [users.companyId, users.id] }).onDelete('cascade'),
+    foreignKey({
+      name: 'team_memberships_membership_fk',
+      columns: [t.companyId, t.userId],
+      foreignColumns: [companyMemberships.companyId, companyMemberships.userId],
+    }).onDelete('cascade'),
   ],
 );
 

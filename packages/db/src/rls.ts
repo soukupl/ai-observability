@@ -6,7 +6,10 @@ import type { CompanyRole } from './schema/enums.js';
 export interface RlsContext {
   companyId: string;
   userId: string;
-  /** Company role. Team-lead rights are derived in the DB from team_memberships, not passed in. */
+  /**
+   * The membership's company role (company_memberships.company_role of userId in companyId). Team-lead rights
+   * are derived in the DB from team_memberships, not passed in.
+   */
   role: CompanyRole;
 }
 
@@ -29,8 +32,8 @@ export function assertRlsContext(ctx: RlsContext): void {
  * Runs `fn` in a transaction with the dashboard RLS context set transaction-locally. Use with
  * dbFor('web'). set_config(name, value, is_local => true) is `SET LOCAL` with bind parameters, so
  * values cannot inject SQL and vanish at COMMIT/ROLLBACK (safe with pooled connections).
- * The DB re-checks the claims: a user outside companyId sees nothing; role 'admin' only counts if
- * users.company_role is admin.
+ * The DB re-checks the claims: a user who is not a member of companyId sees nothing; role 'admin' only
+ * counts if the membership of userId in companyId has company_role admin.
  */
 export async function withRlsContext<T>(db: Database, ctx: RlsContext, fn: (tx: Tx) => Promise<T>): Promise<T> {
   assertRlsContext(ctx);

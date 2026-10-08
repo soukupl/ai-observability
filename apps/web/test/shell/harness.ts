@@ -3,6 +3,7 @@ import { sql } from 'drizzle-orm';
 import {
   budgets,
   companies,
+  companyMemberships,
   createDb,
   projects,
   runs,
@@ -132,8 +133,9 @@ export async function seedCompany(owner: Database, slug: string, mode: Fixture['
     for (const u of USERS) {
       const [r] = await tx
         .insert(users)
-        .values({ companyId, email: `${u.key}@${slug}.test`, name: u.key, companyRole: u.role, primaryTeamId: fx.teams[u.team]! })
+        .values({ email: `${u.key}@${slug}.test`, name: u.key })
         .returning({ id: users.id });
+      await tx.insert(companyMemberships).values({ companyId, userId: r!.id, companyRole: u.role, primaryTeamId: fx.teams[u.team]! });
       await tx.insert(teamMemberships).values({ companyId, teamId: fx.teams[u.team]!, userId: r!.id, role: u.teamRole });
       fx.userIds.push(r!.id);
       fx.people[u.key] = {
@@ -229,7 +231,7 @@ export async function seedCompany(owner: Database, slug: string, mode: Fixture['
       select t.company_id, t.id, t.team_id, t.user_id, t.project_id, t.harness, t.model, t.started_at, '["tokens"]'::jsonb,
         t.input_tokens + t.output_tokens + t.cache_read_tokens + t.cache_write_tokens, 1.5, t.duration_ms
       from turns t where t.company_id = ${companyId}::uuid and (substring(t.external_id from 3))::int % 5 = 0`);
-    // Budgets: a team token budget and a per-user budget for m1.
+    // Budgets: a team budget and a per-user budget for m1.
     await tx.insert(budgets).values([
       { companyId, teamId: fx.teams.t1!, kind: 'tokens', limitValue: '500000' },
       { companyId, teamId: fx.teams.t1!, kind: 'cost', limitValue: '5' },

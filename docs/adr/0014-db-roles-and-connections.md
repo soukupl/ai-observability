@@ -49,5 +49,7 @@ an owner that RLS lets through without making the schema owner itself bypass FOR
   so it can neither read a tenant's audit trail nor forge `export` rows.
 - **`platform_email_in_use(email)`** (SECURITY DEFINER, boolean only) answers "is this e-mail registered anywhere" for the console, because the
   platform role cannot read ordinary members through RLS (SEC-7).
+  *Amended by ADR-0022: replaced by `platform_invitee_status(email, company_id)`, which returns only `super_admin`, `admin` (of that
+  company) or null, so a login can be invited into, or made first admin of, another company.*
 - New migration 0004 also adds `auth_pending_invitations`, `ingest_project_salt`, `company_has_user_capacity` and a changed
   `ingest_match_user_by_email(email, team)`; all are SECURITY DEFINER owned by `app_definer` with EXECUTE granted per role.

@@ -32,6 +32,11 @@ export const authSessions = pgTable(
     tokenHash: text('token_hash').notNull().unique(),
     expiresAt: tstz('expires_at').notNull(),
     lastSeenAt: tstz('last_seen_at'),
+    /**
+     * The company the dashboard session is working in; validated against company_memberships on every
+     * request (ADR-0022). null = none chosen yet (or the membership went away).
+     */
+    activeCompanyId: uuid('active_company_id').references(() => companies.id, { onDelete: 'set null' }),
     createdAt: createdAt(),
   },
   (t) => [index('auth_sessions_user_idx').on(t.userId), index('auth_sessions_expires_idx').on(t.expiresAt)],

@@ -20,18 +20,37 @@ export interface CompanySettings {
   retentionDays: number;
 }
 
+/** One company the user belongs to, as the header switcher shows it. */
+export interface MembershipSummary {
+  companyId: string;
+  name: string;
+  slug: string;
+  role: CompanyRole;
+  plan: Plan;
+}
+
+/**
+ * The signed-in user, working in the session's ACTIVE company (auth_sessions.active_company_id,
+ * validated against the memberships on every request, ADR-0022). The flat company fields describe
+ * that company.
+ */
 export interface CurrentUser {
   id: string;
   email: string;
   name: string | null;
-  /** null only for platform super admins, who belong to no company (BRIEF §4). */
+  /** The active company; null only for platform super admins, who belong to no company (BRIEF §4). */
   companyId: string | null;
+  /** Role in the active company ('member' when there is none). */
   companyRole: CompanyRole;
   isSuperAdmin: boolean;
+  /** Teams in the active company. */
   teams: { id: string; name: string; role: TeamRole }[];
+  /** Primary team in the active company (from the membership). */
   primaryTeamId: string | null;
-  /** null only for platform super admins. */
+  /** The active company; null only for platform super admins. */
   company: { id: string; name: string; slug: string; plan: Plan; settings: CompanySettings } | null;
+  /** Every membership in an active (not suspended) company, last used first. [] for super admins. */
+  memberships: MembershipSummary[];
 }
 
 /** A user of a company — what requireUser() / requireAdmin() return (never a company-less super admin). */
@@ -43,7 +62,7 @@ export const getCurrentUser = cache(async (): Promise<CurrentUser | null> => {
   if (!token) return null;
   const loaded = await loadSessionUser(defaultAuthDeps(), token);
   if (!loaded) return null;
-  const { user, context } = loaded;
+  const { user, context, memberships } = loaded;
   return {
     id: user.userId,
     email: user.email,
@@ -54,6 +73,7 @@ export const getCurrentUser = cache(async (): Promise<CurrentUser | null> => {
     teams: context?.teams ?? [],
     primaryTeamId: context?.primaryTeamId ?? null,
     company: context ? { ...context.company, settings: context.company.settings as unknown as CompanySettings } : null,
+    memberships,
   };
 });
 
@@ -84,5 +104,5 @@ export async function requireSuperAdmin(): Promise<CurrentUser> {
   return user;
 }
 
-/** Server action: `<form action={logout}>`. */
-export { logout } from './actions';
+/** Server actions: `<form action={logout}>`, the company switcher and accepting an invitation while signed in. */
+export { acceptInvitationForCurrentUser, logout, switchCompany } from './actions';

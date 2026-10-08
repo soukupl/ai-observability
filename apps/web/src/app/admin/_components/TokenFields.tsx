@@ -1,23 +1,13 @@
-import { inputCls, labelCls, selectCls } from './ui';
+import { inputCls, labelCls } from './ui';
 
-/** Name + team fields of the token form; `kind` is fixed per form. */
-export function TokenFields({ kind, teams, defaultTeamId }: { kind: 'user' | 'team'; teams: { id: string; name: string }[]; defaultTeamId?: string | null }) {
+/** Name field of the token form; `kind` is fixed per form (user token = own, company token = CI / bots / MDM). */
+export function TokenFields({ kind }: { kind: 'user' | 'company' }) {
   return (
     <>
       <input type="hidden" name="kind" value={kind} />
       <label className={`${labelCls} grow sm:max-w-xs`}>
         Name
-        <input name="name" required maxLength={60} placeholder={kind === 'team' ? 'e.g. Laptop fleet 2026' : 'e.g. Work laptop'} className={inputCls} />
-      </label>
-      <label className={labelCls}>
-        Team
-        <select name="teamId" required className={selectCls} defaultValue={defaultTeamId ?? teams[0]?.id}>
-          {teams.map((t) => (
-            <option key={t.id} value={t.id}>
-              {t.name}
-            </option>
-          ))}
-        </select>
+        <input name="name" required maxLength={60} placeholder={kind === 'company' ? 'e.g. CI runners or Laptop fleet 2026' : 'e.g. Work laptop'} className={inputCls} />
       </label>
     </>
   );

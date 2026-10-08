@@ -30,8 +30,8 @@ The design is now being implemented; see README.md for the build.
 | 4 | Outcome | Derived from **signals only** (no LLM judge, no user rating) | [0003](docs/adr/0003-outcome-from-signals-only.md) |
 | 5 | Summaries | **Always on**, generated **locally** by the harness's cheapest model, batched at session end | [0004](docs/adr/0004-local-summaries-by-cheap-model.md) |
 | 6 | Project identity | Normalized git remote; company can switch to **hashed** mode | [0008](docs/adr/0008-privacy-modes.md) |
-| 7 | Ingest tokens | **Per-user** tokens by default + **team** tokens for rollout/CI (git-email matching, else "unverified") | [0007](docs/adr/0007-ingest-tokens.md) |
-| 8 | Teams | User in one company, may be in many teams; each turn is attributed to exactly one team | [0007](docs/adr/0007-ingest-tokens.md) |
+| 7 | Ingest tokens | **User** tokens (`aiobs_u_`, identify one user in one company) + **company** tokens (`aiobs_c_`, for rollout/CI: git-email matching against the company's members, else "unverified"). A machine holds several tokens and the project → token choice is made once per repo (`ai-obs use`) | [0007](docs/adr/0007-ingest-tokens.md), [0022](docs/adr/0022-company-memberships-and-token-kinds.md) |
+| 8 | Teams | One login may belong to many companies (a **membership** each) and to many teams in each company; each turn is attributed to at most one team | [0007](docs/adr/0007-ingest-tokens.md), [0022](docs/adr/0022-company-memberships-and-token-kinds.md) |
 | 9 | Individual visibility | Per-company mode: **aggregates-only (default)** or full detail; mode visible to all users | [0008](docs/adr/0008-privacy-modes.md) |
 | 10 | Dashboard login | Magic link + Google/GitHub OAuth; SSO (SAML/OIDC) on roadmap, schema-ready | [0013](docs/adr/0013-dashboard-authentication.md) |
 | 11 | Stack | TypeScript; Next.js (App Router), Postgres, Drizzle, Tailwind, Recharts; Node collector | [0009](docs/adr/0009-tech-stack.md) |
@@ -39,7 +39,7 @@ The design is now being implemented; see README.md for the build.
 | 13 | Cost | Estimated cost at **API list prices** from a dated price table, computed at query time | brief only |
 | 14 | Retention | Per-company, 30 days – 24 months raw, **default 13 months**; daily rollups kept forever | [0012](docs/adr/0012-retention-and-rollups.md) |
 | 15 | Delivery | Local file queue + retry; client-generated event IDs; server de-duplicates | [0011](docs/adr/0011-local-queue-idempotent-delivery.md) |
-| 16 | Install | One CLI: `npx ai-obs init --token …` configures every detected harness | brief only |
+| 16 | Install | One CLI: `npx ai-obs init --token …` configures every detected harness. `ai-obs token add` registers a token for another company and `ai-obs use <name>` picks the token of a repo | [0022](docs/adr/0022-company-memberships-and-token-kinds.md) |
 | 17 | Dashboard | All eight views in v1 (see §8) | brief only |
 | 18 | Alerts | Monthly token/cost budgets per team/user, e-mail at 80 % / 100 %, never blocking | brief only |
 | 19 | Billing | Plans + limits (Free / Team / Business) set by super admin; no payments | brief only |
@@ -84,11 +84,12 @@ The design is now being implemented; see README.md for the build.
 Platform (super admin)
 └── Company (plan, settings)
     ├── Team ── memberships (member | lead)
-    └── User (company role: admin | member; primary team)
+    └── Company membership ── user (company role: admin | member; primary team)
 ```
 
-- A **user belongs to exactly one company** and to one or more teams (role per team: `member` or `lead`;
-  a team may have several leads).
+- A **user** is one identity (one login). It holds a **company membership** in each company it belongs to
+  (company role, primary team) and belongs to one or more teams in each of them (role per team: `member` or `lead`;
+  a team may have several leads). The dashboard shows one company at a time; the header switcher changes it.
 - A **solo developer** = a company with one team and one user, created automatically at sign-up on the Free plan.
 - **Super admin** is a platform flag, not a company member.
 
@@ -99,7 +100,7 @@ Platform (super admin)
 | Manage teams, members, roles, invitations | – | ✅ | – | – |
 | Map projects → teams, name projects | – | ✅ | – | – |
 | Company settings (privacy mode, project naming, retention) | – | ✅ | – | – |
-| Create team tokens | – | ✅ | ✅ own teams | – |
+| Create company tokens | – | ✅ | ✅ | – |
 | Create own user tokens | – | ✅ | ✅ | ✅ |
 | Budgets | – | ✅ all | ✅ own teams (view) | own (view) |
 | CSV export | – | ✅ | ✅ | ✅ (own data) |
@@ -112,8 +113,8 @@ Platform (super admin)
 - **Full detail:** leads see every turn of their teams by person; admins company-wide.
 - The active mode is displayed to every user (banner in settings + footer).
 
-**Team attribution of a turn** (first match wins): (1) company's project → team mapping, (2) the
-token's team, (3) the user's primary team.
+**Team attribution of a turn** (first match wins): (1) company's project → team mapping, (2) the primary team of
+the resolved user in that company, (3) none (the turn has no team).
 
 ## 5. Data capture (collector)
 
@@ -121,13 +122,43 @@ token's team, (3) the user's primary team.
 
 - `npx ai-obs init --token <token> [--project]` — detects installed harnesses, writes hook config
   (user-level by default, repo-level with `--project`; the token is never written into a repo).
-- Files: `~/.ai-obs/config.json` (endpoint, token, random `machine_id`), `~/.ai-obs/state/`
-  (per-session transcript cursors), `~/.ai-obs/queue/*.ndjson` (capped ~50 MB / 30 days).
-- Commands: `init`, `doctor`, `status`, `flush`, `uninstall`.
-- Admin UI offers a downloadable config (with team token) for MDM / dotfiles rollout.
-- Node ≥ 20, **zero runtime dependencies**. Hook handlers return in < 100 ms and spawn a detached
-  worker for parsing, summarizing and sending.
-- On start, the collector fetches `GET /api/v1/collector-config` (cached) to learn the company's
+- **Status:** collector 0.2.0 registers several tokens (`config.json` v2 with `tokens[]`; user `aiobs_u_` or company
+  `aiobs_c_`), keeps a per-repository choice (`projects.json`), holds data until a repository is assigned, asks through the
+  SessionStart hook and sends per token. The server side is ADR-0022; the collector side is described there, in its
+  "Collector" section. Collectors older than 0.2.0 cannot register a token any more (the server revoked them all):
+  deployers raise `MIN_COLLECTOR_VERSION` to 0.2.0.
+- Files: `~/.ai-obs/config.json` (mode 0600: default endpoint, `tokens[]` with a name, company label, optional e-mail,
+  endpoint and token each, `routing_epochs`, random `machine_id`), `~/.ai-obs/projects.json` (project key → token identity,
+  or `none`; mode 0600; written only by `ai-obs use`, never sent), `~/.ai-obs/state/` (per-session transcript cursors,
+  per-token collector-config cache and delivery state, project-key cache), `~/.ai-obs/queue/` (capped ~50 MB / 30 days:
+  one stream per project and binding under `queue/p/`; the files written by the 0.1.x collector stay in `queue/*.ndjson`
+  until the first registration moves them to `queue/dead/pre-upgrade/`, and they are never sent). Streams that cannot be sent
+  (unassigned, rejected, unconfirmed, opted out) are exempt from the 30-day age cap, which counts from when a stream became
+  sendable; the size cap applies to all and its drops are counted and shown.
+- Commands: `init`, `token add|list|confirm|remove` (`token remove --invalid`), `use <name>` (`--clear`, `--none` keeps the
+  queued data, `--none --discard-queued`, `--all-held`, `--move-queued`, `--reset-projects`), `doctor`, `status`, `flush`,
+  `uninstall`. `init` and `token add` register a token under the company slug the server reports (`--name` overrides);
+  the same slug on the same endpoint replaces the token.
+- **Hold until assigned:** with two or more registered tokens, the events of a project that has no token assigned stay
+  in the local queue and are sent after `ai-obs use <name>`. With one token nothing changes. The assignment key is the
+  normalized git remote, else the repo top-level path (the main checkout's, for a linked worktree), and is stored locally
+  only.
+- Nothing is sent when the company cannot be proven, and queued data stays with the company it was recorded for:
+  unassigned, dangling, unconfirmed and pre-upgrade data stays local until `ai-obs use` / `token confirm`
+  (pre-upgrade data is never sent: tokens were reset). Each session is bound once, when it is recorded, to the token it
+  resolved to (or left open when there was no choice); `use` binds new sessions and releases open data, and
+  `use --move-queued` is the explicit way to move data recorded under another token.
+- The `SessionStart` hook, for both Claude Code (JSON `additionalContext`) and Codex (plain text; the JSON form is rejected by
+  codex-cli 0.154.0), prints once per session when a project has no token chosen and two or more tokens are registered, and
+  also when the project's token is rejected, suspended or unconfirmed, or no token is usable. The text names the project
+  key, the registered token names and the `ai-obs use <name>` instruction (no network, local files and a bounded git call
+  only). `status` and `doctor` show the same.
+- Admin UI offers a downloadable config (with a company token) for MDM / dotfiles rollout.
+- Node ≥ 20, **zero runtime dependencies**. Hook handlers return in < 100 ms of in-process time from hook entry (Node
+  start-up, about 60-85 ms, is not counted; ADR-0022 C27) and spawn a detached worker for parsing, summarizing and
+  sending. On a project-key cache miss the SessionStart hook runs git for at most 40 ms; when git is slower, that session
+  gets no question (its events are kept) and the next one asks.
+- On start, the collector fetches `GET /api/v1/collector-config` (cached per token) to learn the company's
   **project-naming mode** (and the company's `project_salt`, which keys the hash), so hashing happens on the machine.
 
 ### 5.2 Hooks used
@@ -196,7 +227,7 @@ provisional outcome and later sends a `turn_outcome` patch event.
 
 ## 6. Ingest API
 
-`POST /api/v1/ingest` — `Authorization: Bearer aiobs_u_…` (user) or `aiobs_t_…` (team); gzip JSON;
+`POST /api/v1/ingest` — `Authorization: Bearer aiobs_u_…` (user) or `aiobs_c_…` (company); gzip JSON;
 ≤ 500 events or 1 MB per batch; per-token rate limit.
 
 ```jsonc
@@ -204,7 +235,7 @@ provisional outcome and later sends a `turn_outcome` patch event.
   "schema": 1,
   "collector": { "name": "ai-obs", "version": "1.0.0" },
   "machine":   { "id": "uuid", "os": "darwin" },
-  "identity":  { "git_email": "dev@acme.com" },          // used only for team-token matching
+  "identity":  { "git_email": "dev@acme.com" },          // used only for company-token matching
   "events": [
     { "event_id": "ulid", "type": "session_start", "harness": "claude-code", "harness_version": "2.x",
       "session_id": "…", "project": { "key": "github.com/acme/billing" /* or "sha256:…" */, "name": "billing" },
@@ -237,7 +268,7 @@ provisional outcome and later sends a `turn_outcome` patch event.
 - Response: `{ accepted, duplicates, rejected: [{event_id, reason}] }`. Duplicate `event_id`s are ignored,
   so retries are always safe.
 - Unknown `harness` values are accepted; harness-specific extras go into an `ext` object.
-- `GET /api/v1/collector-config` → `{ project_naming: "plain" | "hashed", min_collector_version, project_salt }`.
+- `GET /api/v1/collector-config` → `{ project_naming: "plain" | "hashed", min_collector_version, project_salt, company: { name, slug }, user: { email } | null }` (`user` is null for a company token; the collector uses the labels to name the token).
 
 ## 7. Data model (Postgres)
 
@@ -247,15 +278,16 @@ All tenant tables carry `company_id` and are protected by RLS.
 |---|---|
 | `companies` | name, slug, `plan`, `settings` (visibility mode, project naming, retention days), status |
 | `teams` | company_id, name |
-| `users` | company_id (null for super admin), email, name, `company_role` (admin/member), `primary_team_id`, `is_super_admin` |
-| `team_memberships` | team_id, user_id, role (member/lead) |
+| `users` | identity only: email, name, `is_super_admin` |
+| `company_memberships` | company_id, user_id, `company_role` (admin/member), `primary_team_id`, `last_active_at`; unique (company_id, user_id); a super admin has none |
+| `team_memberships` | team_id, user_id, role (member/lead); the user must be a member of the team's company |
 | `invitations` | company_id, email, team_id, role, expires_at |
-| `auth_accounts`, `auth_sessions`, `magic_links` | Dashboard login (OAuth accounts, sessions); `identity_providers` reserved for SSO |
-| `ingest_tokens` | company_id, team_id, user_id (null = team token), kind, name, prefix, `hash`, last_used_at, revoked_at |
+| `auth_accounts`, `auth_sessions`, `magic_links` | Dashboard login (OAuth accounts, sessions; a session carries `active_company_id`); `identity_providers` reserved for SSO |
+| `ingest_tokens` | company_id, user_id (null = company token), kind (company/user), name, prefix, `hash`, created_by, last_used_at, revoked_at |
 | `machines` | company_id, user_id, machine_id, os, first/last seen |
 | `projects` | company_id, `key` (normalized remote or hash), display_name, mapped team_id |
 | `agent_sessions` | company_id, user_id, machine_id, project_id, harness, harness_version, started/ended, end_reason |
-| `turns` | company_id, team_id, user_id, `attribution` (verified/matched/unverified), session_id, project_id, harness, primary model, effort, timings, token totals, `phases_ms`, tool counts, `skills`, `mcp`, `mcp_stats`, files/lines, outcome + signals, summary, phase_rules_version |
+| `turns` | company_id, team_id (nullable), user_id, `attribution` (verified/matched/unverified), session_id, project_id, harness, primary model, effort, timings, token totals, `phases_ms`, tool counts, `skills`, `mcp`, `mcp_stats`, files/lines, outcome + signals, summary, phase_rules_version |
 | `runs` | turn_id, parent_run_id, agent_type, `agent_group`, `orchestration_id`, `stage_index`, `flow_key`, depth, model, effort, timings, tokens, phases, `skills`, `mcp`, `mcp_stats`, outcome |
 | `run_links` | company, turn, from run, to run (ids resolved late, external ids kept), kind (`item` / `sequence`); visible when the target run is (ADR-0020) |
 | `runaway_alerts` | company, turn, team, user, project, reasons (tokens / cost / duration), tokens, ≈ cost, duration, notified_at (ADR-0018) |
@@ -326,8 +358,8 @@ Set by the super admin; new sign-ups land on **Free**. Values are placeholders. 
 - Plain Postgres (no vendor data APIs — RLS requires direct connections). SMTP for e-mail.
 - Configuration via environment variables / `.env`; secrets never baked into images.
 - Official SaaS in an **EU region**. The same image is self-hostable by companies.
-- Retention: nightly job deletes expired raw rows; deleting a user removes raw rows and nulls `user_id`
-  in rollups.
+- Retention: nightly job deletes expired raw rows; deleting a user identity (an operator action) removes raw rows and nulls `user_id`
+  in rollups. Removing a member from a company keeps their recorded activity (shown as "former member") and revokes their tokens there (ADR-0022).
 
 ## 12. Definition of done
 

@@ -23,7 +23,7 @@ export interface GeneratedToken {
   hash: string;
 }
 
-/** Creates a new ingest token: `aiobs_u_…` (user) or `aiobs_t_…` (team). */
+/** Creates a new ingest token: `aiobs_u_…` (user) or `aiobs_c_…` (company). */
 export function generateToken(kind: TokenKind): GeneratedToken {
   const kindPrefix = TOKEN_PREFIXES[kind];
   const plaintext = kindPrefix + randomBytes(TOKEN_SECRET_BYTES).toString('base64url');

@@ -31,13 +31,15 @@ repo-root `.env`.
 ### Pre-seeded dev logins
 
 There are no passwords anywhere: sign-in is by magic link (or Google / GitHub OAuth when configured). `pnpm db:seed` creates
-the demo company **Acme** (Team plan, aggregates-only visibility, two teams, two projects, about 300 turns over 60 days) with
-these accounts. Enter an e-mail at `/login` and open the link that arrives in Mailpit.
+the demo company **Acme** (Team plan, aggregates-only visibility, two teams, two projects, about 300 turns over 60 days) and a
+second company **Globex** (Free plan, one team, no telemetry) with these accounts. alice belongs to both, so the company switcher in the header has
+something to show. Enter an e-mail at `/login` and open the link that arrives in Mailpit.
 
 | E-mail | Role | What they see |
 |---|---|---|
-| `alice@acme.example` | Company admin (Platform team) | Whole company, every `/admin` page |
-| `bob@acme.example` | Lead of the Platform team | Platform aggregates, team tokens and budgets |
+| `alice@acme.example` | Company admin of Acme (Platform team); member of Globex | Acme: whole company, every `/admin` page. Switch to Globex: an empty dashboard (isolation) |
+| `gina@globex.example` | Company admin of Globex | Globex only |
+| `bob@acme.example` | Lead of the Platform team | Platform aggregates, company tokens and budgets |
 | `carol@acme.example` | Member, Platform team | Only her own turns |
 | `dave@acme.example` | Member, Mobile team | Only his own turns |
 | `admin@example.com` | Super admin (listed in `SUPER_ADMIN_EMAILS`) | `/super` console only, no telemetry |
@@ -50,13 +52,33 @@ The Docker-only path (`docker compose up`) does not seed; run `pnpm db:seed` aga
 To try the collector against your dev server:
 
 ```sh
-TOKEN=$(pnpm -s dev:token)                      # ingest token for a seeded user (scripts/dev-token.ts)
+TOKEN=$(pnpm -s dev:token)                      # user token for a seeded user in their active company (scripts/dev-token.ts)
+# pnpm -s dev:token alice@acme.example globex   # the same user in another company
 pnpm --filter ai-obs build
 AI_OBS_HOME=/tmp/ai-obs-dev node packages/collector/bin/ai-obs.js init --token "$TOKEN" --endpoint http://localhost:3000
 ```
 
 `init` edits the real `~/.claude/settings.json` and `~/.codex/hooks.json`; point `HOME` at a scratch
 directory to try it without touching them.
+
+A machine can hold several tokens. To report to a second company, register its token and choose per repository:
+
+```sh
+AI_OBS_HOME=/tmp/ai-obs-dev node packages/collector/bin/ai-obs.js token add --token "$GLOBEX_TOKEN" --endpoint http://localhost:3000
+cd path/to/repo && AI_OBS_HOME=/tmp/ai-obs-dev node /path/to/packages/collector/bin/ai-obs.js use globex
+```
+
+With one token nothing changes. With two or more, a repository's events stay on the machine until `ai-obs use <name>`, and
+the AI harness asks you at session start. See [packages/collector/README.md](packages/collector/README.md).
+
+### Upgrading to company memberships (ADR-0022)
+
+Migration 0014 revokes **every existing ingest token** (a clean break): each developer re-runs `ai-obs init --token <new token>`
+with a user token from the dashboard (or a company token from an admin). Right after the upgrade every old collector gets
+401s, which can use up the per-IP failed-auth budget behind one office NAT and answer a fresh token's first request with 429.
+For the first day raise `INGEST_FAILED_AUTH_BURST` / `INGEST_FAILED_AUTH_PER_MINUTE` (for example 200 / 120), restore the
+defaults afterwards (a restart of the web process also resets the guard), and set `MIN_COLLECTOR_VERSION` to `0.2.0`, the first
+collector release that supports company tokens and several tokens per machine.
 
 ### Full stack in Docker
 
@@ -78,7 +100,7 @@ restart (safe, just slower).
 |---|---|---|
 | `packages/protocol` | `@ai-obs/protocol` | Ingest schema v1: types, zod schemas, `validateBatch()`, shared constants, `fixtures/` |
 | `packages/db` | `@ai-obs/db` | Drizzle schema, `migrations/` (incl. roles + RLS), `dbFor()`, `withRlsContext()`, migrate + seed — see [packages/db/README.md](packages/db/README.md) |
-| `packages/collector` | `ai-obs` | Zero-runtime-dependency CLI: `init`, `doctor`, `status`, `flush`, `uninstall`, `hook` |
+| `packages/collector` | `ai-obs` | Zero-runtime-dependency CLI: `init`, `token`, `use`, `doctor`, `status`, `flush`, `uninstall`, `hook` |
 | `apps/web` | `@ai-obs/web` | Next.js App Router + Tailwind + Recharts: dashboard, admin, super admin, `/api/v1/*` |
 | `apps/worker` | `@ai-obs/worker` | Rollups, budgets, retention, e-mail jobs |
 | `docs/adr` | – | Architecture Decision Records |
@@ -99,7 +121,7 @@ Workspace packages are consumed from source in type-checking and tests (custom e
 | `pnpm db:migrate` | Apply Drizzle migrations incl. roles + RLS, default model prices, role passwords (uses `MIGRATE_DATABASE_URL`, else `DATABASE_URL`) |
 | `pnpm db:seed` | Reset and seed the demo company "Acme" (~300 turns over 60 days) and a super admin |
 | `RUN_ONCE=<rollups\|budgets\|retention> pnpm --filter @ai-obs/worker once` | Run one worker job and exit (e.g. after `pnpm db:seed` to fill `daily_rollups`) |
-| `pnpm dev:token [email]` | Dev only: create a user ingest token for a seeded user and print it |
+| `pnpm dev:token [email] [company-slug]` | Dev only: create a user ingest token for a seeded user (in their active company, or the given one) and print it |
 
 ## Configuration
 

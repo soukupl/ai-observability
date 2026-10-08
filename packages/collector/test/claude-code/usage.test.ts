@@ -1,7 +1,6 @@
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { hashUsageName } from '../../src/analysis/usage.js';
 import { cleanupHomes } from '../helpers.js';
 import { at, SESSION, TranscriptBuilder, text, toolUse } from './fixture.js';
 import { assertValid, byType, setup } from './helpers.js';
@@ -70,13 +69,10 @@ describe('claude-code skill and MCP usage', () => {
     expect(t2.mcp).toBeUndefined();
   });
 
-  it('hashes skill, server and tool names with the company salt in hashed mode', async () => {
-    const salt = 'c0ffee';
-    const [t1] = await run({ projectNaming: 'hashed', projectSalt: salt });
-    expect(Object.keys(t1!.skills!).sort()).toEqual([hashUsageName('skill:code-review', salt), hashUsageName('skill:ship-check', salt)].sort());
-    const gh = hashUsageName('mcp:github', salt);
-    expect(t1!.mcp![gh]).toEqual({ [hashUsageName('mcp:github/search_code', salt)]: 3, [hashUsageName('mcp:github/create_pull_request', salt)]: 1 });
-    expect(t1!.mcp_stats![gh]![hashUsageName('mcp:github/search_code', salt)]).toMatchObject({ errors: 1 });
-    expect(JSON.stringify(t1)).not.toMatch(/code-review|ship-check|github|Slack/);
+  it('enqueues PLAIN skill, server and tool names (the sender hashes them for a hashed-naming token)', async () => {
+    const [t1] = await run();
+    expect(Object.keys(t1!.skills!).sort()).toEqual(['code-review', 'ship-check']);
+    expect(Object.keys(t1!.mcp!).sort()).toEqual(['claude_ai_Slack', 'github']);
+    expect(JSON.stringify(t1)).not.toContain('sha256:');
   });
 });

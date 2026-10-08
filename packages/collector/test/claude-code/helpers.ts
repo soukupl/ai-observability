@@ -8,6 +8,7 @@ import type { CollectorContext, HarnessAdapter, HookInvocation } from '../../src
 import { createContext } from '../../src/context.js';
 import { createLogger } from '../../src/log.js';
 import type { IngestEvent } from '../../src/protocol-types.js';
+import type { StreamKey } from '../../src/queue.js';
 import { buildEnvelope } from '../../src/sender.js';
 import { tmpHome, writeTestConfig } from '../helpers.js';
 import { CWD, SESSION } from './fixture.js';
@@ -19,13 +20,15 @@ export interface Harness {
   adapter: HarnessAdapter;
   ctx: CollectorContext;
   events: IngestEvent[];
+  /** the stream key of every enqueue call, in order */
+  keys: Array<StreamKey | null>;
   claudeDir: string;
   projectDir: string;
   /** fires a hook with `receivedAt` = fixture time */
   hook(name: string, receivedAtMs: number, payload?: Record<string, unknown>): Promise<void>;
 }
 
-export function setup(opts: ClaudeCodeAdapterOptions & { now?: () => Date; projectNaming?: 'plain' | 'hashed'; projectSalt?: string } = {}): Harness {
+export function setup(opts: ClaudeCodeAdapterOptions & { now?: () => Date } = {}): Harness {
   const paths = tmpHome();
   const config = writeTestConfig(paths);
   const claudeDir = opts.claudeDir ?? mkdtempSync(join(tmpdir(), 'ai-obs-claude-'));
@@ -33,22 +36,27 @@ export function setup(opts: ClaudeCodeAdapterOptions & { now?: () => Date; proje
   mkdirSync(projectDir, { recursive: true });
   const adapter = createClaudeCodeAdapter({ probe: async () => '2.1.289', summaryArgv: FAKE_SUMMARIZER, ...opts, claudeDir });
   const events: IngestEvent[] = [];
+  const keys: Array<StreamKey | null> = [];
   const ctx = createContext({
     adapter,
     config,
     paths,
-    queue: { enqueue: (e) => void events.push(...e) },
+    queue: {
+      enqueue: (e, key) => {
+        events.push(...e);
+        keys.push(key);
+      },
+    },
     log: createLogger(paths, 'test'),
-    projectNaming: opts.projectNaming ?? 'plain',
-    projectSalt: opts.projectSalt ?? null,
     now: opts.now ?? (() => new Date('2026-10-01T12:00:00Z')),
-    resolveProject: async () => ({ key: 'github.com/acme/billing', name: 'billing' }),
+    resolveProject: async () => 'github.com/acme/billing',
   });
   const transcript = join(projectDir, `${SESSION}.jsonl`);
   return {
     adapter,
     ctx,
     events,
+    keys,
     claudeDir,
     projectDir,
     async hook(name, receivedAtMs, payload = {}) {

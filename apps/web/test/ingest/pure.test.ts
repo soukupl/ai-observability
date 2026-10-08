@@ -33,11 +33,12 @@ describe('readBatchBody', () => {
 });
 
 describe('resolution rules', () => {
-  it('attributes a team: project mapping, then token team, then primary team', () => {
-    expect(resolveTeam({ projectTeamId: 'p', tokenTeamId: 't', primaryTeamId: 'u' })).toBe('p');
-    expect(resolveTeam({ projectTeamId: null, tokenTeamId: 't', primaryTeamId: 'u' })).toBe('t');
-    expect(resolveTeam({ projectTeamId: null, tokenTeamId: null, primaryTeamId: 'u' })).toBe('u');
-    expect(resolveTeam({ projectTeamId: null, tokenTeamId: null, primaryTeamId: null })).toBeNull();
+  it("attributes a team: project mapping, then the user's primary team in this company, else none", () => {
+    expect(resolveTeam({ projectTeamId: 'p', primaryTeamId: 'u' })).toBe('p');
+    expect(resolveTeam({ projectTeamId: null, primaryTeamId: 'u' })).toBe('u');
+    expect(resolveTeam({ projectTeamId: 'p', primaryTeamId: null })).toBe('p');
+    expect(resolveTeam({ projectTeamId: null, primaryTeamId: null })).toBeNull();
+    expect(resolveTeam({ projectTeamId: undefined, primaryTeamId: undefined })).toBeNull();
   });
 
   it('respects hashed project keys and hashed naming mode', () => {

@@ -4,14 +4,22 @@ import type { ProjectNamingMode, TokenKind } from '@ai-obs/protocol';
 
 export type Attribution = 'verified' | 'matched' | 'unverified';
 
-/** A row of lookup_ingest_token(hash) (packages/db, 0001_roles_rls.sql). */
+/**
+ * A row of lookup_ingest_token(hash) (packages/db, 0014_company_memberships_tokens.sql). A token belongs to
+ * one company and is never bound to a team (ADR-0022): a company token (`aiobs_c_`) matches members by git
+ * e-mail, a user token (`aiobs_u_`) is one member of that company.
+ */
 export interface TokenContext {
   tokenId: string;
   kind: TokenKind;
   companyId: string;
-  teamId: string;
-  /** null for team tokens. */
+  /** Returned by collector-config; the collector names the token after the slug. */
+  company: { name: string; slug: string };
+  /** null for company tokens. */
   userId: string | null;
+  /** User tokens only (collector-config). */
+  userEmail: string | null;
+  /** The token user's primary team in this company (from the membership); null for company tokens. */
   userPrimaryTeamId: string | null;
   companyStatus: 'active' | 'suspended';
   projectNaming: ProjectNamingMode;
@@ -25,7 +33,7 @@ export interface BatchContext {
   token: TokenContext;
   userId: string | null;
   attribution: Attribution;
-  /** The attributed user's primary team (third attribution rule). */
+  /** The attributed user's primary team in this company (second team rule, after the project mapping). */
   primaryTeamId: string | null;
   /** machines.id of the sending machine. */
   machineRowId: string;
@@ -38,14 +46,19 @@ export async function rows<T>(db: Tx | Database, query: SQL): Promise<T[]> {
   return [...(await db.execute(query))] as T[];
 }
 
-/** Resolves a token hash; null when unknown or revoked. Also touches last_used_at (at most once a minute). */
+/**
+ * Resolves a token hash; null when unknown or revoked, and for a user token whose user is no longer a member
+ * of the token's company. Also touches last_used_at (at most once a minute).
+ */
 export async function lookupToken(db: Database, hash: string): Promise<TokenContext | null> {
   const [row] = await rows<{
     token_id: string;
     kind: TokenKind;
     company_id: string;
-    team_id: string;
+    company_name: string;
+    company_slug: string;
     user_id: string | null;
+    user_email: string | null;
     user_primary_team_id: string | null;
     company_status: 'active' | 'suspended';
     plan: Plan;
@@ -56,8 +69,9 @@ export async function lookupToken(db: Database, hash: string): Promise<TokenCont
     tokenId: row.token_id,
     kind: row.kind,
     companyId: row.company_id,
-    teamId: row.team_id,
+    company: { name: row.company_name, slug: row.company_slug },
     userId: row.user_id,
+    userEmail: row.user_email,
     userPrimaryTeamId: row.user_primary_team_id,
     companyStatus: row.company_status,
     projectNaming: row.settings?.projectNaming === 'hashed' ? 'hashed' : 'plain',
@@ -78,7 +92,7 @@ export class OwnerConflictError extends Error {
 
 /**
  * Ownership rule for overwriting existing rows (SEC-3): a row without an owner can be claimed by anyone
- * of the company (a team-token event that is matched to a user later), a row with an owner only by that
+ * of the company (an unverified company-token event that is matched to a user later), a row with an owner only by that
  * same user (any token or machine of theirs). An unverified sender (null) never overwrites an owned row.
  */
 export function ownerMayWrite(existing: string | null | undefined, sender: string | null): boolean {

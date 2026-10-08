@@ -52,7 +52,14 @@ describe('claude-code hooks in settings.json', () => {
     expect(Object.keys(s.hooks).sort()).toEqual([...new Set([...HOOK_EVENTS, 'PreToolUse'])].sort());
     for (const event of HOOK_EVENTS) {
       const ours = s.hooks[event].flatMap((g: { hooks: Array<{ command: string }> }) => g.hooks).filter((h: { command: string }) => h.command.includes('ai-obs'));
-      expect(ours).toEqual([{ type: 'command', command: `/usr/local/bin/node /Users/x/.ai-obs/app/bin/ai-obs.js hook claude-code ${event}` }]);
+      expect(ours).toEqual([
+        {
+          type: 'command',
+          command: `/usr/local/bin/node /Users/x/.ai-obs/app/bin/ai-obs.js hook claude-code ${event}`,
+          // only SessionStart (it may print the nudge and run git) gets a 5 s timeout instead of the 60 s default
+          ...(event === 'SessionStart' ? { timeout: 5 } : {}),
+        },
+      ]);
     }
     expect(s.hooks.Stop[0]).toEqual(USER_SETTINGS.hooks.Stop[0]);
     expect(s.hooks.SessionStart[0]).toEqual(USER_SETTINGS.hooks.SessionStart[0]);

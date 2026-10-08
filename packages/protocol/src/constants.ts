@@ -78,10 +78,13 @@ export type EventType = (typeof EVENT_TYPES)[number];
 export const PROJECT_NAMING_MODES = ['plain', 'hashed'] as const;
 export type ProjectNamingMode = (typeof PROJECT_NAMING_MODES)[number];
 
-/** Ingest token prefixes (ADR-0007). */
+/**
+ * Ingest token prefixes (ADR-0007, ADR-0022): user tokens identify one member of one company; company tokens
+ * (CI, bots, rollout) match users by git e-mail company-wide. Tokens are never bound to a team.
+ */
 export const USER_TOKEN_PREFIX = 'aiobs_u_' as const;
-export const TEAM_TOKEN_PREFIX = 'aiobs_t_' as const;
-export const TOKEN_PREFIXES = { user: USER_TOKEN_PREFIX, team: TEAM_TOKEN_PREFIX } as const;
+export const COMPANY_TOKEN_PREFIX = 'aiobs_c_' as const;
+export const TOKEN_PREFIXES = { user: USER_TOKEN_PREFIX, company: COMPANY_TOKEN_PREFIX } as const;
 export type TokenKind = keyof typeof TOKEN_PREFIXES;
 
 /** Environment variable that marks the collector's own summarizer child process (recursion guard, BRIEF §5.6). */

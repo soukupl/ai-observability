@@ -4,23 +4,23 @@ import { appUrl } from '../../auth/config';
 import { getMailer } from '../../mail';
 import { formObject } from '../input';
 import { createInvitation, invitationEmail, revokeInvitation } from '../invitations';
-import { changeCompanyRole, removeUser } from '../members';
+import { changeCompanyRole, removeMember } from '../members';
 import { messageAction, runAdmin } from '../run';
 import type { ActionState } from '../types';
 
 export async function changeRoleAction(_p: ActionState, fd: FormData): Promise<ActionState> {
-  return messageAction('admin', (tx, u) => changeCompanyRole(tx, u, formObject(fd)));
+  return messageAction('admin', fd, (tx, u) => changeCompanyRole(tx, u, formObject(fd)));
 }
-export async function removeUserAction(_p: ActionState, fd: FormData): Promise<ActionState> {
-  return messageAction('admin', (tx, u) => removeUser(tx, u, formObject(fd)));
+export async function removeMemberAction(_p: ActionState, fd: FormData): Promise<ActionState> {
+  return messageAction('admin', fd, (tx, u) => removeMember(tx, u, formObject(fd)));
 }
 export async function revokeInvitationAction(_p: ActionState, fd: FormData): Promise<ActionState> {
-  return messageAction('admin', (tx, u) => revokeInvitation(tx, u, formObject(fd)));
+  return messageAction('admin', fd, (tx, u) => revokeInvitation(tx, u, formObject(fd)));
 }
 
 /** Creates the invitation (committed first), then e-mails it; a mail failure keeps the invitation. */
 export async function inviteAction(_p: ActionState, fd: FormData): Promise<ActionState> {
-  const r = await runAdmin('admin', (tx, u) => createInvitation(tx, u, formObject(fd)));
+  const r = await runAdmin('admin', fd, (tx, u) => createInvitation(tx, u, formObject(fd)));
   if (!r.ok) return r.state;
   const login = new URL('/login', appUrl()).toString();
   try {

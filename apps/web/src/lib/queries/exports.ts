@@ -153,7 +153,7 @@ export async function buildExportTable(ctx: QueryCtx, view: ExportView, f: Filte
       ];
       const body = turns.map((t): CsvCell[] => [
         iso(t.startedMs),
-        ...(withUsers ? [t.userName ?? (t.attribution === 'unverified' ? 'unverified' : '')] : []),
+        ...(withUsers ? [t.userName ?? (t.userId ? 'former member' : t.attribution === 'unverified' ? 'unverified' : '')] : []),
         t.teamName,
         t.projectName,
         t.harness,

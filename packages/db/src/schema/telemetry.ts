@@ -38,7 +38,7 @@ export const agentSessions = pgTable(
     id: pk(),
     companyId: companyRef(),
     teamId: uuid('team_id').references(() => teams.id, { onDelete: 'set null' }),
-    userId: uuid('user_id'),
+    userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }),
     machineId: uuid('machine_id').references(() => machines.id, { onDelete: 'set null' }),
     projectId: uuid('project_id').references(() => projects.id, { onDelete: 'set null' }),
     externalId: text('external_id').notNull(),
@@ -53,7 +53,6 @@ export const agentSessions = pgTable(
     unique('agent_sessions_company_external_uq').on(t.companyId, t.externalId),
     unique('agent_sessions_company_id_uq').on(t.companyId, t.id),
     index('agent_sessions_company_started_idx').on(t.companyId, t.startedAt),
-    foreignKey({ columns: [t.companyId, t.userId], foreignColumns: [users.companyId, users.id] }).onDelete('cascade'),
   ],
 );
 
@@ -63,9 +62,9 @@ export const turns = pgTable(
   {
     id: pk(),
     companyId: companyRef(),
-    teamId: uuid('team_id').notNull(),
-    /** null = team-token event that matched no user (attribution 'unverified'). */
-    userId: uuid('user_id'),
+    teamId: uuid('team_id'),
+    /** null = company-token event that matched no member (attribution 'unverified'). */
+    userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }),
     attribution: attributionEnum('attribution').notNull(),
     sessionId: uuid('session_id'),
     projectId: uuid('project_id').references(() => projects.id, { onDelete: 'set null' }),
@@ -93,7 +92,6 @@ export const turns = pgTable(
     check('turns_summary_len', sql`char_length(${t.summary}) <= 140`),
     check('turns_user_attribution', sql`(${t.userId} is null) = (${t.attribution} = 'unverified')`),
     foreignKey({ columns: [t.companyId, t.teamId], foreignColumns: [teams.companyId, teams.id] }),
-    foreignKey({ columns: [t.companyId, t.userId], foreignColumns: [users.companyId, users.id] }).onDelete('cascade'),
     foreignKey({ columns: [t.companyId, t.sessionId], foreignColumns: [agentSessions.companyId, agentSessions.id] }).onDelete(
       'cascade',
     ),
@@ -110,7 +108,7 @@ export const runs = pgTable(
     id: pk(),
     companyId: companyRef(),
     teamId: uuid('team_id').references(() => teams.id, { onDelete: 'set null' }),
-    userId: uuid('user_id'),
+    userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }),
     turnId: uuid('turn_id'),
     turnExternalId: text('turn_external_id').notNull(),
     parentRunId: uuid('parent_run_id').references((): AnyPgColumn => runs.id, { onDelete: 'cascade' }),
@@ -137,7 +135,6 @@ export const runs = pgTable(
     index('runs_parent_idx').on(t.parentRunId),
     // The worker's rollup watermark also selects runs created since its last pass.
     index('runs_created_idx').on(t.createdAt),
-    foreignKey({ columns: [t.companyId, t.userId], foreignColumns: [users.companyId, users.id] }).onDelete('cascade'),
     foreignKey({ columns: [t.companyId, t.turnId], foreignColumns: [turns.companyId, turns.id] }).onDelete('cascade'),
   ],
 );
@@ -182,7 +179,7 @@ export const usage = pgTable(
     id: pk(),
     companyId: companyRef(),
     teamId: uuid('team_id').references(() => teams.id, { onDelete: 'set null' }),
-    userId: uuid('user_id'),
+    userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }),
     turnId: uuid('turn_id'),
     runId: uuid('run_id'),
     /** Start of the owning turn / run; selects the effective model_prices row. */
@@ -197,7 +194,6 @@ export const usage = pgTable(
     index('usage_turn_idx').on(t.turnId),
     index('usage_run_idx').on(t.runId),
     check('usage_has_owner', sql`${t.turnId} is not null or ${t.runId} is not null`),
-    foreignKey({ columns: [t.companyId, t.userId], foreignColumns: [users.companyId, users.id] }).onDelete('cascade'),
     foreignKey({ columns: [t.companyId, t.turnId], foreignColumns: [turns.companyId, turns.id] }).onDelete('cascade'),
     foreignKey({ columns: [t.companyId, t.runId], foreignColumns: [runs.companyId, runs.id] }).onDelete('cascade'),
   ],
@@ -247,8 +243,8 @@ export const runawayAlerts = pgTable(
       .notNull()
       .references(() => companies.id, { onDelete: 'cascade' }),
     turnId: uuid('turn_id').notNull(),
-    teamId: uuid('team_id').notNull(),
-    userId: uuid('user_id'),
+    teamId: uuid('team_id'),
+    userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }),
     projectId: uuid('project_id').references(() => projects.id, { onDelete: 'set null' }),
     harness: text('harness').notNull(),
     model: text('model'),
@@ -264,6 +260,5 @@ export const runawayAlerts = pgTable(
     unique('runaway_alerts_company_turn_uq').on(t.companyId, t.turnId),
     index('runaway_alerts_company_started_idx').on(t.companyId, t.startedAt),
     foreignKey({ columns: [t.companyId, t.turnId], foreignColumns: [turns.companyId, turns.id] }).onDelete('cascade'),
-    foreignKey({ columns: [t.companyId, t.userId], foreignColumns: [users.companyId, users.id] }).onDelete('cascade'),
   ],
 );

@@ -23,9 +23,10 @@ function readPending(value: string | undefined): PendingSignup | null | 'config'
 }
 
 /**
- * The sign-up step for a verified e-mail with no account: join one of its pending invitations (each
- * shows the company and who invited you; nothing is joined without this click, SEC-1) or create a
- * solo workspace.
+ * The sign-up step for a verified e-mail with no company to log in to (a new e-mail, or an identity
+ * without memberships): join one of its pending invitations (each shows the company and who invited
+ * you; nothing is joined without this click, SEC-1) or create a solo workspace. When every company of
+ * the user is suspended (`invitationsOnly`), only joining is offered.
  */
 export default async function SignupPage({ searchParams }: { searchParams: Promise<{ error?: string }> }) {
   const { error } = await searchParams;
@@ -34,9 +35,10 @@ export default async function SignupPage({ searchParams }: { searchParams: Promi
   if (!pending) redirect('/login?error=signup_expired');
   const invitations = await listPendingInvitations(defaultAuthDeps(), pending.email);
   const invited = invitations.length > 0;
+  const soloAllowed = !pending.invitationsOnly;
 
   return (
-    <AuthCard title={invited ? 'Join your team' : 'Create your workspace'}>
+    <AuthCard title={invited || !soloAllowed ? 'Join your team' : 'Create your workspace'}>
       <p className="text-sm text-zinc-600 dark:text-zinc-400">
         Signed in as <span className="font-medium text-zinc-900 dark:text-zinc-100">{pending.email}</span>.
       </p>
@@ -69,29 +71,38 @@ export default async function SignupPage({ searchParams }: { searchParams: Promi
               </li>
             ))}
           </ul>
-          <div className="flex items-center gap-3 text-xs text-zinc-500">
-            <span className="h-px flex-1 bg-zinc-200 dark:bg-zinc-800" />
-            or create your own workspace
-            <span className="h-px flex-1 bg-zinc-200 dark:bg-zinc-800" />
-          </div>
+          {soloAllowed && (
+            <div className="flex items-center gap-3 text-xs text-zinc-500">
+              <span className="h-px flex-1 bg-zinc-200 dark:bg-zinc-800" />
+              or create your own workspace
+              <span className="h-px flex-1 bg-zinc-200 dark:bg-zinc-800" />
+            </div>
+          )}
         </section>
       )}
-      <p className="text-sm text-zinc-600 dark:text-zinc-400">
-        A new workspace starts on the Free plan with one team; you can invite colleagues later.
-      </p>
-      <form method="post" action="/api/auth/signup" className="flex flex-col gap-3">
-        <label htmlFor="name" className="text-sm font-medium">
-          Your name
-        </label>
-        <input id="name" name="name" required maxLength={100} defaultValue={pending.name ?? ''} autoComplete="name" className={inputClass} />
-        <label htmlFor="company" className="text-sm font-medium">
-          Company or workspace name
-        </label>
-        <input id="company" name="company" required maxLength={100} autoComplete="organization" className={inputClass} />
-        <button type="submit" className={invited ? secondaryButton : primaryButton}>
-          Create workspace
-        </button>
-      </form>
+      {!soloAllowed && !invited && (
+        <Notice tone="error">Your company account is suspended and there are no other invitations. Contact your administrator.</Notice>
+      )}
+      {soloAllowed && (
+        <>
+          <p className="text-sm text-zinc-600 dark:text-zinc-400">
+            A new workspace starts on the Free plan with one team; you can invite colleagues later.
+          </p>
+          <form method="post" action="/api/auth/signup" className="flex flex-col gap-3">
+            <label htmlFor="name" className="text-sm font-medium">
+              Your name
+            </label>
+            <input id="name" name="name" required maxLength={100} defaultValue={pending.name ?? ''} autoComplete="name" className={inputClass} />
+            <label htmlFor="company" className="text-sm font-medium">
+              Company or workspace name
+            </label>
+            <input id="company" name="company" required maxLength={100} autoComplete="organization" className={inputClass} />
+            <button type="submit" className={invited ? secondaryButton : primaryButton}>
+              Create workspace
+            </button>
+          </form>
+        </>
+      )}
     </AuthCard>
   );
 }

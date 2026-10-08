@@ -4,6 +4,7 @@ import {
   EVENT_TYPES,
   MAX_BATCH_EVENTS,
   projectKeyKind,
+  schemas,
   tokenKind,
   validateBatch,
   type IngestBatchInput,
@@ -195,8 +196,41 @@ describe('helpers', () => {
 
   it('tokenKind reads the prefix', () => {
     expect(tokenKind('aiobs_u_abc')).toBe('user');
-    expect(tokenKind('aiobs_t_abc')).toBe('team');
+    expect(tokenKind('aiobs_c_abc')).toBe('company');
     expect(tokenKind('aiobs_u_')).toBeNull();
+    expect(tokenKind('aiobs_c_')).toBeNull();
     expect(tokenKind('Bearer x')).toBeNull();
+  });
+
+  it('tokenKind rejects the retired team prefix (ADR-0022)', () => {
+    expect(tokenKind('aiobs_t_abc')).toBeNull();
+  });
+});
+
+describe('collectorConfigResponse', () => {
+  const { collectorConfigResponse } = schemas;
+  const base = { project_naming: 'plain', min_collector_version: '0.1.0', project_salt: 'x'.repeat(32) };
+
+  it('accepts company and user labels (user token)', () => {
+    const res = collectorConfigResponse.safeParse({
+      ...base,
+      company: { name: 'Acme', slug: 'acme' },
+      user: { email: 'alice@acme.example' },
+    });
+    expect(res.success).toBe(true);
+    if (!res.success) return;
+    expect(res.data.company).toEqual({ name: 'Acme', slug: 'acme' });
+    expect(res.data.user).toEqual({ email: 'alice@acme.example' });
+  });
+
+  it('accepts user: null (company token) and an older server without the labels', () => {
+    expect(collectorConfigResponse.safeParse({ ...base, company: { name: 'Acme', slug: 'acme' }, user: null }).success).toBe(true);
+    const old = collectorConfigResponse.safeParse(base);
+    expect(old.success).toBe(true);
+    if (old.success) expect(old.data.company).toBeUndefined();
+  });
+
+  it('rejects an empty company slug', () => {
+    expect(collectorConfigResponse.safeParse({ ...base, company: { name: 'Acme', slug: '' } }).success).toBe(false);
   });
 });

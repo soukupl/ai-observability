@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm';
 import {
-  agentSessions, authSessions, budgets, companies, ingestEvents, magicLinks, pendingTurnPatches, runs, teamMemberships, teams, turns, usage, users,
+  agentSessions, authSessions, budgets, companies, companyMemberships, ingestEvents, magicLinks, pendingTurnPatches, runs, teamMemberships, teams, turns, usage, users,
   type Database,
 } from '@ai-obs/db';
 
@@ -52,10 +52,8 @@ export async function seedCompany(db: Database, over: { slug?: string; plan?: 'f
     const companyId = c!.id;
     const [a, b] = await tx.insert(teams).values([{ companyId, name: 'A' }, { companyId, name: 'B' }]).returning({ id: teams.id });
     const mk = async (name: string, role: 'admin' | 'member', team: string) => {
-      const [u] = await tx
-        .insert(users)
-        .values({ companyId, email: `${name}@${slug}.test`, name, companyRole: role, primaryTeamId: team })
-        .returning({ id: users.id });
+      const [u] = await tx.insert(users).values({ email: `${name}@${slug}.test`, name }).returning({ id: users.id });
+      await tx.insert(companyMemberships).values({ companyId, userId: u!.id, companyRole: role, primaryTeamId: team });
       return u!.id;
     };
     const alice = await mk('alice', 'admin', a!.id);
@@ -68,6 +66,19 @@ export async function seedCompany(db: Database, over: { slug?: string; plan?: 'f
       { companyId, teamId: b!.id, userId: dave, role: 'member' },
     ]);
     return { companyId, teamA: a!.id, teamB: b!.id, alice, bob, carol, dave };
+  });
+}
+
+/** Adds an existing identity to a company (the identity may be a member of several companies). */
+export async function addMembership(db: Database, userId: string, companyId: string, role: 'admin' | 'member', primaryTeamId?: string): Promise<void> {
+  await ownerTx(db, (tx) => tx.insert(companyMemberships).values({ companyId, userId, companyRole: role, primaryTeamId: primaryTeamId ?? null }));
+}
+
+/** Removes the membership the way `admin_remove_member` does for the parts the worker reads (membership + team memberships). */
+export async function removeMembership(db: Database, userId: string, companyId: string): Promise<void> {
+  await ownerTx(db, async (tx) => {
+    await tx.execute(sql`delete from team_memberships where company_id = ${companyId}::uuid and user_id = ${userId}::uuid`);
+    await tx.execute(sql`delete from company_memberships where company_id = ${companyId}::uuid and user_id = ${userId}::uuid`);
   });
 }
 

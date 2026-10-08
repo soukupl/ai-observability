@@ -7,8 +7,9 @@ import { COMMANDS, extractHome, main } from '../src/cli.js';
 import { loadConfig } from '../src/config.js';
 import { sessionEndEvent } from '../src/events.js';
 import { aiObsPaths, type AiObsPaths } from '../src/paths.js';
-import { EventQueue } from '../src/queue.js';
+import { LEGACY_TEAM_TOKEN_PREFIX } from '../src/protocol-types.js';
 import { cleanupHomes, fakeAdapter, okResponder, startServer, tmpHome, writeTestConfig } from './helpers.js';
+import { bound, enqueueFor, queueStore } from './queue-helpers.js';
 
 const bin = fileURLToPath(new URL('../bin/ai-obs.js', import.meta.url));
 const closers: Array<() => Promise<void>> = [];
@@ -23,6 +24,14 @@ function capture() {
 }
 
 const fakeRuntime = (paths: AiObsPaths) => ({ entry: `${paths.app}/bin/ai-obs.js`, node: '/usr/bin/node', copied: false });
+const resolveProjectKey = async () => 'github.com/acme/billing';
+
+/** One event in the stream of github.com/acme/billing bound to the test token `acme` (writeTestConfig). */
+function enqueueOne(paths: AiObsPaths, endpoint = 'http://127.0.0.1:9') {
+  enqueueFor(queueStore(paths), 'github.com/acme/billing', bound('acme', endpoint, 'acme', 'aiobs_u_testtoken'), [
+    sessionEndEvent({ harness: 'codex', sessionId: 's', reason: 'exit', at: 0 }),
+  ]);
+}
 
 async function server(naming: 'plain' | 'hashed' = 'plain', status?: number) {
   const srv = await startServer((req, n) => (status ? { status } : okResponder(naming)(req)));
@@ -49,6 +58,8 @@ describe('ai-obs cli', () => {
     const paths = tmpHome();
     expect(await main(['status', '--nope'], capture().io, { paths })).toBe(2);
     expect(COMMANDS).toContain('hook');
+    expect(COMMANDS).toContain('token');
+    expect(COMMANDS).toContain('use');
   });
 
   it('extracts --home from anywhere in argv', () => {
@@ -68,6 +79,10 @@ describe('ai-obs cli', () => {
       const bad = capture();
       expect(await main(['init', '--token', 'sk-123', '--endpoint', 'https://x.io'], bad.io, { paths, env })).toBe(2);
       expect(bad.text()).toContain('aiobs_u_');
+      const legacy = capture();
+      expect(await main(['init', '--token', `${LEGACY_TEAM_TOKEN_PREFIX}old`, '--endpoint', 'https://x.io'], legacy.io, { paths, env })).toBe(2);
+      expect(legacy.text()).toContain('no longer exist');
+      expect(existsSync(paths.config)).toBe(false);
       expect(await main(['init', '--token', 'aiobs_u_x', '--endpoint', 'ftp://x'], capture().io, { paths, env })).toBe(2);
     });
 
@@ -90,8 +105,10 @@ describe('ai-obs cli', () => {
         env: {},
       });
       expect(code).toBe(0);
-      const config = loadConfig(paths, {})!;
-      expect(config).toMatchObject({ endpoint: srv.url, token: 'aiobs_u_abc', git_email: 'dev@acme.com' });
+      const config = loadConfig(paths)!;
+      expect(config).toMatchObject({ endpoint: srv.url, git_email: 'dev@acme.com' });
+      expect(config.tokens).toHaveLength(1);
+      expect(config.tokens[0]).toMatchObject({ name: 'acme', endpoint: srv.url, token: 'aiobs_u_abc', company: { name: 'Acme', slug: 'acme' } });
       expect(statSync(paths.config).mode & 0o777).toBe(0o600);
       expect(cc.installs).toHaveLength(1);
       expect(codex.installs).toHaveLength(0);
@@ -103,7 +120,9 @@ describe('ai-obs cli', () => {
 
       // re-running init keeps the machine id
       await main(['init', '--token', 'aiobs_u_new', '--endpoint', srv.url], capture().io, { paths, adapters: [cc], installRuntime: fakeRuntime, env: {} });
-      expect(loadConfig(paths, {})!.machine_id).toBe(config.machine_id);
+      const again = loadConfig(paths)!;
+      expect(again.machine_id).toBe(config.machine_id);
+      expect(again.tokens.map((t) => [t.name, t.token])).toEqual([['acme', 'aiobs_u_new']]); // same company: rotated
     });
 
     it('--project installs project-scope hooks', async () => {
@@ -135,6 +154,7 @@ describe('ai-obs cli', () => {
       expect(await main(['init', '--token', 'aiobs_u_abc', '--endpoint', 'http://127.0.0.1:9'], c.io, { paths, adapters: [fakeAdapter()], installRuntime: fakeRuntime, env: {} })).toBe(0);
       expect(c.text()).toContain('not reachable');
       expect(c.text()).toContain('hashed project keys');
+      expect(loadConfig(paths)!.tokens[0]).toMatchObject({ name: 'default', provisional_name: true, token: 'aiobs_u_abc' });
     });
   });
 
@@ -145,14 +165,14 @@ describe('ai-obs cli', () => {
     const cc = fakeAdapter();
     cc.installs.push({});
     const c = capture();
-    expect(await main(['doctor'], c.io, { paths, adapters: [cc], env: {} })).toBe(0);
+    expect(await main(['doctor'], c.io, { paths, adapters: [cc], env: {}, resolveProjectKey })).toBe(0);
     expect(c.text()).toContain('✓ token valid');
     expect(c.text()).toContain('hooks installed (user)');
 
     const offline = tmpHome();
     writeTestConfig(offline);
     const d = capture();
-    expect(await main(['doctor'], d.io, { paths: offline, adapters: [fakeAdapter()], env: {} })).toBe(1);
+    expect(await main(['doctor'], d.io, { paths: offline, adapters: [fakeAdapter()], env: {}, resolveProjectKey })).toBe(1);
     expect(d.text()).toContain('✗ endpoint unreachable');
     expect(d.text()).toContain('hooks NOT installed');
     expect(await main(['doctor'], capture().io, { paths: tmpHome(), env: {} })).toBe(1);
@@ -162,21 +182,21 @@ describe('ai-obs cli', () => {
     const srv = await server();
     const paths = tmpHome();
     writeTestConfig(paths, srv.url);
-    new EventQueue(paths.queue).enqueue([sessionEndEvent({ harness: 'codex', sessionId: 's', reason: 'exit', at: 0 })]);
+    enqueueOne(paths, srv.url);
     const s = capture();
-    expect(await main(['status'], s.io, { paths, env: {} })).toBe(0);
+    expect(await main(['status'], s.io, { paths, env: {}, resolveProjectKey })).toBe(0);
     expect(s.text()).toMatch(/queue\s+1 events/);
     const f = capture();
     expect(await main(['flush'], f.io, { paths, env: {} })).toBe(0);
     expect(f.text()).toContain('sent 1 events');
     expect(await main(['flush'], capture().io, { paths, env: {} })).toBe(0);
-    expect(await main(['status'], capture().io, { paths: tmpHome(), env: {} })).toBe(1);
+    expect(await main(['status'], capture().io, { paths: tmpHome(), env: {}, resolveProjectKey })).toBe(1);
   });
 
   it('flush fails (exit 1) and keeps events when the server is down', async () => {
     const paths = tmpHome();
     writeTestConfig(paths);
-    new EventQueue(paths.queue).enqueue([sessionEndEvent({ harness: 'codex', sessionId: 's', reason: 'exit', at: 0 })]);
+    enqueueOne(paths);
     const f = capture();
     expect(await main(['flush'], f.io, { paths, env: {} })).toBe(1);
     expect(f.text()).toContain('1 events stay queued');
@@ -206,5 +226,6 @@ describe('ai-obs cli', () => {
   it('keeps local files under ~/.ai-obs', () => {
     const p = aiObsPaths('/h/.ai-obs');
     expect([p.config, p.state, p.queue]).toEqual(['/h/.ai-obs/config.json', '/h/.ai-obs/state', '/h/.ai-obs/queue']);
+    expect([p.projects, p.collectorConfigDir, p.queueProjects]).toEqual(['/h/.ai-obs/projects.json', '/h/.ai-obs/state/collector-config', '/h/.ai-obs/queue/p']);
   });
 });

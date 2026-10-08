@@ -21,3 +21,4 @@
 - [ADR-0019: Agent groups and orchestration ids on runs; git-graph agent timeline](0019-agent-groups-and-timeline.md)
 - [ADR-0020: Agent flow — stage index, flow key and typed links between sub-agent runs](0020-agent-flow-links.md)
 - [ADR-0021: Friendly model names in the UI; raw ids on machine-facing surfaces](0021-friendly-model-names.md)
+- [ADR-0022: Company memberships, user and company tokens, per-project token choice](0022-company-memberships-and-token-kinds.md)

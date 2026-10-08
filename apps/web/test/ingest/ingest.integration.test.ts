@@ -2,7 +2,7 @@ import { gzipSync } from 'node:zlib';
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { Database, Tx } from '@ai-obs/db';
-import { validateBatch, type IngestBatchInput, type IngestEventInput, type IngestResponse } from '@ai-obs/protocol';
+import { schemas, validateBatch, type IngestBatchInput, type IngestEventInput, type IngestResponse } from '@ai-obs/protocol';
 import { handleCollectorConfig, handleIngest } from '../../src/lib/ingest/handler';
 import { lookupToken } from '../../src/lib/ingest/context';
 import { EVENTS_PER_SAVEPOINT, processBatch } from '../../src/lib/ingest/process-batch';
@@ -16,7 +16,7 @@ import { createQueryContext, type Viewer } from '../../src/lib/queries/scope';
 import { generateToken, hashToken } from '../../src/lib/ingest/tokens';
 import { INT4_MAX, timeWindowProblem, MAX_TOKENS_PER_ENTRY } from '../../src/lib/ingest/limits';
 import { connectIngest, connectOwner, connectRole, dropIngestTestDb, prepareIngestTestDb } from './db-harness';
-import { batch, createWorld, ev, protocolFixture, ulid, type World } from './fixtures';
+import { batch, createWorld, ev, insertMember, insertToken, insertUser, protocolFixture, ulid, type World } from './fixtures';
 
 const skip = await prepareIngestTestDb();
 
@@ -67,7 +67,7 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
         company_id: w.companyId,
         user_id: w.users.alice,
         attribution: 'verified',
-        team_id: w.teams.mobile, // project mapping wins over the token's team (Platform)
+        team_id: w.teams.mobile, // project mapping wins over alice's primary team (Platform)
         session_id: s!.id,
         project_id: w.projects.billing,
         model: 'claude-opus-5-5',
@@ -132,26 +132,52 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
   });
 
   describe('attribution', () => {
-    it('team token + known git e-mail → matched user, token team', async () => {
-      const b = batch([ev.sessionStart('tt-1', 'github.com/acme/unmapped', 'unmapped'), ev.turn('tt-1', 'tt-turn-1')], {
+    it("company token + git e-mail of a member → matched user, that member's primary team in this company", async () => {
+      const b = batch([ev.sessionStart('ct-1', 'github.com/acme/unmapped', 'unmapped'), ev.turn('ct-1', 'ct-turn-1')], {
         identity: { git_email: 'Bob@Acme.test' },
       });
       expect((await post(w.tokens.ci, b)).body).toMatchObject({ accepted: 2, rejected: [] });
-      const [t] = await q(sql`select user_id, attribution, team_id from turns where external_id = 'claude-code:tt-turn-1'`);
-      expect(t).toEqual({ user_id: w.users.bob, attribution: 'matched', team_id: w.teams.ci });
+      const [t] = await q(sql`select user_id, attribution, team_id from turns where external_id = 'claude-code:ct-turn-1'`);
+      expect(t).toEqual({ user_id: w.users.bob, attribution: 'matched', team_id: w.teams.mobile });
       const [p] = await q(sql`select display_name from projects where key = 'github.com/acme/unmapped'`);
       expect(p!.display_name).toBe('unmapped');
     });
 
-    it('team token + unknown or missing e-mail, or a user outside the token team → unverified, no user (SEC-10)', async () => {
-      for (const [id, identity] of [['tt-2', { git_email: 'stranger@else.test' }], ['tt-3', {}], ['tt-4', { git_email: 'dave@acme.test' }]] as const) {
+    it('company token + member e-mail on a mapped project → matched, the project mapping wins', async () => {
+      const b = batch([ev.sessionStart('ct-2', 'github.com/acme/billing'), ev.turn('ct-2', 'ct-turn-2')], {
+        identity: { git_email: 'dave@acme.test' },
+      });
+      expect((await post(w.tokens.ci, b)).body).toMatchObject({ accepted: 2, rejected: [] });
+      const [t] = await q(sql`select user_id, attribution, team_id from turns where external_id = 'claude-code:ct-turn-2'`);
+      expect(t).toEqual({ user_id: w.users.dave, attribution: 'matched', team_id: w.teams.mobile });
+    });
+
+    it('company token + unknown, missing or another company member\'s e-mail → unverified, no user, no team', async () => {
+      const cases = [['cu-1', { git_email: 'stranger@else.test' }], ['cu-2', {}], ['cu-3', { git_email: 'hank@hush.test' }]] as const;
+      for (const [id, identity] of cases) {
         const res = await post(w.tokens.ci, batch([ev.turn(id, `${id}-turn`), ev.run(`${id}-turn`, 'r', null, 1)], { identity }));
         expect(res.body).toMatchObject({ accepted: 2, rejected: [] });
         const [t] = await q(sql`select user_id, attribution, team_id from turns where external_id = ${`claude-code:${id}-turn`}`);
-        expect(t).toEqual({ user_id: null, attribution: 'unverified', team_id: w.teams.ci });
-        const [r] = await q(sql`select user_id from runs where turn_external_id = ${`claude-code:${id}-turn`}`);
-        expect(r!.user_id).toBeNull();
+        expect(t).toEqual({ user_id: null, attribution: 'unverified', team_id: null });
+        const [r] = await q(sql`select user_id, team_id from runs where turn_external_id = ${`claude-code:${id}-turn`}`);
+        expect(r).toEqual({ user_id: null, team_id: null });
       }
+      // On a mapped project the unverified turn still gets the project's team.
+      const mapped = batch([ev.sessionStart('cu-4', 'github.com/acme/billing'), ev.turn('cu-4', 'cu-4-turn')], {
+        identity: { git_email: 'hank@hush.test' },
+      });
+      expect((await post(w.tokens.ci, mapped)).body).toMatchObject({ accepted: 2, rejected: [] });
+      const [t] = await q(sql`select user_id, attribution, team_id from turns where external_id = 'claude-code:cu-4-turn'`);
+      expect(t).toEqual({ user_id: null, attribution: 'unverified', team_id: w.teams.mobile });
+      // hank's e-mail never matched across companies.
+      expect(await q(sql`select 1 from turns where user_id = ${w.users.hank}`)).toEqual([]);
+    });
+
+    it('a user token is verified and ignores the git e-mail', async () => {
+      const b = batch([ev.turn('ut-1', 'ut-turn-1')], { identity: { git_email: 'bob@acme.test' } });
+      expect((await post(w.tokens.alice, b)).body).toMatchObject({ accepted: 1, rejected: [] });
+      const [t] = await q(sql`select user_id, attribution, team_id from turns where external_id = 'claude-code:ut-turn-1'`);
+      expect(t).toEqual({ user_id: w.users.alice, attribution: 'verified', team_id: w.teams.platform });
     });
 
     it('hashed company: plain keys are hashed and names dropped', async () => {
@@ -262,8 +288,11 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
         const res = await post(token, b);
         expect(res.status).toBe(401);
       }
-      // A team token presented with the user prefix is not accepted either.
-      expect((await post(w.tokens.ci.replace('aiobs_t_', 'aiobs_u_'), b)).status).toBe(401);
+      // A company token presented with the user prefix is not accepted either.
+      expect((await post(w.tokens.ci.replace('aiobs_c_', 'aiobs_u_'), b)).status).toBe(401);
+      // The retired team prefix is refused, even with a secret that exists under another prefix (ADR-0022).
+      expect((await post(w.tokens.ci.replace('aiobs_c_', 'aiobs_t_'), b)).status).toBe(401);
+      expect((await post(`aiobs_t_${'x'.repeat(43)}`, b)).status).toBe(401);
     });
 
     it('413 for more than 500 events or more than 1 MB', async () => {
@@ -336,9 +365,24 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
       expect(((await (await get(w.tokens.alice)).json()) as Record<string, string>).project_salt).toBe(a.project_salt);
     });
 
+    it('names the company, and the user for a user token (null for a company token)', async () => {
+      const res = await get(w.tokens.alice);
+      expect(res.headers.get('cache-control')).toBe('private, max-age=300');
+      const a = (await res.json()) as Record<string, unknown>;
+      expect(a).toMatchObject({ company: { name: 'acme', slug: 'acme' }, user: { email: 'alice@acme.test' } });
+      const c = (await (await get(w.tokens.ci)).json()) as Record<string, unknown>;
+      expect(c).toMatchObject({ company: { name: 'acme', slug: 'acme' }, user: null });
+      const h = (await (await get(w.tokens.hashedCo)).json()) as Record<string, unknown>;
+      expect(h).toMatchObject({ company: { name: 'hush', slug: 'hush' }, user: null });
+      // The body satisfies the protocol schema the collector validates with.
+      expect(schemas.collectorConfigResponse.safeParse(a).success).toBe(true);
+      expect(schemas.collectorConfigResponse.safeParse(c).success).toBe(true);
+    });
+
     it('requires a valid token', async () => {
       expect((await get(null)).status).toBe(401);
       expect((await get(w.tokens.revoked)).status).toBe(401);
+      expect((await get(w.tokens.ci.replace('aiobs_c_', 'aiobs_t_'))).status).toBe(401);
     });
   });
 
@@ -349,13 +393,9 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
         const one = async <T>(query: ReturnType<typeof sql>) => [...(await tx.execute(query))][0] as T;
         const c = await one<{ id: string }>(sql`insert into companies (name, slug) values ('Patch Co', 'patchco') returning id`);
         const t = await one<{ id: string }>(sql`insert into teams (company_id, name) values (${c.id}, 'Core') returning id`);
-        const u = await one<{ id: string }>(sql`insert into users (company_id, email, name, company_role, primary_team_id)
-          values (${c.id}, 'pat@patch.test', 'Pat', 'admin', ${t.id}) returning id`);
-        await tx.execute(sql`insert into team_memberships (company_id, team_id, user_id, role) values (${c.id}, ${t.id}, ${u.id}, 'lead')`);
-        const tok = generateToken('user');
-        await tx.execute(sql`insert into ingest_tokens (company_id, team_id, user_id, kind, name, prefix, hash)
-          values (${c.id}, ${t.id}, ${u.id}, 'user', 'test', ${tok.prefix}, ${tok.hash})`);
-        return { companyId: c.id, teamId: t.id, userId: u.id, token: tok.plaintext };
+        const userId = await insertUser(tx, 'pat@patch.test', 'Pat');
+        await insertMember(tx, c.id, userId, { role: 'admin', primaryTeamId: t.id, teamRole: 'lead' });
+        return { companyId: c.id, teamId: t.id, userId, token: await insertToken(tx, c.id, userId) };
       });
       const web = connectRole('web');
       const worker = connectRole('worker');
@@ -431,18 +471,18 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
       expect(t!.outcome).toBe('success');
     });
 
-    it('an unverified team-token sender cannot overwrite an owned turn either', async () => {
+    it('an unverified company-token sender cannot overwrite an owned turn either', async () => {
       const res = await post(w.tokens.ci, batch([ev.turn('own-s', 'own-t', 2)]));
       expect(res.body.rejected).toEqual([expect.objectContaining({ reason: OWNED })]);
     });
 
     it('the owner can re-send from another token or machine, and an unowned row can be claimed', async () => {
-      // Same user through a team token + git e-mail (matched), from another machine.
-      const viaTeam = batch([ev.turn('own-s', 'own-t', 222)], {
+      // Same user through a company token + git e-mail (matched), from another machine.
+      const viaCompany = batch([ev.turn('own-s', 'own-t', 222)], {
         identity: { git_email: 'alice@acme.test' },
         machine: { id: 'ffffffff-7d4b-4c1a-9b5e-3f2d1c0b9a87', os: 'darwin' },
       });
-      expect((await post(w.tokens.ci, viaTeam)).body).toMatchObject({ accepted: 1, rejected: [] });
+      expect((await post(w.tokens.ci, viaCompany)).body).toMatchObject({ accepted: 1, rejected: [] });
       expect(await external('turns', 'claude-code:own-t')).toEqual([{ user_id: w.users.alice, input_tokens: 222, summary: null }]);
 
       // Unverified first, matched/verified later: the row gets its owner.
@@ -517,16 +557,72 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
   });
 
   describe('user tokens need a live membership (SEC-4, defence in depth)', () => {
-    it("stops resolving once the user is no longer a member of the token's team; team tokens are unaffected", async () => {
+    it("stops resolving once the user is no longer a member of the token's company; company tokens are unaffected", async () => {
       expect((await post(w.tokens.bob, batch([ev.sessionStart('mem-s')]))).status).toBe(200);
+      // Removal deletes the membership (team memberships cascade); bob's identity and data stay (D1).
       await owner.run(async (tx) => {
-        await tx.execute(sql`delete from team_memberships where user_id = ${w.users.bob} and team_id = ${w.teams.mobile}`);
+        await tx.execute(sql`delete from company_memberships where user_id = ${w.users.bob} and company_id = ${w.companyId}`);
       });
       expect((await post(w.tokens.bob, batch([ev.sessionStart('mem-s2')]))).status).toBe(401);
+      expect(await lookupToken(db, hashToken(w.tokens.bob))).toBeNull();
       expect((await post(w.tokens.ci, batch([ev.sessionStart('mem-s3')]))).status).toBe(200);
-      await owner.run(async (tx) => {
-        await tx.execute(sql`insert into team_memberships (company_id, team_id, user_id, role) values (${w.companyId}, ${w.teams.mobile}, ${w.users.bob}, 'member')`);
+      // A company token no longer matches the removed member's git e-mail.
+      const res = await post(w.tokens.ci, batch([ev.turn('mem-s4', 'mem-t4')], { identity: { git_email: 'bob@acme.test' } }));
+      expect(res.body).toMatchObject({ accepted: 1, rejected: [] });
+      expect(await q(sql`select user_id, attribution from turns where external_id = 'claude-code:mem-t4'`)).toEqual([
+        { user_id: null, attribution: 'unverified' },
+      ]);
+      expect(await q(sql`select user_id from agent_sessions where external_id = 'claude-code:mem-s'`)).toEqual([{ user_id: w.users.bob }]);
+      await owner.run((tx) => insertMember(tx, w.companyId, w.users.bob, { primaryTeamId: w.teams.mobile }));
+      expect((await post(w.tokens.bob, batch([ev.sessionStart('mem-s5')]))).status).toBe(200);
+    });
+
+    it('a company token whose creator is no longer an admin or lead is refused (D2, also for a racing insert)', async () => {
+      // As a token inserted concurrently with the creator's demotion would be left: unrevoked, creator a plain member.
+      const stray = await owner.run((tx) => insertToken(tx, w.companyId, null, false, w.users.dave));
+      expect((await post(stray, batch([ev.sessionStart('stray-s')]))).status).toBe(401);
+      expect(await lookupToken(db, hashToken(stray))).toBeNull();
+    });
+  });
+
+  describe('one person in two companies (ADR-0022)', () => {
+    it("each user token writes only into its own company, and RLS keeps the two apart", async () => {
+      const beta = await owner.run(async (tx) => {
+        const [c] = [...(await tx.execute(sql`insert into companies (name, slug) values ('Beta', 'beta') returning id`))] as Array<{ id: string }>;
+        const [t] = [...(await tx.execute(sql`insert into teams (company_id, name) values (${c!.id}, 'Core') returning id`))] as Array<{ id: string }>;
+        await insertMember(tx, c!.id, w.users.dave, { primaryTeamId: t!.id });
+        return { companyId: c!.id, teamId: t!.id, daveB: await insertToken(tx, c!.id, w.users.dave) };
       });
+      const daveA = await owner.run((tx) => insertToken(tx, w.companyId, w.users.dave));
+      const machine = { id: 'dddddddd-7d4b-4c1a-9b5e-3f2d1c0b9a87', os: 'linux' as const };
+      const send = (token: string) =>
+        post(token, batch([ev.sessionStart('dual-s', 'github.com/dave/side'), ev.turn('dual-s', 'dual-t')], { machine }));
+      expect((await send(daveA)).body).toMatchObject({ accepted: 2, rejected: [] });
+      expect((await send(beta.daveB)).body).toMatchObject({ accepted: 2, rejected: [] });
+
+      const owned = (table: 'turns' | 'agent_sessions') =>
+        q<{ company_id: string; user_id: string; team_id: string | null }>(
+          sql`select company_id, user_id, team_id from ${sql.raw(table)} where external_id = ${table === 'turns' ? 'claude-code:dual-t' : 'claude-code:dual-s'}
+              order by company_id = ${w.companyId} desc`,
+        );
+      expect(await owned('turns')).toEqual([
+        { company_id: w.companyId, user_id: w.users.dave, team_id: w.teams.mobile },
+        { company_id: beta.companyId, user_id: w.users.dave, team_id: beta.teamId },
+      ]);
+      expect((await owned('agent_sessions')).map((r) => r.company_id)).toEqual([w.companyId, beta.companyId]);
+      const machines = await q<{ company_id: string }>(
+        sql`select company_id from machines where machine_id = ${machine.id} order by company_id = ${w.companyId} desc`,
+      );
+      expect(machines.map((m) => m.company_id)).toEqual([w.companyId, beta.companyId]);
+
+      const web = connectRole('web');
+      const visible = (companyId: string) =>
+        withRlsContext(web, { companyId, userId: w.users.dave, role: 'member' }, async (tx) => ({
+          turns: [...(await tx.execute(sql`select company_id from turns where external_id = 'claude-code:dual-t'`))],
+          sessions: [...(await tx.execute(sql`select company_id from agent_sessions where external_id = 'claude-code:dual-s'`))],
+        }));
+      expect(await visible(w.companyId)).toEqual({ turns: [{ company_id: w.companyId }], sessions: [{ company_id: w.companyId }] });
+      expect(await visible(beta.companyId)).toEqual({ turns: [{ company_id: beta.companyId }], sessions: [{ company_id: beta.companyId }] });
     });
   });
 

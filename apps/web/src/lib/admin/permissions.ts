@@ -14,30 +14,23 @@ export const memberOf = (a: Actor, teamId: string): boolean => a.teams.some((t) 
 export const canEnterAdmin = (a: Actor): boolean => isAdmin(a) || isLead(a);
 
 /**
- * User tokens: always for yourself, in a team you belong to (admins: any team).
- * Team tokens: admins for any team, leads for the teams they lead.
+ * Token kinds (ADR-0022, brief Q2/Q9). User tokens: anyone, for themselves, in the active company.
+ * Company tokens (CI, bots, MDM rollout): company admins and leads of any team.
  */
-export function canCreateToken(a: Actor, kind: 'user' | 'team', teamId: string): boolean {
-  if (kind === 'user') return isAdmin(a) || memberOf(a, teamId);
-  return isAdmin(a) || leadsTeam(a, teamId);
-}
-
-/** Teams in which `a` may create a token of `kind` (admins: all of `allTeamIds`). */
-export function tokenTeams(a: Actor, kind: 'user' | 'team', allTeamIds: string[]): string[] {
-  return allTeamIds.filter((id) => canCreateToken(a, kind, id));
+export function canCreateToken(a: Actor, kind: 'user' | 'company'): boolean {
+  return kind === 'user' || isAdmin(a) || isLead(a);
 }
 
 export interface TokenOwner {
-  kind: 'user' | 'team';
-  teamId: string;
+  kind: 'user' | 'company';
   userId: string | null;
 }
 
-/** Own user tokens; team tokens of led teams; admins everything. */
+/** Admins: every token of the company (D6). Own user tokens. Company tokens: leads. */
 export function canRevokeToken(a: Actor, t: TokenOwner): boolean {
   if (isAdmin(a)) return true;
   if (t.kind === 'user') return t.userId === a.id;
-  return leadsTeam(a, t.teamId);
+  return isLead(a);
 }
 
 export const canManageBudgets = isAdmin;

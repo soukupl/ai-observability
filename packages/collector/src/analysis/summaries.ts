@@ -4,6 +4,7 @@ import type { CollectorContext, HarnessAdapter } from '../adapters/types.js';
 import { cleanSummaryText, turnSummaryEvent } from '../events.js';
 import { errorMessage, readJsonFile, writeJsonAtomic } from '../fsutil.js';
 import { SUMMARIZING_ENV, type IngestEvent } from '../protocol-types.js';
+import type { StreamKey } from '../queue.js';
 import type { TurnDigest } from './digest.js';
 
 export const SUMMARY_TIMEOUT_MS = 120_000;
@@ -217,6 +218,8 @@ export async function summarizeWithCommand(
 interface PendingDigest extends TurnDigest {
   attempts: number;
   firstFailedAt: number;
+  /** the session's stream; a digest written by 0.1.x has none and is dropped (C16) */
+  key?: StreamKey;
 }
 
 /** Failed digests (local only, mode 0600): ~/.ai-obs/state/summaries/<harness>.json */
@@ -225,31 +228,47 @@ export function pendingSummariesPath(stateDir: string, harness: string): string 
 }
 
 /**
- * Summarizes new digests plus previously failed ones, enqueues `turn_summary` events and stores
- * what is still missing for the next run (max 5 attempts / 7 days). Only summaries are enqueued;
- * digests never leave the machine. Never throws.
+ * Summarizes new digests plus previously failed ones, enqueues `turn_summary` events into each
+ * digest's stream (`key` for the new ones) and stores what is still missing for the next run (max 5
+ * attempts / 7 days). Only summaries are enqueued; digests never leave the machine. New digests with a
+ * null key (session not recorded) and pending ones without a key (0.1.x) are dropped. Never throws.
  */
 export async function summarizeAndQueue(
   adapter: Pick<HarnessAdapter, 'name' | 'summarize'>,
   digests: readonly TurnDigest[],
   ctx: CollectorContext,
+  key: StreamKey | null = null,
 ): Promise<{ summarized: number; pending: number }> {
   const file = pendingSummariesPath(ctx.paths.state, adapter.name);
   const nowMs = ctx.now().getTime();
   const pending = new Map<string, PendingDigest>();
+  let unkeyed = 0;
   for (const p of readJsonFile<PendingDigest[]>(file) ?? []) {
+    if (!p.key) {
+      unkeyed++;
+      continue;
+    }
     if (p.attempts < MAX_ATTEMPTS && nowMs - p.firstFailedAt < MAX_PENDING_AGE_MS) pending.set(p.turnId, p);
   }
-  for (const d of digests) pending.set(d.turnId, { ...d, attempts: pending.get(d.turnId)?.attempts ?? 0, firstFailedAt: pending.get(d.turnId)?.firstFailedAt ?? nowMs });
+  if (unkeyed) ctx.log.warn('summaries: pending digests without a stream dropped', { harness: adapter.name, count: unkeyed });
+  if (key) {
+    for (const d of digests) {
+      const prev = pending.get(d.turnId);
+      pending.set(d.turnId, { ...d, attempts: prev?.attempts ?? 0, firstFailedAt: prev?.firstFailedAt ?? nowMs, key });
+    }
+  } else if (digests.length) {
+    ctx.log.info('summaries: session not recorded, digests dropped', { harness: adapter.name, count: digests.length });
+  }
 
   const all = [...pending.values()];
-  const events: IngestEvent[] = [];
+  const byKey = new Map<string, { key: StreamKey; events: IngestEvent[] }>();
+  let summarized = 0;
   for (let i = 0; i < all.length; i += SUMMARY_CHUNK) {
     const chunk = all.slice(i, i + SUMMARY_CHUNK);
     let result = new Map<string, string>();
     try {
       result = await adapter.summarize(
-        chunk.map(({ attempts: _a, firstFailedAt: _f, ...d }) => d),
+        chunk.map(({ attempts: _a, firstFailedAt: _f, key: _k, ...d }) => d),
         ctx,
       );
     } catch (err) {
@@ -258,20 +277,24 @@ export async function summarizeAndQueue(
     for (const d of chunk) {
       const text = result.get(d.turnId);
       const ev = text ? turnSummaryEvent({ harness: adapter.name, turnId: d.turnId, summary: text, at: ctx.now() }) : null;
-      if (ev) {
-        events.push(ev);
+      if (ev && d.key) {
+        const tag = JSON.stringify(d.key);
+        const group = byKey.get(tag) ?? { key: d.key, events: [] };
+        group.events.push(ev);
+        byKey.set(tag, group);
+        summarized++;
         pending.delete(d.turnId);
       } else {
         d.attempts += 1;
       }
     }
   }
-  if (events.length) ctx.queue.enqueue(events);
+  for (const g of byKey.values()) ctx.queue.enqueue(g.events, g.key);
   const left = [...pending.values()].filter((p) => p.attempts < MAX_ATTEMPTS).slice(-MAX_PENDING);
   try {
     writeJsonAtomic(file, left);
   } catch (err) {
     ctx.log.error('summaries: cannot store pending digests', { error: errorMessage(err) });
   }
-  return { summarized: events.length, pending: left.length };
+  return { summarized, pending: left.length };
 }

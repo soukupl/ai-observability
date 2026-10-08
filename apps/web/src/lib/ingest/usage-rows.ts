@@ -13,7 +13,7 @@ import type { UsageRow } from './usage';
  */
 export async function replaceUsage(
   tx: Tx,
-  owner: { companyId: string; turnId: string | null; runId: string | null; teamId: string; userId: string | null; startedAt: string },
+  owner: { companyId: string; turnId: string | null; runId: string | null; teamId: string | null; userId: string | null; startedAt: string },
   entries: readonly UsageRow[],
 ): Promise<void> {
   const ownerFilter = owner.runId ? sql`run_id = ${owner.runId}::uuid` : sql`turn_id = ${owner.turnId}::uuid and run_id is null`;
@@ -39,7 +39,7 @@ export async function replaceUsage(
  */
 export async function propagateTurnOwner(
   tx: Tx,
-  turn: { id: string; key: string; teamId: string; userId: string | null },
+  turn: { id: string; key: string; teamId: string | null; userId: string | null },
 ): Promise<void> {
   await tx.execute(sql`update usage set team_id = ${turn.teamId}::uuid, user_id = ${turn.userId}::uuid
     where turn_id = ${turn.id}::uuid and run_id is null`);

@@ -2,13 +2,19 @@
  * `ai-obs hook <harness> <hookName>` — the FAST PATH run inside the harness. Budget: < 100 ms.
  * Reads the stdin JSON, writes a job file, spawns the detached worker, exits 0. It never blocks or
  * fails the harness: every error is logged to ~/.ai-obs/log and swallowed. Keep imports minimal.
+ * On SessionStart only it may also print the token nudge (nudge.ts); every other hook stays silent on stdout.
+ * The budget is measured in-process from `runHook` entry (Node startup is outside the collector's control).
  */
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { filterEnv, writeJob } from './jobs.js';
 import { createLogger } from './log.js';
+import { computeNudge, formatSessionStartOutput, isSessionStart, SESSION_START_OUTPUT } from './nudge.js';
 import { aiObsPaths, type AiObsPaths } from './paths.js';
+import { resolveProjectKey } from './project-key.js';
 import type { HarnessName } from './protocol-types.js';
 
 const HARNESSES: readonly string[] = ['claude-code', 'codex'];
@@ -23,6 +29,21 @@ export interface HookDeps {
   now?: () => number;
   /** starts the worker; default spawns `node dist/worker-main.js` detached */
   spawnWorker?: (paths: AiObsPaths) => void;
+  /** where the SessionStart nudge is written; default process.stdout */
+  stdout?: { write(s: string): unknown };
+  /** plain-key resolver used on a key-cache miss; default `resolveProjectKey` */
+  resolveProjectKey?: (cwd: string, opts: { timeoutMs: number; bounded?: boolean }) => Promise<string | null>;
+  /** argv of this collector for the commands in the nudge text; default `[process.execPath, process.argv[1], --home …]` */
+  selfCommand?: readonly string[];
+  /** monotonic clock in ms; default `performance.now()` */
+  perfNow?: () => number;
+}
+
+/** `[node, entry, ...(--home <root> when the home is not the default)]`; null when the entry is unknown. */
+function defaultSelfCommand(paths: AiObsPaths): string[] | null {
+  const entry = process.argv[1];
+  if (!entry) return null;
+  return [process.execPath, entry, ...(paths.root !== join(homedir(), '.ai-obs') ? ['--home', paths.root] : [])];
 }
 
 /** Reads all of stdin, giving up after `timeoutMs` without data / end (harness kept the pipe open). */
@@ -75,6 +96,8 @@ export function defaultSpawnWorker(paths: AiObsPaths): void {
 
 /** Always resolves 0. `args` = [harness, hookName]. */
 export async function runHook(args: readonly string[], deps: HookDeps = {}): Promise<number> {
+  const perfNow = deps.perfNow ?? (() => performance.now());
+  const startedAt = perfNow();
   const env = deps.env ?? process.env;
   if (env.AI_OBS_SUMMARIZING) return 0;
   const paths = deps.paths ?? aiObsPaths();
@@ -94,22 +117,47 @@ export async function runHook(args: readonly string[], deps: HookDeps = {}): Pro
         createLogger(paths, 'hook').warn('hook: stdin is not JSON', { harness, hook, bytes: raw.length });
       }
     }
-    const payloadCwd = payload && typeof payload === 'object' && typeof (payload as { cwd?: unknown }).cwd === 'string' ? (payload as { cwd: string }).cwd : null;
+    const fields = payload && typeof payload === 'object' ? (payload as { cwd?: unknown; session_id?: unknown; agent_id?: unknown }) : {};
+    const payloadCwd = typeof fields.cwd === 'string' ? fields.cwd : null;
+    const cwd = payloadCwd ?? deps.cwd ?? process.cwd();
     const now = deps.now?.() ?? Date.now();
     writeJob(
       paths.jobs,
       {
-        v: 1,
+        v: 2,
         harness: harness as HarnessName,
         hook,
         payload,
-        cwd: payloadCwd ?? deps.cwd ?? process.cwd(),
+        cwd,
         env: filterEnv(env),
         received_at: new Date(now).toISOString(),
       },
       now,
     );
     (deps.spawnWorker ?? defaultSpawnWorker)(paths);
+
+    // Telemetry first, then the nudge: SessionStart of a main agent only, in its own try/catch.
+    if (isSessionStart(hook) && fields.agent_id == null && SESSION_START_OUTPUT[harness as HarnessName] !== 'none') {
+      try {
+        const nudge = await computeNudge({
+          paths,
+          cwd,
+          sessionId: fields.session_id,
+          now,
+          startedAt,
+          perfNow,
+          resolveProjectKey: deps.resolveProjectKey ?? resolveProjectKey,
+          selfCommand: deps.selfCommand ?? defaultSelfCommand(paths),
+        });
+        const out = nudge ? formatSessionStartOutput(harness as HarnessName, nudge.text) : null;
+        if (nudge && out !== null) {
+          (deps.stdout ?? process.stdout).write(out);
+          nudge.commit();
+        }
+      } catch (err) {
+        createLogger(paths, 'hook').warn('hook: nudge failed', { error: err instanceof Error ? err.message : String(err) });
+      }
+    }
   } catch (err) {
     createLogger(paths, 'hook').error('hook: failed', { error: err instanceof Error ? err.message : String(err) });
   }

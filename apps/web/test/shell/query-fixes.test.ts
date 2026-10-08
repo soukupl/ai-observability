@@ -292,6 +292,63 @@ describe.skipIf(skipReason !== null)(skipReason ? `query fixes - SKIPPED: ${skip
       expect(admin.users?.map((u) => u.name).sort()).toEqual(['admin', 'lead', 'm1', 'm2']);
     });
   });
+
+  describe('company memberships (ADR-0022)', () => {
+    let M1: Fixture;
+    let M2: Fixture;
+    beforeAll(async () => {
+      M1 = await seedCompany(owner, 'multi-one', 'full');
+      M2 = await seedCompany(owner, 'multi-two', 'full');
+      await owner.transaction(async (tx) => {
+        await tx.execute(sql`set local role app_definer`);
+        // M1's m2 is also a member of M2 (one login, two companies).
+        await tx.execute(sql`insert into company_memberships (company_id, user_id, company_role) values (${M2.id}::uuid, ${M1.people.m2!.id}::uuid, 'member')`);
+        // M2's m1 is removed: the membership goes, the turns stay (D1).
+        await tx.execute(sql`delete from company_memberships where company_id = ${M2.id}::uuid and user_id = ${M2.people.m1!.id}::uuid`);
+        // One of M2's admin turns has no team (company token, unmapped project, no primary team).
+        await tx.execute(sql`update turns set team_id = null where id = ${M2.turnIds.find((t) => t.userKey === 'admin')!.id}::uuid`);
+      });
+    }, 300_000);
+
+    it('listUsers reads the active company membership: a shared login shows in both, only where it is a member', async () => {
+      const one = (await asPerson(web, M1.people.admin!, (ctx) => loadFilterOptions(ctx))).users?.map((u) => u.name).sort();
+      expect(one).toEqual(['admin', 'lead', 'm1', 'm2']);
+      const two = (await asPerson(web, M2.people.admin!, (ctx) => loadFilterOptions(ctx))).users?.map((u) => u.name).sort();
+      expect(two).toEqual(['admin', 'lead', 'm2', 'm2']); // M2's own m2 plus M1's m2 (same login); m1 was removed
+    });
+
+    it('a lead gets members of the teams they lead through the membership primary team', async () => {
+      const lead = (await asPerson(web, M2.people.lead!, (ctx) => loadFilterOptions(ctx))).users?.map((u) => u.name).sort();
+      expect(lead).toEqual(['admin', 'lead']); // m1 (removed) is gone; m2 is in team 2
+    });
+
+    it('keeps a removed member\'s turns, with no name; a turn without a team is "No team"', async () => {
+      const r = await asPerson(web, M2.people.admin!, (ctx) => listTurns(ctx, f({ range: '30d' }), { pageSize: 500 }));
+      const removed = r.rows.filter((x) => x.userId === M2.people.m1!.id);
+      expect(removed.length).toBeGreaterThan(0);
+      expect(removed.every((x) => x.userName == null)).toBe(true);
+      expect(r.rows.some((x) => x.teamId === null && x.teamName === 'No team')).toBe(true);
+    });
+
+    it('a current member without a name (magic-link invitee) is shown by e-mail, never as a former member', async () => {
+      const lead = M2.people.lead!;
+      const setName = (name: string | null) => owner.transaction(async (tx) => {
+        await tx.execute(sql`set local role app_definer`);
+        await tx.execute(sql`update users set name = ${name} where id = ${lead.id}::uuid`);
+      });
+      await setName(null);
+      try {
+        const r = await asPerson(web, M2.people.admin!, (ctx) => listTurns(ctx, f({ range: '30d' }), { pageSize: 500 }));
+        const own = r.rows.filter((x) => x.userId === lead.id);
+        expect(own.length).toBeGreaterThan(0);
+        expect(own.every((x) => x.userName === lead.email)).toBe(true);
+        const d = await asPerson(web, M2.people.admin!, (ctx) => getTurnDetail(ctx, own[0]!.id));
+        expect(d?.turn.userName).toBe(lead.email);
+      } finally {
+        await setName('lead');
+      }
+    });
+  });
 });
 
 void NOW;

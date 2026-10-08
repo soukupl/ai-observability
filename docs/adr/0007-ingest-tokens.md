@@ -1,6 +1,6 @@
 # ADR-0007: Per-user and team ingest tokens; turn-to-team attribution
 
-- **Status:** Accepted
+- **Status:** Partly superseded by ADR-0022 (2026-10-08)
 - **Date:** 2026-10-05
 - **Deciders:** Ladislav Soukup (owner); options proposed by Claude
 - **Tags:** security, auth, schema
@@ -44,3 +44,17 @@ primary team.
 - **Plan downgrades grandfather existing usage (dod:C2).** Existing members, teams and invitations above the new plan's limits are kept;
   only new growth is refused (invite, create team, accept invitation), retention is capped by the worker, and budgets can only be removed.
   The platform console warns before a downgrade; the admin overview shows an over-plan notice.
+
+## Amendment 2026-10-08 — team tokens dropped, company tokens (ADR-0022)
+
+- **Decided by:** Ladislav Soukup (owner), in the grilling of 2026-10-08 recorded in [ADR-0022](0022-company-memberships-and-token-kinds.md).
+  The body and the 2026-10-06 amendment above are kept as history.
+
+- **Team tokens are gone.** The kinds are now *user* (`aiobs_u_`, one user in one company) and *company* (`aiobs_c_`, for
+  rollout / CI, made by admins and leads). `aiobs_t_` is not accepted. A token is no longer bound to a team; the team of a
+  turn is the project mapping, else the primary team of the resolved user in that company, else none.
+- **SEC-4 successor:** a user token needs a live company membership; removing the member from the company revokes it (and the
+  company tokens the person created). `lookup_ingest_token` also requires the membership.
+- **SEC-10 successor:** a company token matches a git e-mail to any member of the token's company, bound to
+  `app_ingest_company()`; a non-member stays `unverified`.
+- Revocation is one-way (a DB trigger). Every token that existed before migration 0014 was revoked: re-run `ai-obs init`.

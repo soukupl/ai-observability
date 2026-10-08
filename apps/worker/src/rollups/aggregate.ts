@@ -12,7 +12,7 @@ export type Outcome = 'success' | 'failed' | 'abandoned' | 'unknown';
 
 export interface TurnRow {
   id: string;
-  teamId: string;
+  teamId: string | null;
   userId: string | null;
   projectId: string | null;
   harness: string;
@@ -36,7 +36,7 @@ export interface UsageRow {
 }
 
 export interface RollupRow {
-  teamId: string;
+  teamId: string | null;
   userId: string | null;
   projectId: string | null;
   harness: string;
@@ -170,7 +170,7 @@ export interface SkillMcpUse {
 }
 
 export interface SkillMcpRollupRow {
-  teamId: string;
+  teamId: string | null;
   userId: string | null;
   projectId: string | null;
   harness: string;

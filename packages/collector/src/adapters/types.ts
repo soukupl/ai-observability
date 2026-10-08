@@ -2,8 +2,8 @@ import type { TurnDigest } from '../analysis/digest.js';
 import type { CollectorConfig } from '../config.js';
 import type { Logger } from '../log.js';
 import type { AiObsPaths } from '../paths.js';
-import type { HarnessName, ProjectNamingMode, ProjectRef } from '../protocol-types.js';
-import type { EventQueue } from '../queue.js';
+import type { HarnessName, ProjectRef } from '../protocol-types.js';
+import type { QueueStore, StreamKey } from '../queue.js';
 import type { SessionStateStore } from '../state.js';
 
 /**
@@ -106,19 +106,40 @@ export interface CollectorContext {
   readonly harness: HarnessName;
   readonly config: CollectorConfig;
   readonly paths: AiObsPaths;
-  /** append events (build them with src/events.ts) */
-  readonly queue: Pick<EventQueue, 'enqueue'>;
+  /**
+   * Append events (build them with src/events.ts) to the session's stream, from `streamFor()`. A null
+   * key drops them (logged). Project keys and usage names stay plain: the sender names / hashes them
+   * for the receiving token (C3).
+   */
+  readonly queue: Pick<QueueStore, 'enqueue'>;
   /** per-session JSON state: ~/.ai-obs/state/<harness>/<session>.json */
   readonly state: SessionStateStore;
   readonly log: Logger;
-  /** company project-naming mode (cached collector-config; 'hashed' until the server was reached) */
-  readonly projectNaming: ProjectNamingMode;
-  /** project of a working directory: normalized remote / hash; never a path. Cached per cwd. */
+  /**
+   * Project of a working directory for `session_start.project`: the plain remote, or a keyed hash for a
+   * path; never a path. Cached per cwd. Routing never uses it: the sender overwrites it from the stream key.
+   */
   projectKey(cwd: string): Promise<ProjectRef>;
+  /**
+   * The session's stream, pinned once per session (C12, C15): a pinned token-bound project stream is
+   * returned as is; a pinned open one joins the project's explicit choice once there is one; an
+   * unresolved one is retried and adopted (keeping its token binding); otherwise the key of
+   * `holder.pkCwd` is resolved and bound with the routing in force at `capturedAt` (the `received_at`
+   * of the session's first hook). Sets `holder.stream` (the caller saves the holder). Null = do not
+   * record (no cwd, or `ai-obs use --none`).
+   */
+  streamFor(holder: StreamHolder, capturedAt: number): Promise<StreamKey | null>;
   now(): Date;
   /**
-   * Summarize turns with this adapter's summarize(), enqueue `turn_summary` events, and keep failed
-   * digests (locally) for retry on the next call. Never throws.
+   * Summarize turns with this adapter's summarize(), enqueue `turn_summary` events into `key`'s stream,
+   * and keep failed digests (locally, with their key) for retry on the next call. Never throws.
    */
-  summarizeTurns(digests: TurnDigest[]): Promise<void>;
+  summarizeTurns(digests: TurnDigest[], key: StreamKey | null): Promise<void>;
+}
+
+/** Session state that pins a stream: the session's first cwd and, once bound, its stream (C15). */
+export interface StreamHolder {
+  stream?: StreamKey;
+  /** the cwd the project key is resolved from; null = unknown (pre-upgrade Codex state without session_meta) */
+  pkCwd?: string | null;
 }

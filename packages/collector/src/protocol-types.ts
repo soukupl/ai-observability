@@ -18,7 +18,9 @@ export const MAX_RUN_LINKS = 32;
 /** Upper bound of `stage_index`. */
 export const MAX_STAGE_INDEX = 10_000;
 export const USER_TOKEN_PREFIX = 'aiobs_u_' as const;
-export const TEAM_TOKEN_PREFIX = 'aiobs_t_' as const;
+export const COMPANY_TOKEN_PREFIX = 'aiobs_c_' as const;
+/** Removed prefix (ADR-0022), never accepted: kept only to recognise it in the "no longer exist" message and maskToken. */
+export const LEGACY_TEAM_TOKEN_PREFIX = 'aiobs_t_' as const;
 /** Recursion guard for the collector's own summarizer child process (BRIEF §5.6). */
 export const SUMMARIZING_ENV = 'AI_OBS_SUMMARIZING' as const;
 
@@ -204,7 +206,11 @@ export interface CollectorConfigResponse {
   min_collector_version: string;
   /**
    * Per-company secret for hashed project keys (HMAC-SHA256 key). Optional: servers that do not send
-   * it get plain sha256 keys. Collector-side contract, not yet in packages/protocol.
+   * it get plain sha256 keys.
    */
   project_salt?: string;
+  /** The company the token reports to (ADR-0022); `slug` is the default token name. Optional: older servers omit it. */
+  company?: { name: string; slug: string };
+  /** The member a user token identifies; null for a company token. Optional like `company`. */
+  user?: { email: string } | null;
 }

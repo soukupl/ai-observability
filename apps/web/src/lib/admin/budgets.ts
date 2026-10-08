@@ -1,5 +1,5 @@
 import { and, eq, sql } from 'drizzle-orm';
-import { budgets, teams, users, type Tx } from '@ai-obs/db';
+import { budgets, companyMemberships, teams, type Tx } from '@ai-obs/db';
 import { z } from 'zod';
 import { rows } from '../queries/sqlutil';
 import { audit } from './audit';
@@ -60,7 +60,7 @@ export async function createBudget(tx: Tx, actor: Actor, input: unknown): Promis
   const teamId = b.scope === 'team' ? b.teamId : null;
   const userId = b.scope === 'user' ? b.userId : null;
   if (teamId) ensure((await tx.select({ id: teams.id }).from(teams).where(and(eq(teams.companyId, actor.companyId), eq(teams.id, teamId)))).length, 'Team not found.');
-  if (userId) ensure((await tx.select({ id: users.id }).from(users).where(and(eq(users.companyId, actor.companyId), eq(users.id, userId)))).length, 'User not found.');
+  if (userId) ensure((await tx.select({ id: companyMemberships.userId }).from(companyMemberships).where(and(eq(companyMemberships.companyId, actor.companyId), eq(companyMemberships.userId, userId)))).length, 'User not found.');
   const [row] = await tx
     .insert(budgets)
     .values({ companyId: actor.companyId, teamId, userId, kind: b.kind, limitValue: toNumeric(b.kind, b.limit) })

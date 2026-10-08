@@ -18,12 +18,12 @@ export const VIEW_NAV: readonly NavItem[] = [
 ];
 export const ADMIN_NAV: NavItem = { href: '/admin', label: 'Admin', title: 'Teams, members, tokens, settings, budgets' };
 export const TOKENS_NAV: NavItem = { href: '/tokens', label: 'My tokens', title: 'Create and revoke your own ingest tokens' };
-export const LEAD_NAV: NavItem = { href: '/admin/tokens', label: 'Team tokens', title: 'Tokens and budgets of the teams you lead' };
+export const LEAD_NAV: NavItem = { href: '/admin/tokens', label: 'Company tokens', title: 'Company tokens and budgets' };
 export const SUPER_NAV: NavItem = { href: '/super', label: 'Super admin', title: 'Companies and plans' };
 
 /**
  * Links for a user: the dashboard views + "My tokens" for company users, + Admin for company admins (or
- * "Team tokens" for team leads, who reach only the token and budget pages), + Super for super admins.
+ * "Company tokens" for team leads, who reach only the token and budget pages), + Super for super admins.
  */
 export function navFor(user: { companyRole: 'admin' | 'member'; isSuperAdmin: boolean; company: unknown | null; teams?: { role: string }[] }): NavItem[] {
   const items = user.company ? [...VIEW_NAV, TOKENS_NAV] : [];

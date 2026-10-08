@@ -46,7 +46,7 @@ export function toTableRows(rows: TurnListRow[]) {
     id: r.id,
     href: `/turns/${r.id}?startedMs=${r.startedMs}`,
     startedMs: r.startedMs,
-    user: r.userName ?? (r.userId ? 'unknown user' : null),
+    user: r.userName ?? (r.userId ? 'former member' : null),
     project: r.projectName,
     harness: r.harness,
     model: r.model,

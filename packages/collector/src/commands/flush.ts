@@ -5,19 +5,23 @@ import { createContext } from '../context.js';
 import { errorMessage, readJsonFile } from '../fsutil.js';
 import { acquireLock } from '../lock.js';
 import { createLogger } from '../log.js';
-import { EventQueue } from '../queue.js';
-import { flushQueue, getCollectorConfig } from '../sender.js';
-import { parseOptions, type CliDeps, type Io } from './common.js';
+import { RESOLVE_TIMEOUT_MS } from '../project-key.js';
+import { effectiveCompany, loadRouting, type HeldReason } from '../projects.js';
+import { flushQueue } from '../sender.js';
+import { HELD_LABEL, openStore, parseOptions, summarizeQueue, type CliDeps, type Io } from './common.js';
+
+const WAITING: readonly HeldReason[] = ['unassigned', 'dangling', 'projects-unreadable'];
 
 /**
- * `ai-obs flush` — finish what is waiting, then send the queue now, ignoring the retry backoff.
- * Before sending it runs each adapter's idle-session sweep (Codex ends sessions idle for 1 h, Claude
- * Code ones silent for 24 h) and retries pending summaries, so data does not wait for the next hook.
+ * `ai-obs flush` — finish what is waiting, then send the queue now, per token, ignoring the retry
+ * backoff and retrying refused tokens once. Before sending it runs each adapter's idle-session sweep
+ * (Codex ends sessions idle for 1 h, Claude Code ones silent for 24 h) and retries pending summaries,
+ * so data does not wait for the next hook (design §2.8).
  */
 export async function flushCommand(args: readonly string[], io: Io, deps: CliDeps): Promise<number> {
   const { values } = parseOptions(args, { wait: { type: 'string', default: '30' } });
-  const config = loadConfig(deps.paths, deps.env ?? process.env);
-  if (!config) {
+  const config = loadConfig(deps.paths);
+  if (!config || !config.tokens.length) {
     io.err('not configured — run `ai-obs init --token … --endpoint …`');
     return 1;
   }
@@ -28,16 +32,16 @@ export async function flushCommand(args: readonly string[], io: Io, deps: CliDep
   }
   try {
     const log = createLogger(deps.paths, 'flush');
-    const queue = new EventQueue(deps.paths.queue, { log });
+    const store = openStore(deps.paths);
     const transport = deps.transport;
+    const resolveProject = deps.resolveProjectKey ? (cwd: string) => deps.resolveProjectKey!(cwd, { timeoutMs: RESOLVE_TIMEOUT_MS }) : undefined;
 
-    const serverConfig = (await getCollectorConfig({ config, paths: deps.paths, log, transport })).value;
     for (const adapter of deps.adapters ?? ADAPTERS) {
-      const ctx = createContext({ adapter, config, paths: deps.paths, queue, log, projectNaming: serverConfig.project_naming, projectSalt: serverConfig.project_salt ?? null });
+      const ctx = createContext({ adapter, config, paths: deps.paths, queue: store, log, ...(resolveProject ? { resolveProject } : {}) });
       try {
-        const before = queue.stats().events;
+        const before = store.stats().events;
         await adapter.sweepCrashedSessions(ctx);
-        const swept = queue.stats().events - before;
+        const swept = store.stats().events - before;
         if (swept > 0) io.out(`${adapter.displayName}: idle-session sweep queued ${swept} events`);
         const waiting = (readJsonFile<unknown[]>(pendingSummariesPath(deps.paths.state, adapter.name)) ?? []).length;
         if (waiting) {
@@ -49,12 +53,70 @@ export async function flushCommand(args: readonly string[], io: Io, deps: CliDep
       }
     }
 
-    const r = await flushQueue(queue, { config, paths: deps.paths, log, transport }, { force: true, maxBatches: 1000 });
-    const left = queue.stats().events;
-    if (r.status === 'empty') io.out('queue is empty');
-    else if (r.status === 'ok') io.out(`sent ${r.sent} events in ${r.batches} batch(es): accepted ${r.accepted}, duplicates ${r.duplicates}, rejected ${r.rejected}; ${left} left`);
-    else io.err(`✗ ${r.status === 'auth_error' ? 'token rejected' : 'send failed'}: ${r.error}; ${left} events stay queued${r.sent ? ` (${r.sent} sent before the failure)` : ''}`);
-    return r.status === 'ok' || r.status === 'empty' ? 0 : 1;
+    const r = await flushQueue(
+      store,
+      { paths: deps.paths, log, ...(transport ? { transport } : {}), ...(deps.resolveProjectKey ? { resolveProjectKey: deps.resolveProjectKey } : {}) },
+      { force: true, maxBatches: 1000 },
+    );
+    if (r.confirmed) {
+      const { from, to, company } = r.confirmed;
+      io.out(from === to ? `✓ token ${to} confirmed: ${company.name}` : `✓ token \`${from}\` confirmed: ${company.name}; renamed to ${to}`);
+    }
+    const view = loadRouting(deps.paths);
+    let failedTokens = 0;
+    let printed = false;
+    for (const [name, t] of Object.entries(r.tokens)) {
+      const entry = view?.config.tokens.find((x) => x.name === name);
+      const companyName = (entry && effectiveCompany(entry, view?.caches[name])?.name) ?? name;
+      const sentBefore = t.sent ? ` (${t.sent} sent before the failure)` : '';
+      switch (t.status) {
+        case 'ok':
+          io.out(`sent ${t.sent} events to ${name} in ${t.batches} batch(es): accepted ${t.accepted}, duplicates ${t.duplicates}, rejected ${t.rejected}; ${t.left} left`);
+          break;
+        case 'auth_error':
+          failedTokens++;
+          io.err(`✗ ${name}: token rejected (HTTP 401): create a new token and run \`ai-obs token add --token <new token> --name ${name}\`; ${t.left} events stay queued${sentBefore}`);
+          break;
+        case 'suspended':
+          failedTokens++;
+          io.err(`✗ ${name}: company ${companyName} is suspended; ${t.left} events stay queued${sentBefore}`);
+          break;
+        case 'failed':
+          failedTokens++;
+          io.err(`✗ ${name}: send failed: ${t.error ?? 'unknown error'}; ${t.left} events stay queued${sentBefore}`);
+          break;
+        case 'blocked':
+        case 'backoff':
+          io.out(`! ${name}: not sent now (${t.error ?? t.status}); ${t.left} events stay queued`);
+          break;
+        default:
+          continue;
+      }
+      printed = true;
+    }
+
+    const byReason = r.held.byReason;
+    const waiting = WAITING.reduce((n, k) => n + (byReason[k] ?? 0), 0);
+    if (waiting) {
+      const keys = view ? summarizeQueue(store.stats(), view).waiting.keys.length : 0;
+      io.out(`! kept: ${waiting} events of ${keys || r.held.projects.length || 1} project(s) waiting for a token — \`ai-obs use <name>\` in each (\`ai-obs status\` lists them)`);
+      printed = true;
+    }
+    for (const [reason, n] of Object.entries(byReason) as Array<[HeldReason, number]>) {
+      if (!n || WAITING.includes(reason)) continue;
+      io.out(`kept: ${n} events (${HELD_LABEL[reason]})`);
+      printed = true;
+    }
+    if (r.dropped.events) {
+      io.out(`! the queue caps (30 days / 50 MB) dropped ${r.dropped.events} events (${r.dropped.heldEvents} of them kept for a choice)`);
+      printed = true;
+    }
+    if (r.status === 'failed' && !Object.keys(r.tokens).length && r.error) {
+      io.err(`✗ send failed: ${r.error}`);
+      return 1;
+    }
+    if (!printed) io.out('queue is empty');
+    return failedTokens ? 1 : 0;
   } finally {
     release();
   }

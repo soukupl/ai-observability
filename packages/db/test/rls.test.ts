@@ -3,11 +3,12 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Database } from '../src/client.js';
 import { withIngestContext, withRlsContext } from '../src/rls.js';
 import { closeAll, connectAs, connectOwner, pgErrorCode, prepareTestDatabase } from './db-harness.js';
-import { createCompany, type CompanyFixture, type Person } from './fixtures.js';
+import { addMembership, createCompany, type CompanyFixture, type Person } from './fixtures.js';
 
 /**
  * Proves BRIEF §12.4 against a real Postgres: tenant isolation, member / lead / admin scopes,
- * aggregates-only vs full visibility, and the service-role boundaries (ingest, worker, platform).
+ * aggregates-only vs full visibility, the service-role boundaries (ingest, worker, platform), and ADR-0022:
+ * one identity in several companies (context = membership), token kinds, member removal, DB invariants.
  */
 const skipReason = await prepareTestDatabase();
 if (skipReason) console.warn(`[db] RLS tests skipped: ${skipReason}`);
@@ -58,17 +59,18 @@ describe.skipIf(skipReason !== null)(skipReason ? `RLS — SKIPPED: ${skipReason
     it('never returns another company’s rows from any table', async () => {
       for (const p of Object.values(B.people)) {
         const r = await rows(p, sql`select company_id from turns union all select company_id from teams
-          union all select company_id from users union all select id from companies`);
+          union all select company_id from company_memberships union all select id from companies`);
         expect(r.length).toBeGreaterThan(0);
         expect(r.every((x) => x.company_id === B.id)).toBe(true);
       }
     });
 
-    it('a forged app.company_id (user of B claiming company A) sees nothing', async () => {
+    it('a forged app.company_id (user of B claiming company A) sees nothing but their own identity', async () => {
       const forged = { ...B.people.admin!, companyId: A.id };
-      for (const t of [...TELEMETRY, 'teams', 'users', 'companies', 'projects', 'budgets']) {
-        expect(await count(forged, t)).toBe(0);
+      for (const t of [...TELEMETRY, 'teams', 'company_memberships', 'team_memberships', 'companies', 'projects', 'budgets', 'ingest_tokens']) {
+        expect(await count(forged, t), t).toBe(0);
       }
+      expect(await rows(forged, sql`select id from users`)).toEqual([{ id: forged.id }]);
       const agg = await rows(forged, sql`select * from agg_turns_daily(${FROM}, ${TO})`);
       expect(agg).toHaveLength(0);
     });
@@ -262,11 +264,14 @@ describe.skipIf(skipReason !== null)(skipReason ? `RLS — SKIPPED: ${skipReason
       expect(await pgErrorCode(web.execute(sql`select 1 from pending_turn_patches limit 1`))).toBe('42501');
     });
 
-    it('manages companies and sees only admin contacts', async () => {
+    it('manages companies and sees only admin contacts (through admin memberships)', async () => {
       const cs = [...(await platform.execute(sql`select id from companies`))];
       expect(cs.map((c) => c.id)).toEqual(expect.arrayContaining([A.id, B.id]));
       const us = [...(await platform.execute(sql`select id from users`))].map((u) => u.id);
       expect(new Set(us)).toEqual(new Set([A.people.admin!.id, B.people.admin!.id]));
+      const ms = [...(await platform.execute(sql`select user_id, company_role from company_memberships`))];
+      expect(new Set(ms.map((m) => m.user_id))).toEqual(new Set([A.people.admin!.id, B.people.admin!.id]));
+      expect(ms.every((m) => m.company_role === 'admin')).toBe(true);
     });
   });
 
@@ -280,10 +285,13 @@ describe.skipIf(skipReason !== null)(skipReason ? `RLS — SKIPPED: ${skipReason
 
     it('resolves a token via lookup_ingest_token and writes only into that company', async () => {
       const m1 = A.people.m1!;
-      await as(m1, (tx) => tx.execute(sql`insert into ingest_tokens (company_id, team_id, user_id, kind, name, prefix, hash, created_by_user_id)
-        values (${A.id}, ${A.teams.a1}, ${m1.id}, 'user', 'laptop', 'aiobs_u_ab', 'hash-a', ${m1.id})`));
+      await as(m1, (tx) => tx.execute(sql`insert into ingest_tokens (company_id, user_id, kind, name, prefix, hash, created_by_user_id)
+        values (${A.id}, ${m1.id}, 'user', 'laptop', 'aiobs_u_ab', 'hash-a', ${m1.id})`));
       const [tok] = [...(await ingest.execute(sql`select * from lookup_ingest_token('hash-a')`))];
-      expect(tok).toMatchObject({ company_id: A.id, user_id: m1.id, kind: 'user' });
+      // Company labels and the user's e-mail feed collector-config; the primary team comes from the membership.
+      expect(tok).toMatchObject({ company_id: A.id, company_name: 'acme-test', company_slug: 'acme-test', user_id: m1.id,
+        user_email: 'm1@acme-test.test', user_primary_team_id: A.teams.a1, kind: 'user' });
+      expect(Object.keys(tok!)).not.toContain('team_id');
 
       const insertTurn = (companyId: string, ext: string) => sql`insert into turns
         (company_id, team_id, user_id, attribution, external_id, harness, started_at, ended_at)
@@ -321,14 +329,61 @@ describe.skipIf(skipReason !== null)(skipReason ? `RLS — SKIPPED: ${skipReason
     });
   });
 
-  describe('app_web writes', () => {
-    it('members cannot create team tokens or tokens for others', async () => {
+  describe('app_web writes: tokens (ADR-0022, Q9)', () => {
+    const ins = (p: Person, kind: string, userId: string | null, hash: string) =>
+      as(p, (tx) => tx.execute(sql`insert into ingest_tokens (company_id, user_id, kind, name, prefix, hash, created_by_user_id)
+        values (${p.companyId}, ${userId}, ${kind}::token_kind, 'x', 'aiobs_x', ${hash}, ${p.id})`));
+    const tokenNames = async (p: Person) =>
+      (await rows(p, sql`select hash from ingest_tokens where hash like 'w-%' order by hash`)).map((r) => r.hash);
+
+    it('members cannot create company tokens or tokens for others', async () => {
       const m1 = A.people.m1!;
-      const ins = (kind: string, userId: string | null) =>
-        as(m1, (tx) => tx.execute(sql`insert into ingest_tokens (company_id, team_id, user_id, kind, name, prefix, hash, created_by_user_id)
-          values (${A.id}, ${A.teams.a1}, ${userId}, ${kind}::token_kind, 'x', 'aiobs_x', ${'h-' + kind + userId}, ${m1.id})`));
-      expect(await pgErrorCode(ins('team', null))).toBe('42501');
-      expect(await pgErrorCode(ins('user', A.people.m2!.id))).toBe('42501');
+      expect(await pgErrorCode(ins(m1, 'company', null, 'w-m1-co'))).toBe('42501');
+      expect(await pgErrorCode(ins(m1, 'user', A.people.m2!.id, 'w-m1-for-m2'))).toBe('42501');
+    });
+
+    it('admins and leads create company tokens; everyone creates only their own user token', async () => {
+      expect(await pgErrorCode(ins(A.people.admin!, 'company', null, 'w-admin-co'))).toBeUndefined();
+      expect(await pgErrorCode(ins(A.people.lead!, 'company', null, 'w-lead-co'))).toBeUndefined();
+      expect(await pgErrorCode(ins(A.people.m2!, 'user', A.people.m2!.id, 'w-m2-own'))).toBeUndefined();
+      expect(await pgErrorCode(ins(A.people.admin!, 'user', A.people.m2!.id, 'w-admin-for-m2'))).toBe('42501');
+      // The CHECK: a company token never carries a user (app_definer bypasses RLS, not the CHECK).
+      const owner = connectOwner();
+      const bad = owner.transaction(async (tx) => {
+        await tx.execute(sql`set local role app_definer`);
+        await tx.execute(sql`insert into ingest_tokens (company_id, user_id, kind, name, prefix, hash)
+          values (${A.id}, ${A.people.m1!.id}, 'company', 'x', 'aiobs_c_x', 'w-bad')`);
+      });
+      expect(await pgErrorCode(bad)).toBe('23514');
+    });
+
+    it('visibility (D6): admins see every token, leads company tokens + own, members own only', async () => {
+      expect(await tokenNames(A.people.admin!)).toEqual(['w-admin-co', 'w-lead-co', 'w-m2-own']);
+      expect(await tokenNames(A.people.lead!)).toEqual(['w-admin-co', 'w-lead-co']);
+      expect(await tokenNames(A.people.m2!)).toEqual(['w-m2-own']);
+      expect(await tokenNames(A.people.m1!)).toEqual([]);
+      // Company token lookup: no user, no team.
+      const [co] = [...(await ingest.execute(sql`select * from lookup_ingest_token('w-lead-co')`))];
+      expect(co).toMatchObject({ kind: 'company', company_id: A.id, user_id: null, user_email: null, user_primary_team_id: null });
+    });
+
+    it('a company token resolves only while its creator is an admin or lead of the company (D2 at use time)', async () => {
+      // Rows as a concurrent insert would leave them: the one-shot revoke of a removal / demotion could not see
+      // them, so they are unrevoked although their creator is a plain member or not a member at all.
+      const owner = connectOwner();
+      const insDef = (hash: string, createdBy: string) => owner.transaction(async (tx) => {
+        await tx.execute(sql`set local role app_definer`);
+        await tx.execute(sql`insert into ingest_tokens (company_id, kind, name, prefix, hash, created_by_user_id)
+          values (${A.id}, 'company', 'race', 'aiobs_c_r', ${hash}, ${createdBy})`);
+      });
+      await insDef('race-member', A.people.m1!.id);
+      await insDef('race-outsider', B.people.admin!.id);
+      await insDef('race-admin', A.people.admin!.id);
+      const look = async (h: string) => [...(await ingest.execute(sql`select * from lookup_ingest_token(${h})`))].length;
+      expect(await look('race-member')).toBe(0);
+      expect(await look('race-outsider')).toBe(0);
+      expect(await look('race-admin')).toBe(1);
+      expect(await look('w-lead-co')).toBe(1);
     });
   });
 
@@ -516,6 +571,260 @@ describe.skipIf(skipReason !== null)(skipReason ? `RLS — SKIPPED: ${skipReason
         const left = [...(await owner.execute(sql`select count(*)::int as n from run_links where company_id = ${fx.id}::uuid`))];
         expect(left[0]!.n).toBe(0);
       }
+    });
+  });
+  describe('one login, many companies (ADR-0022)', () => {
+    // dana: admin of X and member of Y (lead of team y1 there). Y is in full mode, so Y's admin reads rows.
+    let X: CompanyFixture, Y: CompanyFixture;
+    let danaX: Person, danaY: Person;
+    const danaTurns = new Map<string, string>(); // company id -> dana's turn id there
+    const ownerQ = async (query: ReturnType<typeof sql>) => {
+      const owner = connectOwner();
+      return owner.transaction(async (tx) => {
+        await tx.execute(sql`set local role app_definer`);
+        return [...(await tx.execute(query))] as Record<string, unknown>[];
+      });
+    };
+
+    beforeAll(async () => {
+      const owner = connectOwner();
+      X = await createCompany(owner, 'multi-x', 'full', ['x1'], [
+        { key: 'dana', role: 'admin', teams: [['x1', 'member']] },
+        { key: 'xm', teams: [['x1', 'member']] },
+      ]);
+      Y = await createCompany(owner, 'multi-y', 'full', ['y1', 'y2'], [
+        { key: 'admin', role: 'admin', teams: [['y1', 'member']] },
+        { key: 'ym', teams: [['y2', 'member']] },
+      ]);
+      danaX = X.people.dana!;
+      danaY = await addMembership(owner, danaX.id, Y.id, 'member', Y.teams.y1!);
+      await ownerQ(sql`insert into team_memberships (company_id, team_id, user_id, role) values (${Y.id}, ${Y.teams.y1}, ${danaX.id}, 'lead')`);
+      danaTurns.set(X.id, [...X.turns].find(([, u]) => u === danaX.id)![0]);
+      // dana's telemetry in Y: a session, a turn with a run and usage, a machine, a rollup, a runaway alert; and a budget.
+      const [s] = await ownerQ(sql`insert into agent_sessions (company_id, team_id, user_id, external_id, harness, started_at)
+        values (${Y.id}, ${Y.teams.y1}, ${danaX.id}, 's-dana-y', 'claude-code', now() - interval '1 hour') returning id`);
+      const [t] = await ownerQ(sql`insert into turns (company_id, team_id, user_id, attribution, session_id, external_id, harness,
+          started_at, ended_at, input_tokens) values (${Y.id}, ${Y.teams.y1}, ${danaX.id}, 'verified', ${s!.id as string}, 't-dana-y',
+          'claude-code', now() - interval '1 hour', now() - interval '50 minutes', 100) returning id`);
+      danaTurns.set(Y.id, t!.id as string);
+      const [r] = await ownerQ(sql`insert into runs (company_id, team_id, user_id, turn_id, turn_external_id, external_id, agent_type,
+          started_at, ended_at) values (${Y.id}, ${Y.teams.y1}, ${danaX.id}, ${t!.id as string}, 't-dana-y', 'r1', 'Explore',
+          now() - interval '1 hour', now() - interval '55 minutes') returning id`);
+      await ownerQ(sql`insert into usage (company_id, team_id, user_id, turn_id, run_id, started_at, model, input_tokens) values
+        (${Y.id}, ${Y.teams.y1}, ${danaX.id}, ${t!.id as string}, null, now() - interval '1 hour', 'claude-opus-5-5', 90),
+        (${Y.id}, ${Y.teams.y1}, ${danaX.id}, ${t!.id as string}, ${r!.id as string}, now() - interval '1 hour', 'claude-haiku-4-5', 10)`);
+      await ownerQ(sql`insert into machines (company_id, user_id, machine_id) values (${Y.id}, ${danaX.id}, 'dana-mac')`);
+      await ownerQ(sql`insert into daily_rollups (company_id, day, team_id, user_id, harness, model, turns)
+        values (${Y.id}, current_date, ${Y.teams.y1}, ${danaX.id}, 'claude-code', 'claude-opus-5-5', 1)`);
+      await ownerQ(sql`insert into runaway_alerts (company_id, turn_id, team_id, user_id, harness, started_at, reasons)
+        values (${Y.id}, ${t!.id as string}, ${Y.teams.y1}, ${danaX.id}, 'claude-code', now() - interval '1 hour', '["tokens"]')`);
+      await ownerQ(sql`insert into budgets (company_id, user_id, kind, limit_value) values (${Y.id}, ${danaX.id}, 'tokens', 1000)`);
+      // Tokens: a user token in each company and a company token dana minted in Y (as a lead of y1).
+      await as(danaX, (tx) => tx.execute(sql`insert into ingest_tokens (company_id, user_id, kind, name, prefix, hash, created_by_user_id)
+        values (${X.id}, ${danaX.id}, 'user', 'x', 'aiobs_u_x', 'dana-x-user', ${danaX.id})`));
+      await as(danaY, (tx) => tx.execute(sql`insert into ingest_tokens (company_id, user_id, kind, name, prefix, hash, created_by_user_id)
+        values (${Y.id}, ${danaX.id}, 'user', 'y', 'aiobs_u_y', 'dana-y-user', ${danaX.id})`));
+      await as(danaY, (tx) => tx.execute(sql`insert into ingest_tokens (company_id, user_id, kind, name, prefix, hash, created_by_user_id)
+        values (${Y.id}, null, 'company', 'ci', 'aiobs_c_y', 'dana-y-company', ${danaX.id})`));
+    });
+
+    const ids = (r: Record<string, unknown>[], k = 'id') => r.map((x) => x[k]).sort();
+
+    it('the X context (admin) sees only X: turns, members and tokens', async () => {
+      expect(ids(await rows(danaX, sql`select id from turns`))).toEqual([...X.turns.keys()].sort());
+      expect(ids(await rows(danaX, sql`select user_id from company_memberships`), 'user_id'))
+        .toEqual(Object.values(X.people).map((p) => p.id).sort());
+      expect(ids(await rows(danaX, sql`select hash from ingest_tokens`), 'hash')).toEqual(['dana-x-user']);
+      expect(ids(await rows(danaX, sql`select id from users`))).toEqual(Object.values(X.people).map((p) => p.id).sort());
+    });
+
+    it('the Y context sees only Y, and app_is_admin() is false there even when the context claims admin', async () => {
+      const yTurns = await rows(danaY, sql`select id, company_id from turns`, 'admin');
+      expect(yTurns.length).toBeGreaterThan(0);
+      expect(yTurns.every((t) => t.company_id === Y.id)).toBe(true);
+      // A lead of y1 in full mode: y1's turns (dana's and Y's admin's), never X's.
+      expect(yTurns.map((t) => t.id)).toContain(danaTurns.get(Y.id));
+      expect(yTurns.map((t) => t.id)).not.toContain(danaTurns.get(X.id));
+      const [flag] = await rows(danaY, sql`select app_is_admin() as a, app_company() as c`, 'admin');
+      expect(flag).toEqual({ a: false, c: Y.id });
+      const upd = await as(danaY, (tx) => tx.execute(sql`update companies set name = 'pwned'`), 'admin');
+      expect(upd.count).toBe(0);
+      expect(ids(await rows(danaY, sql`select hash from ingest_tokens`), 'hash')).toEqual(['dana-y-company', 'dana-y-user']);
+    });
+
+    it('a context for a company the user is not in sees nothing but the own users row', async () => {
+      const outsider = { ...danaX, companyId: A.id };
+      for (const t of [...TELEMETRY, 'teams', 'company_memberships', 'companies', 'ingest_tokens', 'machines']) {
+        expect(await count(outsider, t), t).toBe(0);
+      }
+      expect(await rows(outsider, sql`select id from users`)).toEqual([{ id: danaX.id }]);
+      expect(await rows(outsider, sql`select app_company() as c`)).toEqual([{ c: null }]);
+    });
+
+    it('users.last_login_at is not readable by app_web; identity columns are, for self and co-members only', async () => {
+      for (const p of [X.people.xm!, danaX]) {
+        expect(await pgErrorCode(rows(p, sql`select last_login_at from users`))).toBe('42501');
+        expect(await pgErrorCode(rows(p, sql`select * from users`))).toBe('42501');
+      }
+      const seen = await rows(X.people.xm!, sql`select id, email, name from users`);
+      expect(ids(seen)).toEqual(Object.values(X.people).map((p) => p.id).sort());
+    });
+
+    it('admin_remove_member in Y: membership-bound rows go, telemetry stays, tokens are revoked (D1, D2, D8)', async () => {
+      const web2 = connectAs('web');
+      // A dashboard session of dana working in Y (stamps last_active_at) and one in X.
+      await web2.execute(sql`insert into auth_sessions (user_id, token_hash, expires_at, active_company_id)
+        values (${danaX.id}, 'sess-dana-y', now() + interval '1 day', ${Y.id}), (${danaX.id}, 'sess-dana-x', now() + interval '1 day', ${X.id})`);
+
+      // Only an admin of the context's company may call it, never on themselves.
+      expect(await pgErrorCode(as(Y.people.ym!, (tx) => tx.execute(sql`select * from admin_remove_member(${danaX.id}::uuid)`)))).toBe('42501');
+      expect(await pgErrorCode(as(Y.people.admin!, (tx) => tx.execute(sql`select * from admin_remove_member(${Y.people.admin!.id}::uuid)`)))).toBe('42501');
+
+      const revoked = await rows(Y.people.admin!, sql`select * from admin_remove_member(${danaX.id}::uuid)`);
+      expect(revoked.map((t) => t.token_kind).sort()).toEqual(['company', 'user']);
+      expect(revoked.map((t) => t.token_name).sort()).toEqual(['ci', 'y']);
+
+      const n = async (q: ReturnType<typeof sql>) => Number((await ownerQ(q))[0]!.n);
+      // Gone: the Y membership, Y team memberships, the per-user Y budget.
+      expect(await n(sql`select count(*)::int n from company_memberships where user_id = ${danaX.id} and company_id = ${Y.id}`)).toBe(0);
+      expect(await n(sql`select count(*)::int n from team_memberships where user_id = ${danaX.id} and company_id = ${Y.id}`)).toBe(0);
+      expect(await n(sql`select count(*)::int n from budgets where user_id = ${danaX.id}`)).toBe(0);
+      // Kept with their user_id (D1).
+      for (const t of ['turns', 'runs', 'usage', 'agent_sessions', 'machines', 'daily_rollups', 'runaway_alerts']) {
+        expect(await n(sql`select count(*)::int n from ${sql.identifier(t)} where user_id = ${danaX.id} and company_id = ${Y.id}`), t)
+          .toBeGreaterThan(0);
+      }
+      // Tokens: rows kept, revoked; lookups fail. X's token is untouched.
+      const toks = await ownerQ(sql`select hash, revoked_at is not null as revoked from ingest_tokens where hash like 'dana-%' order by hash`);
+      expect(toks).toEqual([
+        { hash: 'dana-x-user', revoked: false },
+        { hash: 'dana-y-company', revoked: true },
+        { hash: 'dana-y-user', revoked: true },
+      ]);
+      expect([...(await ingest.execute(sql`select * from lookup_ingest_token('dana-y-company')`))]).toHaveLength(0);
+      expect([...(await ingest.execute(sql`select * from lookup_ingest_token('dana-x-user')`))]).toHaveLength(1);
+      // Sessions: the Y one lost its company, the X one did not. The X membership is untouched.
+      const sess = [...(await web2.execute(sql`select token_hash, active_company_id from auth_sessions
+        where user_id = ${danaX.id} order by token_hash`))];
+      expect(sess).toEqual([
+        { token_hash: 'sess-dana-x', active_company_id: X.id },
+        { token_hash: 'sess-dana-y', active_company_id: null },
+      ]);
+      expect(await n(sql`select count(*)::int n from company_memberships where user_id = ${danaX.id} and company_id = ${X.id}`)).toBe(1);
+
+      // Y's admin still sees the kept turn, but no longer dana's identity (rendered as a former member).
+      expect((await rows(Y.people.admin!, sql`select id from turns`)).map((t) => t.id)).toContain(danaTurns.get(Y.id));
+      expect(await rows(Y.people.admin!, sql`select name from users where id = ${danaX.id}`)).toEqual([]);
+      // dana's own Y context is dead without the membership.
+      expect(await rows(danaY, sql`select app_company() as c`)).toEqual([{ c: null }]);
+    });
+  });
+
+  describe('invariants (ADR-0022, D6/D11)', () => {
+    const asDefiner = async (query: ReturnType<typeof sql>) => {
+      const owner = connectOwner();
+      return owner.transaction(async (tx) => {
+        await tx.execute(sql`set local role app_definer`);
+        return [...(await tx.execute(query))] as Record<string, unknown>[];
+      });
+    };
+
+    it('a revoked token stays revoked: owner, lead and app_definer all get 42501', async () => {
+      const m1 = B.people.m1!;
+      const lead = B.people.lead!;
+      await as(m1, (tx) => tx.execute(sql`insert into ingest_tokens (company_id, user_id, kind, name, prefix, hash, created_by_user_id)
+        values (${B.id}, ${m1.id}, 'user', 'r', 'aiobs_u_r', 'inv-user', ${m1.id})`));
+      await as(lead, (tx) => tx.execute(sql`insert into ingest_tokens (company_id, user_id, kind, name, prefix, hash, created_by_user_id)
+        values (${B.id}, null, 'company', 'r', 'aiobs_c_r', 'inv-co', ${lead.id})`));
+      expect((await as(m1, (tx) => tx.execute(sql`update ingest_tokens set revoked_at = now() where hash = 'inv-user'`))).count).toBe(1);
+      expect((await as(lead, (tx) => tx.execute(sql`update ingest_tokens set revoked_at = now() where hash = 'inv-co'`))).count).toBe(1);
+      expect(await pgErrorCode(as(m1, (tx) => tx.execute(sql`update ingest_tokens set revoked_at = null where hash = 'inv-user'`)))).toBe('42501');
+      expect(await pgErrorCode(as(lead, (tx) => tx.execute(sql`update ingest_tokens set revoked_at = null where hash = 'inv-co'`)))).toBe('42501');
+      expect(await pgErrorCode(asDefiner(sql`update ingest_tokens set revoked_at = null where hash = 'inv-co'`))).toBe('42501');
+      expect(await pgErrorCode(asDefiner(sql`update ingest_tokens set revoked_at = now() - interval '1 day' where hash = 'inv-user'`))).toBe('42501');
+      // Renaming a revoked token is still fine (the trigger only guards revoked_at).
+      expect((await as(m1, (tx) => tx.execute(sql`update ingest_tokens set name = 'old' where hash = 'inv-user'`))).count).toBe(1);
+    });
+
+    it('a super admin holds no membership, and a member cannot become a super admin (23514)', async () => {
+      const [sa] = await asDefiner(sql`insert into users (email, name, is_super_admin) values ('root@inv.test', 'Root', true) returning id`);
+      expect(await pgErrorCode(asDefiner(sql`insert into company_memberships (company_id, user_id) values (${B.id}, ${sa!.id as string})`)))
+        .toBe('23514');
+      expect(await pgErrorCode(asDefiner(sql`update users set is_super_admin = true where id = ${B.people.m2!.id}`))).toBe('23514');
+      // auth_ensure_super_admin refuses members with its own message.
+      await expect(asDefiner(sql`select auth_ensure_super_admin('m2@globex-test.test')`)).rejects.toThrow();
+    });
+
+    it('a concurrent membership insert and auth_ensure_super_admin cannot both commit', async () => {
+      const [u] = await asDefiner(sql`insert into users (email, name) values ('race@inv.test', 'Race') returning id`);
+      const userId = u!.id as string;
+      const t1 = connectOwner();
+      const t2 = connectOwner();
+      const probe = connectOwner();
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      let inserted!: () => void;
+      const didInsert = new Promise<void>((r) => (inserted = r));
+      const first = t1.transaction(async (tx) => {
+        await tx.execute(sql`set local role app_definer`);
+        await tx.execute(sql`insert into company_memberships (company_id, user_id) values (${B.id}, ${userId})`);
+        inserted();
+        await gate;
+      });
+      await didInsert;
+      const second = t2.transaction(async (tx) => {
+        await tx.execute(sql`set local role app_definer`);
+        await tx.execute(sql`select auth_ensure_super_admin('race@inv.test')`);
+      });
+      // Wait until the second transaction blocks on the users row lock, then commit the first.
+      for (let i = 0; i < 100; i++) {
+        const [w] = [...(await probe.execute(sql`select count(*)::int as n from pg_stat_activity
+          where datname = current_database() and wait_event_type = 'Lock'`))] as { n: number }[];
+        if (w!.n > 0) break;
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      release();
+      const results = await Promise.allSettled([first, second]);
+      expect(results.map((r) => r.status)).toEqual(['fulfilled', 'rejected']);
+      const [state] = await asDefiner(sql`select u.is_super_admin as sa, (select count(*)::int from company_memberships m
+        where m.user_id = u.id) as n from users u where u.id = ${userId}`);
+      expect(state).toEqual({ sa: false, n: 1 });
+    });
+
+    it('the primary team stays in the company (23503); deleting a team nulls only primary_team_id', async () => {
+      const admin = A.people.admin!;
+      const m1 = A.people.m1!;
+      const cross = as(admin, (tx) => tx.execute(sql`update company_memberships set primary_team_id = ${B.teams.b1}
+        where user_id = ${m1.id} and company_id = ${A.id}`));
+      expect(await pgErrorCode(cross)).toBe('23503');
+      // Same company works for an admin.
+      const ok = await as(admin, (tx) => tx.execute(sql`update company_memberships set primary_team_id = ${A.teams.a2}
+        where user_id = ${m1.id} and company_id = ${A.id}`));
+      expect(ok.count).toBe(1);
+      // A member cannot change memberships at all (RLS: 0 rows).
+      const denied = await as(m1, (tx) => tx.execute(sql`update company_memberships set company_role = 'admin' where user_id = ${m1.id}`));
+      expect(denied.count).toBe(0);
+      const [team] = await asDefiner(sql`insert into teams (company_id, name) values (${A.id}, 'temp') returning id`);
+      await asDefiner(sql`update company_memberships set primary_team_id = ${team!.id as string} where user_id = ${m1.id} and company_id = ${A.id}`);
+      await asDefiner(sql`delete from teams where id = ${team!.id as string}`);
+      const after = await asDefiner(sql`select company_id, primary_team_id from company_memberships where user_id = ${m1.id}`);
+      expect(after).toEqual([{ company_id: A.id, primary_team_id: null }]);
+      await asDefiner(sql`update company_memberships set primary_team_id = ${A.teams.a1} where user_id = ${m1.id} and company_id = ${A.id}`);
+    });
+
+    it('a team membership needs a company membership (23503)', async () => {
+      const [u] = await asDefiner(sql`insert into users (email) values ('loner@inv.test') returning id`);
+      expect(await pgErrorCode(asDefiner(sql`insert into team_memberships (company_id, team_id, user_id)
+        values (${A.id}, ${A.teams.a1}, ${u!.id as string})`))).toBe('23503');
+    });
+
+    it('a session started in a company stamps the membership last_active_at (D4)', async () => {
+      const m2 = A.people.m2!;
+      await asDefiner(sql`update company_memberships set last_active_at = null where user_id = ${m2.id}`);
+      await web.execute(sql`insert into auth_sessions (user_id, token_hash, expires_at, active_company_id)
+        values (${m2.id}, 'sess-m2', now() + interval '1 day', ${A.id})`);
+      const [m] = await asDefiner(sql`select last_active_at is not null as stamped from company_memberships where user_id = ${m2.id}`);
+      expect(m).toEqual({ stamped: true });
     });
   });
 });

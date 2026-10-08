@@ -69,60 +69,92 @@ export const ev = {
 export interface World {
   companyId: string;
   hashedCompanyId: string;
-  teams: { platform: string; mobile: string; ci: string };
-  users: { alice: string; bob: string; dave: string };
+  teams: { platform: string; mobile: string };
+  /** alice, bob, dave are members of acme; hank is a member of hush only. */
+  users: { alice: string; bob: string; dave: string; hank: string };
+  /** `ci` and `hashedCo` are company tokens; the others are user tokens of acme. */
   tokens: { alice: string; bob: string; ci: string; revoked: string; hashedCo: string };
   projects: { billing: string };
 }
 
-/** Company "acme" (plain naming) with teams, users, a mapped project and tokens; company "hush" (hashed). */
-export async function createWorld(tx: Tx): Promise<World> {
-  const one = async <T>(q: ReturnType<typeof sql>) => ([...(await tx.execute(q))][0] as T);
-  const company = (slug: string, naming: 'plain' | 'hashed') =>
-    one<{ id: string }>(sql`insert into companies (name, slug, settings)
-      values (${slug}, ${slug}, ${JSON.stringify({ individualVisibility: 'aggregates-only', projectNaming: naming, retentionDays: 395 })}::jsonb)
-      returning id`);
-  const team = async (companyId: string, name: string) =>
-    (await one<{ id: string }>(sql`insert into teams (company_id, name) values (${companyId}, ${name}) returning id`)).id;
-  const user = async (companyId: string, email: string, primary: string) =>
-    (await one<{ id: string }>(sql`insert into users (company_id, email, name, primary_team_id)
-      values (${companyId}, ${email}, ${email}, ${primary}) returning id`)).id;
-  const token = async (companyId: string, teamId: string, userId: string | null, revoked = false) => {
-    const t = generateToken(userId ? 'user' : 'team');
-    await tx.execute(sql`insert into ingest_tokens (company_id, team_id, user_id, kind, name, prefix, hash, revoked_at)
-      values (${companyId}, ${teamId}, ${userId}, ${t.kind}, 'test', ${t.prefix}, ${t.hash},
-        ${revoked ? sql`now()` : sql`null`})`);
-    return t.plaintext;
-  };
+const first = async <T>(tx: Tx, q: ReturnType<typeof sql>) => [...(await tx.execute(q))][0] as T;
 
-  const acme = (await company('acme', 'plain')).id;
-  const hush = (await company('hush', 'hashed')).id;
-  const teams = { platform: await team(acme, 'Platform'), mobile: await team(acme, 'Mobile'), ci: await team(acme, 'CI') };
-  const users = {
-    alice: await user(acme, 'alice@acme.test', teams.platform),
-    bob: await user(acme, 'bob@acme.test', teams.mobile),
-    // Not in the CI team: a CI team token must not match this user's git e-mail (SEC-10).
-    dave: await user(acme, 'dave@acme.test', teams.mobile),
-  };
-  // Memberships: a user token only resolves while its user belongs to the token's team (SEC-4), and a
-  // team token matches git e-mails of its own team's members only (SEC-10). CI has Alice and Bob.
-  for (const [team, u] of [[teams.platform, users.alice], [teams.mobile, users.bob], [teams.mobile, users.dave], [teams.ci, users.alice], [teams.ci, users.bob]] as const) {
-    await tx.execute(sql`insert into team_memberships (company_id, team_id, user_id, role) values (${acme}, ${team}, ${u}, 'member')`);
+/** An identity (users holds e-mail and name only, ADR-0022). */
+export async function insertUser(tx: Tx, email: string, name: string = email): Promise<string> {
+  return (await first<{ id: string }>(tx, sql`insert into users (email, name) values (${email}, ${name}) returning id`)).id;
+}
+
+/** Company membership with role and primary team, plus a team membership in that primary team. */
+export async function insertMember(
+  tx: Tx,
+  companyId: string,
+  userId: string,
+  opts: { role?: 'admin' | 'member'; primaryTeamId?: string | null; teamRole?: 'lead' | 'member' } = {},
+): Promise<void> {
+  const primary = opts.primaryTeamId ?? null;
+  await tx.execute(sql`insert into company_memberships (company_id, user_id, company_role, primary_team_id)
+    values (${companyId}, ${userId}, ${opts.role ?? 'member'}, ${primary})`);
+  if (primary) {
+    await tx.execute(sql`insert into team_memberships (company_id, team_id, user_id, role)
+      values (${companyId}, ${primary}, ${userId}, ${opts.teamRole ?? 'member'})`);
   }
-  const billing = (await one<{ id: string }>(sql`insert into projects (company_id, key, display_name, team_id)
-    values (${acme}, 'github.com/acme/billing', 'Billing (admin name)', ${teams.mobile}) returning id`)).id;
+}
+
+/**
+ * A user token (userId set) or a company token (userId null); returns the plaintext. A company token resolves only
+ * while its creator is an admin or lead of the company (D2), so it needs `createdBy`; a user token defaults to its owner.
+ */
+export async function insertToken(
+  tx: Tx,
+  companyId: string,
+  userId: string | null,
+  revoked = false,
+  createdBy: string | null = userId,
+): Promise<string> {
+  const t = generateToken(userId ? 'user' : 'company');
+  await tx.execute(sql`insert into ingest_tokens (company_id, user_id, kind, name, prefix, hash, revoked_at, created_by_user_id)
+    values (${companyId}, ${userId}, ${t.kind}, 'test', ${t.prefix}, ${t.hash}, ${revoked ? sql`now()` : sql`null`}, ${createdBy})`);
+  return t.plaintext;
+}
+
+/** Company "acme" (plain naming) with teams, members, a mapped project and tokens; company "hush" (hashed). */
+export async function createWorld(tx: Tx): Promise<World> {
+  const company = async (slug: string, naming: 'plain' | 'hashed') =>
+    (await first<{ id: string }>(tx, sql`insert into companies (name, slug, settings)
+      values (${slug}, ${slug}, ${JSON.stringify({ individualVisibility: 'aggregates-only', projectNaming: naming, retentionDays: 395 })}::jsonb)
+      returning id`)).id;
+  const team = async (companyId: string, name: string) =>
+    (await first<{ id: string }>(tx, sql`insert into teams (company_id, name) values (${companyId}, ${name}) returning id`)).id;
+
+  const acme = await company('acme', 'plain');
+  const hush = await company('hush', 'hashed');
+  const teams = { platform: await team(acme, 'Platform'), mobile: await team(acme, 'Mobile') };
   const hushTeam = await team(hush, 'Core');
+  const users = {
+    alice: await insertUser(tx, 'alice@acme.test'),
+    bob: await insertUser(tx, 'bob@acme.test'),
+    dave: await insertUser(tx, 'dave@acme.test'),
+    // A member of another company: a company token of acme must not match this git e-mail.
+    hank: await insertUser(tx, 'hank@hush.test'),
+  };
+  // alice is acme's admin and hank hush's: the company tokens below are theirs (D2 needs an admin or lead creator).
+  await insertMember(tx, acme, users.alice, { role: 'admin', primaryTeamId: teams.platform });
+  await insertMember(tx, acme, users.bob, { primaryTeamId: teams.mobile });
+  await insertMember(tx, acme, users.dave, { primaryTeamId: teams.mobile });
+  await insertMember(tx, hush, users.hank, { role: 'admin', primaryTeamId: hushTeam });
+  const billing = (await first<{ id: string }>(tx, sql`insert into projects (company_id, key, display_name, team_id)
+    values (${acme}, 'github.com/acme/billing', 'Billing (admin name)', ${teams.mobile}) returning id`)).id;
   return {
     companyId: acme,
     hashedCompanyId: hush,
     teams,
     users,
     tokens: {
-      alice: await token(acme, teams.platform, users.alice),
-      bob: await token(acme, teams.mobile, users.bob),
-      ci: await token(acme, teams.ci, null),
-      revoked: await token(acme, teams.platform, users.alice, true),
-      hashedCo: await token(hush, hushTeam, null),
+      alice: await insertToken(tx, acme, users.alice),
+      bob: await insertToken(tx, acme, users.bob),
+      ci: await insertToken(tx, acme, null, false, users.alice),
+      revoked: await insertToken(tx, acme, users.alice, true),
+      hashedCo: await insertToken(tx, hush, null, false, users.hank),
     },
     projects: { billing },
   };

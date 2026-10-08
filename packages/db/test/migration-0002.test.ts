@@ -89,7 +89,7 @@ describe.skipIf(skip !== null)(skip ? `migration 0002 - SKIPPED: ${skip}` : 'mig
     const admin = postgres(adminUrl.toString(), { max: 1, onnotice: () => {} });
     await admin.unsafe('drop database if exists "ai_obs_m0002_test" with (force)').catch(() => {});
     await admin.end({ timeout: 1 }).catch(() => {});
-  });
+  }, 30_000);
 
   const q = async <T>(query: ReturnType<typeof sql>) => [...(await db.execute(query))] as T[];
 

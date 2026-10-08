@@ -1,11 +1,12 @@
 import { fileURLToPath } from 'node:url';
-import { eq, sql } from 'drizzle-orm';
+import { eq, inArray, sql } from 'drizzle-orm';
 import { createDb } from './client.js';
 import { ensureDefaultModelPrices } from './prices.js';
 import {
   agentSessions,
   budgets,
   companies,
+  companyMemberships,
   dailyRollups,
   dailySkillMcpRollups,
   projects,
@@ -19,6 +20,8 @@ import {
 import { generateTurns, type SeedTurn } from './seed-data.js';
 
 export const DEMO_COMPANY_SLUG = 'acme';
+/** Second demo company (Free plan, no telemetry): alice is also a member, so the company switcher has a choice. */
+export const DEMO_SECOND_COMPANY_SLUG = 'globex';
 const SUPER_ADMIN = (process.env.SUPER_ADMIN_EMAILS ?? 'admin@example.com').split(',')[0]!.trim().toLowerCase();
 
 const PEOPLE = [
@@ -35,9 +38,12 @@ const PROJECTS = [
 const day = (d: Date) => d.toISOString().slice(0, 10);
 
 /**
- * Development seed (`pnpm db:seed`): demo company "Acme" (2 teams, 4 users incl. a lead and an
- * admin), a super admin, model prices, 2 projects, ~300 turns with runs + usage over 60 days, daily
- * rollups and one budget. Idempotent: the Acme company is deleted (cascade) and rebuilt each run.
+ * Development seed (`pnpm db:seed`): demo company "Acme" (team plan, 2 teams, 4 members incl. a lead and an
+ * admin), a super admin (no memberships), model prices, 2 projects, ~300 turns with runs + usage over 60 days,
+ * daily rollups and one budget; plus "Globex" (Free plan, one team, admin gina) where alice is also a member
+ * and that has no telemetry (ADR-0022: one login, many companies). Idempotent: both companies are deleted
+ * (cascade: memberships, teams, telemetry) and rebuilt each run; the demo identities are kept and reused by e-mail,
+ * so their memberships in other (hand-made) companies survive a re-seed.
  * Runs as the schema owner with `SET LOCAL ROLE app_definer`, so it also works where the owner is
  * not a superuser and FORCE RLS applies.
  */
@@ -47,7 +53,10 @@ export async function seed(url = process.env.MIGRATE_DATABASE_URL || process.env
     await ensureDefaultModelPrices(db);
     const summary = await db.transaction(async (tx) => {
       await tx.execute(sql`set local role app_definer`);
-      await tx.delete(companies).where(eq(companies.slug, DEMO_COMPANY_SLUG));
+      // Deleting the two demo companies cascades their memberships, teams, tokens and telemetry. The demo
+      // identities are NOT deleted: users are shared across companies (ADR-0022), and deleting one would cascade
+      // into memberships, tokens and telemetry of any other company it joined. They are reused by e-mail below.
+      await tx.delete(companies).where(inArray(companies.slug, [DEMO_COMPANY_SLUG, DEMO_SECOND_COMPANY_SLUG]));
       await tx
         .insert(users)
         .values({ email: SUPER_ADMIN, name: 'Platform Admin', isSuperAdmin: true })
@@ -65,12 +74,12 @@ export async function seed(url = process.env.MIGRATE_DATABASE_URL || process.env
       }
       const userIds: Record<string, string> = {};
       for (const p of PEOPLE) {
-        const [u] = await tx
-          .insert(users)
-          .values({ companyId, email: `${p.key}@acme.example`, name: p.name, companyRole: p.role, primaryTeamId: teamIds[p.team] })
-          .returning({ id: users.id });
-        userIds[p.key] = u!.id;
-        await tx.insert(teamMemberships).values({ companyId, teamId: teamIds[p.team]!, userId: u!.id, role: p.teamRole });
+        const userId = await demoUser(tx, `${p.key}@acme.example`, p.name);
+        userIds[p.key] = userId;
+        await tx
+          .insert(companyMemberships)
+          .values({ companyId, userId, companyRole: p.role, primaryTeamId: teamIds[p.team] });
+        await tx.insert(teamMemberships).values({ companyId, teamId: teamIds[p.team]!, userId, role: p.teamRole });
       }
       const projectIds: Record<string, string> = {};
       for (const p of PROJECTS) {
@@ -94,15 +103,53 @@ export async function seed(url = process.env.MIGRATE_DATABASE_URL || process.env
       for (const t of generated) runCount += await insertTurn(tx, ctx, sessionIds, t);
       await insertRollups(tx, ctx, generated);
       await tx.insert(budgets).values({ companyId, teamId: teamIds.Platform, kind: 'cost', limitValue: '100' });
+      await insertGlobex(tx, userIds.alice!);
       return { turns: generated.length, runs: runCount };
     });
-    console.log(`seed: Acme with ${summary.turns} turns, ${summary.runs} sub-agent runs; super admin ${SUPER_ADMIN}`);
+    console.log(
+      `seed: Acme with ${summary.turns} turns, ${summary.runs} sub-agent runs; Globex (alice is a member); super admin ${SUPER_ADMIN}`,
+    );
   } finally {
     await close();
   }
 }
 
 type Tx = Parameters<Parameters<ReturnType<typeof createDb>['db']['transaction']>[0]>[0];
+
+/**
+ * Globex: Free plan, one team "Core". gina is admin + lead; alice (the existing Acme identity) is a member of
+ * Core with Core as her primary team there. No telemetry, so switching to it shows an empty dashboard.
+ */
+async function insertGlobex(tx: Tx, aliceId: string) {
+  const [company] = await tx
+    .insert(companies)
+    .values({ name: 'Globex', slug: DEMO_SECOND_COMPANY_SLUG, plan: 'free' })
+    .returning({ id: companies.id });
+  const companyId = company!.id;
+  const [team] = await tx.insert(teams).values({ companyId, name: 'Core' }).returning({ id: teams.id });
+  const teamId = team!.id;
+  const ginaId = await demoUser(tx, 'gina@globex.example', 'Gina Globex');
+  await tx.insert(companyMemberships).values([
+    { companyId, userId: ginaId, companyRole: 'admin', primaryTeamId: teamId },
+    { companyId, userId: aliceId, companyRole: 'member', primaryTeamId: teamId },
+  ]);
+  await tx.insert(teamMemberships).values([
+    { companyId, teamId, userId: ginaId, role: 'lead' },
+    { companyId, teamId, userId: aliceId, role: 'member' },
+  ]);
+}
+
+/** The demo identity with this e-mail, created when missing (its name reset to the demo name). */
+async function demoUser(tx: Tx, email: string, name: string): Promise<string> {
+  const [found] = await tx.select({ id: users.id }).from(users).where(eq(users.email, email));
+  if (found) {
+    await tx.update(users).set({ name }).where(eq(users.id, found.id));
+    return found.id;
+  }
+  const [u] = await tx.insert(users).values({ email, name }).returning({ id: users.id });
+  return u!.id;
+}
+
 interface Ctx {
   companyId: string;
   teamIds: Record<string, string>;

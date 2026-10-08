@@ -72,7 +72,7 @@ export async function applySessionStart(tx: Tx, ctx: BatchContext, e: SessionSta
   if (!project) return;
 
   // Turns that arrived before their session_start had no project: give them one (and its team).
-  const backfilled = await rows<{ id: string; external_id: string; team_id: string; user_id: string | null }>(
+  const backfilled = await rows<{ id: string; external_id: string; team_id: string | null; user_id: string | null }>(
     tx,
     sql`update turns set project_id = ${project.id}::uuid ${project.teamId ? sql`, team_id = ${project.teamId}::uuid` : sql``}
         , updated_at = now()
@@ -195,7 +195,7 @@ export async function applyRun(tx: Tx, ctx: BatchContext, e: RunEvent, eventId: 
   // Same lock as the turn: otherwise a turn batch committing between our read of the turn and our insert
   // would not see this run (propagateTurnOwner) and the run would stay unlinked (DP-13).
   await lockTurnKey(tx, ctx, key);
-  const [turn] = await rows<{ id: string; team_id: string; user_id: string | null }>(
+  const [turn] = await rows<{ id: string; team_id: string | null; user_id: string | null }>(
     tx,
     sql`select id, team_id, user_id from turns where external_id = ${key}`,
   );
@@ -207,7 +207,7 @@ export async function applyRun(tx: Tx, ctx: BatchContext, e: RunEvent, eventId: 
       )
     : [];
   // A run before its turn takes the batch's owner; linking the turn re-points it (propagateTurnOwner).
-  const teamId = turn?.team_id ?? (await teamFor(tx, ctx, null));
+  const teamId = turn ? turn.team_id : await teamFor(tx, ctx, null);
   const userId = turn ? turn.user_id : ctx.userId;
   const usage = mergeUsage(e.usage);
   const t = sumUsage(usage);

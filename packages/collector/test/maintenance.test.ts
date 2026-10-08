@@ -6,8 +6,8 @@ import { pendingSummariesPath } from '../src/analysis/summaries.js';
 import { main } from '../src/cli.js';
 import { sessionEndEvent } from '../src/events.js';
 import { type AiObsPaths } from '../src/paths.js';
-import { EventQueue } from '../src/queue.js';
 import { cleanupHomes, fakeAdapter, okResponder, startServer, tmpHome, writeTestConfig } from './helpers.js';
+import { bound, enqueueFor, queueStore } from './queue-helpers.js';
 
 const closers: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -19,6 +19,7 @@ function capture() {
   const lines: string[] = [];
   return { text: () => lines.join('\n'), io: { out: (l: string) => lines.push(l), err: (l: string) => lines.push(l) } };
 }
+const resolveProjectKey = async () => 'github.com/acme/billing';
 const fakeRuntime = (node: string) => (paths: AiObsPaths) => ({ entry: `${paths.app}/bin/ai-obs.js`, node, copied: false });
 async function server() {
   const srv = await startServer((req) => okResponder('plain')(req));
@@ -90,7 +91,7 @@ describe('doctor: stale runtime', () => {
       },
     });
     const c = capture();
-    expect(await main(['doctor'], c.io, { paths, adapters: [stale], env: {} })).toBe(1);
+    expect(await main(['doctor'], c.io, { paths, adapters: [stale], env: {}, resolveProjectKey })).toBe(1);
     expect(c.text()).toMatch(/✗ Fake Claude hooks point to a stale runtime: node binary \/gone\/.*is missing or not executable.*`ai-obs init` again/);
     expect(c.text().match(/stale runtime: node binary/g)).toHaveLength(1); // deduplicated across events
 
@@ -106,7 +107,7 @@ describe('doctor: stale runtime', () => {
       },
     });
     const ok = capture();
-    expect(await main(['doctor'], ok.io, { paths, adapters: [fine], env: {} })).toBe(0);
+    expect(await main(['doctor'], ok.io, { paths, adapters: [fine], env: {}, resolveProjectKey })).toBe(0);
     expect(ok.text()).not.toContain('stale');
   });
 
@@ -120,7 +121,7 @@ describe('doctor: stale runtime', () => {
       },
     });
     const c = capture();
-    expect(await main(['doctor'], c.io, { paths, adapters: [a], env: {} })).toBe(0);
+    expect(await main(['doctor'], c.io, { paths, adapters: [a], env: {}, resolveProjectKey })).toBe(0);
     expect(c.text()).toContain('! Fake Claude: trust pending (user): run /hooks');
   });
 });
@@ -131,7 +132,8 @@ describe('flush: sweep and pending summaries', () => {
     const paths = tmpHome();
     writeTestConfig(paths, srv.url);
     mkdirSync(dirname(pendingSummariesPath(paths.state, 'codex')), { recursive: true });
-    const digest = { turnId: 'tp', sessionId: 's', prompt: 'p', toolNames: [], lastAssistantMessage: 'm', attempts: 1, firstFailedAt: Date.now() };
+    const key = { kind: 'project', pk: 'github.com/acme/billing', bind: bound('acme', srv.url, 'acme', 'aiobs_u_testtoken') };
+    const digest = { turnId: 'tp', sessionId: 's', prompt: 'p', toolNames: [], lastAssistantMessage: 'm', attempts: 1, firstFailedAt: Date.now(), key };
     writeFileSync(pendingSummariesPath(paths.state, 'codex'), JSON.stringify([digest]));
     const swept: string[] = [];
     const summarized: string[][] = [];
@@ -145,7 +147,8 @@ describe('flush: sweep and pending summaries', () => {
       displayName: 'Codex',
       async sweepCrashedSessions(ctx) {
         swept.push(ctx.harness);
-        ctx.queue.enqueue([sessionEndEvent({ harness: 'codex', sessionId: 'idle', reason: 'crashed', at: 0 })]);
+        // the sweep pins the session's stream from its state cwd, like the real adapters
+        ctx.queue.enqueue([sessionEndEvent({ harness: 'codex', sessionId: 'idle', reason: 'crashed', at: 0 })], await ctx.streamFor({ pkCwd: '/work/repo' }, Date.now()));
       },
       async summarize(digests) {
         summarized.push(digests.map((d) => d.turnId));
@@ -153,7 +156,7 @@ describe('flush: sweep and pending summaries', () => {
       },
     });
     const c = capture();
-    expect(await main(['flush'], c.io, { paths, adapters: [cc, codex], env: {} })).toBe(0);
+    expect(await main(['flush'], c.io, { paths, adapters: [cc, codex], env: {}, resolveProjectKey: async () => 'github.com/acme/billing' })).toBe(0);
     expect(swept).toEqual(['claude-code', 'codex']);
     expect(summarized).toEqual([['tp']]);
     expect(c.text()).toContain('Codex: idle-session sweep queued 1 events');
@@ -161,14 +164,16 @@ describe('flush: sweep and pending summaries', () => {
     expect(c.text()).toContain('sent 2 events'); // session_end + turn_summary go out in the same flush
     const types = srv.received.flatMap((r) => ((r.json as { events?: Array<{ type: string }> } | null)?.events ?? []).map((e) => e.type)).sort();
     expect(types).toEqual(['session_end', 'turn_summary']);
-    expect(new EventQueue(paths.queue).stats().events).toBe(0);
+    expect(queueStore(paths).stats().events).toBe(0);
   });
 
   it('a failing sweep does not stop the flush', async () => {
     const srv = await server();
     const paths = tmpHome();
     writeTestConfig(paths, srv.url);
-    new EventQueue(paths.queue).enqueue([sessionEndEvent({ harness: 'codex', sessionId: 's', reason: 'exit', at: 0 })]);
+    enqueueFor(queueStore(paths), 'github.com/acme/billing', bound('acme', srv.url, 'acme', 'aiobs_u_testtoken'), [
+      sessionEndEvent({ harness: 'codex', sessionId: 's', reason: 'exit', at: 0 }),
+    ]);
     const broken = fakeAdapter({
       async sweepCrashedSessions() {
         throw new Error('boom');

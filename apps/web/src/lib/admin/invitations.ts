@@ -22,7 +22,7 @@ export interface PendingInvitation {
   invitedBy: string | null;
 }
 
-/** Not yet accepted and not expired (RLS: admins only). */
+/** Not yet accepted and not expired (RLS: admins only). `invitedBy` is null when the inviter is no longer a member. */
 export async function listPendingInvitations(tx: Tx, companyId: string): Promise<PendingInvitation[]> {
   const list = await rows<{ id: string; email: string; team_name: string | null; team_role: TeamRole; company_role: CompanyRole; expires_at: Date | string; invited_by: string | null }>(
     tx,
@@ -58,16 +58,19 @@ export interface CreatedInvitation {
 }
 
 /**
- * Invites an e-mail address (7-day expiry). On the person's first login with that address it is
- * listed on the /signup step; they join explicitly (auth_pending_invitations / auth_accept_invitation,
- * SEC-1). A newer invitation replaces a pending one for the same address.
- * The user limit counts members + pending invitations.
+ * Invites an e-mail address (7-day expiry). A new address sees it on the /signup step; an existing
+ * account (also one in another company) sees it at /invitations and joins explicitly
+ * (auth_pending_invitations / auth_accept_invitation, SEC-1). A newer invitation replaces a pending
+ * one for the same address. The member limit counts memberships of this company + pending invitations.
  */
 export async function createInvitation(tx: Tx, actor: Actor, input: unknown, now = new Date()): Promise<CreatedInvitation> {
   ensure(isAdmin(actor), 'Only company admins can invite people.');
   const inv = parse(invitationInput, input);
   const company = await loadCompany(tx, actor.companyId, true);
-  const [existing] = await rows<{ id: string }>(tx, sql`select id from users where company_id = ${actor.companyId}::uuid and email = ${inv.email}`);
+  const [existing] = await rows<{ user_id: string }>(
+    tx,
+    sql`select m.user_id from company_memberships m join users u on u.id = m.user_id where m.company_id = ${actor.companyId}::uuid and u.email = ${inv.email}`,
+  );
   ensure(!existing, `${inv.email} is already a member.`);
   await tx.delete(invitations).where(and(eq(invitations.companyId, actor.companyId), eq(invitations.email, inv.email), sql`${invitations.acceptedAt} is null`));
   const counts = await companyCounts(tx, actor.companyId);
@@ -107,9 +110,9 @@ export async function revokeInvitation(tx: Tx, actor: Actor, input: unknown): Pr
 
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 
-/** The invitation e-mail: a link to the login page; signing in with the invited address accepts it. */
+/** The invitation e-mail: a link to the login page (then Invitations for an existing account); signing in with the invited address lets the person join. */
 export function invitationEmail(inv: CreatedInvitation, opts: { appUrl: string; inviter: string }): MailMessage {
-  const login = new URL('/login', opts.appUrl).toString();
+  const login = new URL('/login?next=/invitations', opts.appUrl).toString();
   const team = inv.teamName ? ` (team ${inv.teamName})` : '';
   const expires = inv.expiresAt.toISOString().slice(0, 10);
   return {
@@ -117,10 +120,12 @@ export function invitationEmail(inv: CreatedInvitation, opts: { appUrl: string; 
     subject: `You are invited to ${inv.companyName} on ai-obs`,
     text:
       `${opts.inviter} invited you to ${inv.companyName}${team} on ai-obs.\n\n` +
-      `Sign in with this e-mail address (${inv.email}) to accept:\n${login}\n\nThe invitation expires on ${expires} (UTC).\n`,
+      `Sign in with this e-mail address (${inv.email}) to accept:\n${login}\n\n` +
+      `Already using ai-obs with this address? Sign in and open Invitations to join.\n\nThe invitation expires on ${expires} (UTC).\n`,
     html:
       `<p>${esc(opts.inviter)} invited you to <b>${esc(inv.companyName)}</b>${esc(team)} on ai-obs.</p>` +
       `<p>Sign in with this e-mail address (${esc(inv.email)}) to accept: <a href="${esc(login)}">${esc(login)}</a></p>` +
+      `<p>Already using ai-obs with this address? Sign in and open Invitations to join.</p>` +
       `<p>The invitation expires on ${expires} (UTC).</p>`,
   };
 }

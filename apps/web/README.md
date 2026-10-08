@@ -14,18 +14,26 @@ Google / GitHub OAuth, no passwords. Code: `src/lib/auth/*`, routes in `src/app/
 | E-mailed link (single use, 15 min; only the SHA-256 of the token is stored in `magic_links`). GET never consumes it (mail scanners prefetch links): it redirects to a confirm page whose "Continue to sign in" button POSTs back; only that same-origin POST verifies + consumes | `GET /api/auth/magic/<token>[?next=/path]` → `/login/magic/<token>` → `POST /api/auth/magic/<token>` |
 | OAuth (state + PKCE for Google in a signed httpOnly cookie, 10 min) | `GET /api/auth/<google\|github>/start[?next=]` → `/callback` |
 | Sign-up step (join a listed invitation, or solo sign-up), behind a signed 30-min cookie. The page lists every pending invitation (company, who invited, team, role) with one "Join <company>" button each, and below it the solo-workspace form. The POST sends the picked invitation id | `/signup` → `POST /api/auth/signup` |
+| Join an invitation while signed in (existing account, the e-mail links to `/login?next=/invitations`): the page lists `auth_pending_invitations(user.email)` with a "Join <company>" button each | `/invitations` → `acceptInvitationForCurrentUser` server action |
+| Switch company (header switcher, shown with two or more companies) | `switchCompany` server action |
 | Logout (also the `logout` server action, `/logout` page) | `POST /api/auth/logout` |
 
 After a verified e-mail (magic link, or a provider e-mail that the provider marks verified), the
 provisioning rules (`src/lib/auth/provisioning.ts`, pure and unit-tested) decide:
 
-1. A linked OAuth account (`auth_accounts`) or an existing user → log in. A suspended company → refused.
+1. A linked OAuth account (`auth_accounts`) or an existing e-mail (a **user** is one identity that can hold memberships in
+   several companies) → log in, into the company the user was last active in (`company_memberships.last_active_at`).
+   Signing up with an existing e-mail is therefore a login. An identity whose companies are all suspended gets an
+   invitations-only sign-up step when it has pending invitations, and is refused (`suspended`) otherwise.
 2. New e-mail listed in `SUPER_ADMIN_EMAILS` → `auth_ensure_super_admin` (company-less platform admin;
    this wins over a pending invitation, because super admins cannot be company members).
-3. New e-mail → `/signup`. A pending invitation is **never accepted on login** (SEC-1): the page lists them
+3. New e-mail, or an identity with no membership at all → `/signup`. A pending invitation is **never accepted on login** (SEC-1): the page lists them
    (`auth_pending_invitations`: company plus inviter) and the user picks one (`auth_accept_invitation(email, name,
    invitation_id)` accepts exactly that row: right e-mail, pending, unexpired, active company with room under its
-   plan user limit), or creates a workspace of their own.
+   plan member limit), which adds a membership (and the team membership), or creates a workspace of their own. For an existing identity the
+   step works on the identity's own e-mail, not on a differing provider e-mail.
+   Exception: a super admin (DB flag set) with no membership whose e-mail was removed from `SUPER_ADMIN_EMAILS` is
+   refused (`no-company`), since a super admin can neither accept an invitation nor create a workspace.
 4. Solo sign-up → `auth_create_solo_company` (Free plan, one team, the user is admin + lead).
 
 OAuth logins are linked to the user in `auth_accounts` (by verified e-mail); later logins use the
@@ -35,7 +43,11 @@ link even if the provider e-mail changes. All of this runs as `app_web` through 
 ### Sessions
 
 - Cookie `ai_obs_session`: 256-bit random id, `HttpOnly`, `SameSite=Lax`, `Secure` when `APP_URL` is
-  https, `Max-Age` 30 days. `auth_sessions` stores only its SHA-256.
+  https, `Max-Age` 30 days. `auth_sessions` stores only its SHA-256 and the **active company**
+  (`active_company_id`): validated on every request against the user's memberships (a removed membership or a suspended
+  company falls back to the next active one, else the session is dead). `switchCompany` sets it (the SQL checks membership
+  and company status), writes `auth.company_switch` with empty meta in the destination company only, and redirects to
+  `/overview`. Switching to the company that is already active is a no-op (no audit row). The active company is shared by every tab of the session.
 - Sliding expiry: the DB expiry moves to now + 30 days at most once an hour (`getCurrentUser()`),
   and `proxy.ts` re-sets the cookie's `Max-Age` on page loads.
 - Redirects and e-mailed links are built from `APP_URL`; `next` accepts only same-site relative paths
@@ -44,7 +56,7 @@ link even if the provider e-mail changes. All of this runs as `app_web` through 
   magic-link confirm POST (cross-site or origin-less → 403, token untouched). The confirm page sets
   `Referrer-Policy: same-origin` so the token in its URL never leaves in a `Referer`.
 - `audit_log` gets `auth.login`, `auth.logout`, `auth.signup`, `auth.invitation_accepted` (meta: login
-  method only). Super-admin rows are platform-level (`company_id` null, written via `app_platform`).
+  method only) and `auth.company_switch` (only in the destination company, empty meta, so no tenant learns another's id). Super-admin rows are platform-level (`company_id` null, written via `app_platform`).
 
 ### Using it in pages and handlers (`src/lib/auth/session.ts`)
 
@@ -57,10 +69,12 @@ await withUserDb(user, (tx) => …);       // from '@/lib/db' or '@/lib/auth/rls
 <form action={logout}>…</form>           // server action
 ```
 
-`CurrentUser.companyId` and `.company` are `null` only for super admins; `requireUser()` /
-`requireAdmin()` return `CompanyUser`, where both are non-null. The RLS role is the company role
-(`admin` | `member`); lead rights come from `team_memberships` in the DB. Super admins have no
-company context — the console uses `dbFor('platform')`.
+`CurrentUser` carries the identity, the **active** company (`companyId`, `company`, `companyRole`, `teams`, `primaryTeamId`)
+and `memberships: MembershipSummary[]` (every membership in an active company, last used first, which feeds the switcher).
+`companyId` and `company` are `null` only for super admins; `requireUser()` / `requireAdmin()` return `CompanyUser`,
+where both are non-null. The RLS role is the company role in the active company (`admin` | `member`); lead rights come
+from `team_memberships` in the DB. Super admins hold no membership and have no company context — the console uses
+`dbFor('platform')`.
 
 `src/proxy.ts` sends requests without a session cookie to `/login?next=…` (API calls get 401).
 Public: `/`, `/login*`, `/signup`, `/logout`, `/invite*`, `/api/auth/*`, `/api/v1/ingest`,
@@ -84,7 +98,7 @@ client-controlled and only the per-e-mail limit protects `/api/auth/magic`), `SM
 `pnpm vitest run --project web` runs `test/auth/*`: token / cookie / origin / rate-limit / route
 helpers, the provisioning rules, the scanner-safe link endpoint (GET does not consume; cross-origin POST is
 refused; same-origin POST logs in once), and the full magic-link flow (invitation, solo sign-up, existing
-user, super admin, suspended company, logout, OAuth linking, the look-alike-invitation attack of SEC-1, SUPER_ADMIN_EMAILS revocation, the placeholder-secret redirect) against real Postgres in its own
+user, a user in several companies and the company switch, super admin, suspended company, logout, OAuth linking, the look-alike-invitation attack of SEC-1, SUPER_ADMIN_EMAILS revocation, the placeholder-secret redirect) against real Postgres in its own
 `ai_obs_auth_test` database, which is created and dropped by the test (skipped without Postgres).
 
 ## Ingest API
@@ -94,14 +108,13 @@ are thin; the logic lives in `src/lib/ingest/` and runs as the DB role `app_inge
 
 | Endpoint | Auth | Response |
 |---|---|---|
-| `POST /api/v1/ingest` | `Authorization: Bearer aiobs_u_…` (user) or `aiobs_t_…` (team) | `200 { accepted, duplicates, rejected: [{ event_id, reason }] }` |
-| `GET /api/v1/collector-config` | same | `{ project_naming: "plain" \| "hashed", min_collector_version, project_salt }` (`MIN_COLLECTOR_VERSION`, default `0.0.0`; `project_salt` is the company's stable 64-hex secret the collector HMACs hashed project keys with, ADR-0008) |
+| `POST /api/v1/ingest` | `Authorization: Bearer aiobs_u_…` (user) or `aiobs_c_…` (company) | `200 { accepted, duplicates, rejected: [{ event_id, reason }] }` |
+| `GET /api/v1/collector-config` | same | `{ project_naming: "plain" \| "hashed", min_collector_version, project_salt, company: { name, slug }, user: { email } \| null }` (`MIN_COLLECTOR_VERSION`, default `0.0.0`; `project_salt` is the company's stable 64-hex secret the collector HMACs hashed project keys with, ADR-0008; `company` / `user` label the token for the collector, `user` is null for a company token; cached privately for 300 s) |
 
 Request handling, in order:
 
 1. **Token** → SHA-256 hex → `lookup_ingest_token(hash)` (also touches `last_used_at`, at most once a minute).
-   Missing / unknown / revoked / wrong-prefix token → `401`; suspended company → `403`. A user token whose user is no
-   longer a member of the token's team does not resolve (→ `401`). Before the lookup an `AuthGuard` answers recently
+   Missing / unknown / revoked / wrong-prefix token → `401`; suspended company → `403`. A user token whose user no longer has a membership in the token's company does not resolve (→ `401`). Before the lookup an `AuthGuard` answers recently
    failed token hashes with `401` for 30 s without a DB call and gives each client IP a budget for failed
    authentications only (`INGEST_FAILED_AUTH_BURST` 20, `INGEST_FAILED_AUTH_PER_MINUTE` 10); valid tokens never spend it.
    The client IP is the n-th entry from the right of `X-Forwarded-For` (`INGEST_TRUSTED_PROXY_HOPS`, default 1); without
@@ -132,15 +145,15 @@ Request handling, in order:
 
 Resolution rules:
 
-- **Attribution** (per batch): user token → token user, `verified`; team token + `identity.git_email` that
-  `ingest_match_user_by_email(email, token team)` finds, i.e. a user who belongs to the token's team → that user,
+- **Attribution** (per batch): user token → token user, `verified`; company token + `identity.git_email` that
+  `ingest_match_user_by_email(email, company)` finds, i.e. a member of the token's company → that user,
   `matched`; otherwise `unverified`, `user_id` null (SEC-10).
 - **Ownership** (SEC-3): an existing turn, run or session can be overwritten only by its current owner (any token or
   machine of that user), or while it has no owner; anything else is rejected as `conflicts with data owned by another
   user` and not recorded as seen. This includes unverified senders, and a turn cannot take over runs filed by another
   user. A parked patch remembers its sender (`pending_turn_patches.user_id`) and is applied only to an ownerless turn
   or one with the same owner.
-- **Team** (per turn): project → team mapping, else the token's team, else the user's primary team.
+- **Team** (per turn): project → team mapping, else the primary team of the resolved user in that company, else none (`team_id` is null).
 - **Ids**: sessions and turns are stored as `<harness>:<collector id>` in `external_id`; runs keep their id
   and are keyed by `(turn_external_id, external_id)`. Unknown harnesses are accepted.
 - **Machine** upserted by `machine.id`. **Project** upserted by key; the display name is only set on insert
@@ -171,7 +184,7 @@ Resolution rules:
   Not solved: an older turn revision overwriting a newer re-send (needs a revision on the wire).
 - Nothing from `ext`, and no prompts, code, diffs or paths, is stored (ADR-0008).
 
-Library (`src/lib/ingest/`): `tokens.ts` (`generateToken(kind)` → `{ plaintext, prefix, hash }` for the admin
+Library (`src/lib/ingest/`): `tokens.ts` (`generateToken('user' | 'company')` → `{ plaintext, prefix, hash }` for the admin
 UI, `hashToken`, `parseBearer`), `rate-limit.ts`, `body.ts`, `handler.ts` (`handleIngest`,
 `handleCollectorConfig`; DB and limiter injected), `process-batch.ts`, `apply-events.ts`, `resolve.ts`,
 `usage.ts`, `usage-rows.ts`, `limits.ts`.
@@ -187,7 +200,7 @@ read paths, raw and rollup) and the worker's `recomputeDay` count exactly one tu
 Shell, filters, queries, cost and CSV that every dashboard view builds on. Code: `src/lib/filters.ts`,
 `src/lib/cost.ts`, `src/lib/csv.ts`, `src/lib/queries/*`, `src/components/*`, `src/app/api/export`.
 Tests: `pnpm --filter @ai-obs/web test:shell` (or `pnpm vitest run --project web`). The query tests create
-their own database `ai_obs_shell_<pid>_test`, one per test process so parallel runs cannot drop each other's (override with `SHELL_TEST_DATABASE_URL`, name must end in `_test`)
+their own database `ai_obs_shell_<pid>_test`, one per test process so parallel runs cannot drop each other's (override with `SHELL_TEST_DATABASE_URL`, name must end in `_test`; a fixed override is shared by every shell test file, so run those with `--no-file-parallelism`)
 and skip when Postgres is unreachable. The fixture's `daily_rollups` are built by the worker's real
 `recomputeDay` (imported from `apps/worker`), and two of the four companies have mixed-model turns.
 
@@ -284,6 +297,7 @@ Costs are USD with 6 decimals and empty when unknown.
 
 ### Conventions
 
+- Team is optional on a turn (a company-token turn from a non-member has none): lists show "No team". Activity of a removed member shows as "former member" (their identity is hidden by RLS, ADR-0022).
 - Tokens: `total = input + output + cacheRead + cacheWrite`; reasoning is already inside output.
 - Success rate = success / (turns - unknown); the unknown share is always shown next to it (ADR-0003).
 - Budget progress is month to date (UTC): token budgets count `total` tokens, cost budgets the ≈ cost.
@@ -435,18 +449,19 @@ Company administration (BRIEF §4, §8, §9, §10). Pages in `src/app/admin/*` (
 
 | Route | Who | What |
 |---|---|---|
-| `/admin` | admin | Company name, plan and limits with current usage (users = members + pending invitations, teams), settings summary; an amber notice when usage is over the plan (`planOverages`; existing usage is grandfathered after a downgrade, only new growth is refused) |
+| `/admin` | admin | Company name, plan and limits with current usage (members = memberships + pending invitations, teams), settings summary; an amber notice when usage is over the plan (`planOverages`; existing usage is grandfathered after a downgrade, only new growth is refused) |
 | `/admin/teams` | admin | Create / rename / delete (only empty: no members, no active tokens, no recorded turns), add / remove members, member ↔ lead, primary team |
-| `/admin/members` | admin | Company role, remove user, invitations (create with team + roles, 7-day expiry, e-mailed via `src/lib/mail.ts`; list pending; revoke) |
-| `/admin/tokens` | admin, lead | Token list (RLS: admins all; leads their teams' team tokens + own), team-token creation (admin: any team, lead: led teams), revoke |
-| `/tokens` | everyone | Own user tokens: create (in one of your teams), revoke |
+| `/admin/members` | admin | Company role, "Last active here", remove from company, invitations (create with team + roles, 7-day expiry, e-mailed via `src/lib/mail.ts` with a link to `/login?next=/invitations`; list pending; revoke) |
+| `/admin/tokens` | admin, lead | **Company tokens**: list (RLS: admins see every token of the company, members' user tokens included; leads the company tokens), creation (admins and leads), revoke |
+| `/tokens` | everyone | **My tokens**: own user tokens in the active company (the page names the company), create, revoke |
 | `/admin/projects` | admin | Key, display name, team mapping, turns in the last 30 days (`agg_turns_by_project`) |
 | `/admin/settings` | admin | Individual visibility, project naming, retention (30 … plan max) |
 | `/admin/budgets` | admin (edit), lead (read) | Monthly token / ≈ cost budgets per team or user with month-to-date progress (`getBudgetProgress`); not on Free. In aggregates-only mode alert mails for a user budget go only to that user (admins and leads are not mailed; the page says so) |
 | `/admin/audit` | admin | Paged audit log; `GET /admin/audit/export.csv` (newest 10,000, writes its own `export` audit row) |
 
 Leads only see the Tokens and Budgets tabs; members are sent to `/overview`. The main sidebar (`components/nav.ts`)
-shows "My tokens" (`/tokens`) to everyone, "Admin" to admins and "Team tokens" (`/admin/tokens`) to team leads.
+shows "My tokens" (`/tokens`) to everyone, "Admin" to admins and "Company tokens" (`/admin/tokens`) to team leads. The header
+company switcher appears with two or more companies, and an "Invitations (n)" link with pending invitations for the signed-in e-mail.
 
 ### How an operation runs
 
@@ -458,6 +473,12 @@ shows "My tokens" (`/tokens`) to everyone, "Admin" to admins and "Team tokens" (
   for token actions, whose lead / owner rules live in the core), then run the core inside
   `withUserDb(user, tx => …)` via `runAdmin()` (`run.ts`), so RLS applies as a second check. Postgres
   errors become generic messages (`errors.ts`).
+- Every mutating admin and token form is **bound to the company it was rendered for** (hidden `_companyId`, rendered by
+  `CompanyField`, checked in `runAdmin` against the session's active company). The active company is session-wide, so a
+  form left open in another tab after a switch is refused with "The active company changed in another tab. Reload this page."
+  The company comes from a `CompanyScopeProvider` that **each page** renders from its own `requireUser()` /
+  `requireAdmin…()`, never from `admin/layout.tsx`: a shared layout is not re-rendered on client navigation between
+  `/admin/*` tabs, so it would keep an earlier page's company (`test/admin/forms.test.ts` guards this).
 - Forms are `<form action>` + `useActionState` (`admin/_components/ActionForm.tsx`) and work without
   JavaScript. Destructive actions use a two-step `<details>` confirm (`Confirm.tsx`), no `window.confirm`.
 - Plan limits come from `PLAN_LIMITS` in `@ai-obs/db` (re-exported by `src/lib/admin/plans.ts`). Limit checks
@@ -466,27 +487,33 @@ shows "My tokens" (`/tokens`) to everyone, "Admin" to admins and "Team tokens" (
 ### Tokens
 
 `generateToken()` / `hashToken()` from `src/lib/ingest/tokens.ts`; only the hash and the display prefix
-are stored. The plaintext, the command `npx ai-obs init --token <token> --endpoint <APP_URL>` and, for
-team tokens, a downloadable JSON for MDM / dotfiles rollout (`{endpoint, token, team, install}`) are
+are stored. Kinds: **company** tokens (`aiobs_c_`; created by admins and leads, match users by git e-mail among the
+company's members) and **user** tokens (`aiobs_u_`; created by anyone, own only, in the active company). The plaintext,
+the command `npx ai-obs init --token <token> --endpoint <APP_URL>` and, for
+company tokens, a downloadable JSON for MDM / dotfiles rollout (`{endpoint, token, company, install}`, where `company` is the slug) are
 returned once in the action state and never written anywhere. The collector creates its `machine_id`
 on `init`, so the rollout runs `install` on each machine. Audit rows carry the prefix, never the secret.
 
-### Removing a user
+### Removing a member
 
-Removing a member from a team (`removeMember`) also revokes that user's active user tokens for that team in the same
-transaction (`token.revoke` audit rows with `reason: 'member removed from team'`); team tokens and the user's tokens for
-other teams are untouched (SEC-4). `removeUser` deletes the `users` row. The schema's foreign keys do the ADR-0012 clean-up in the same
-transaction: sessions, turns, runs, usage, machines, ingest tokens, memberships, budgets and login sessions
-of the user are deleted (`ON DELETE CASCADE`) and `daily_rollups.user_id` becomes null (`ON DELETE SET NULL`).
-There is no SQL function for it in `packages/db`; referential actions are not subject to RLS. You cannot
-remove yourself or the last admin.
+`removeMember` (members page, "Remove from company") calls the SQL function `admin_remove_member`, in one transaction: it
+revokes the member's user tokens **and the company tokens they created** in that company (`token.revoke` audit rows with
+`reason: 'member removed from company'`), clears the active company of their sessions, and deletes their team memberships,
+per-user budgets and the membership (SEC-4). Their identity, their other companies and their **recorded activity stay**: turns,
+runs, usage, machines and runaway alerts remain in this company and render as "former member" (ADR-0012 amendment). The
+confirmation lists the company tokens the person created that are still active, so CI can be re-keyed. You cannot remove
+yourself or the last admin.
+
+Demoting a person (admin to member, lead to member, removal from a team) revokes the company tokens they created once they
+are neither an admin nor a lead of any team in the company (`revokeStrandedCompanyTokens`); the success message and the audit
+log name the revoked tokens. Revocation is one-way (a DB trigger).
 
 ### Tests
 
 `pnpm vitest run --project web test/admin`: pure tests for plan limits, token-kind permissions, input
 parsing, e-mail and audit helpers; an integration test against its own database `ai_obs_admin_test`
 (override `ADMIN_TEST_DATABASE_URL`, name must end in `_test`, skipped without Postgres) covering teams,
-invitations, token create / revoke, settings, projects, budgets, user removal, audit rows, and that
+invitations (also for an existing account), company / user token create / revoke, settings, projects, budgets, member removal and demotion revocations, company-bound forms, audit rows, and that
 members (and a forged admin claim) are refused by the guard and by RLS.
 
 ## Super admin
@@ -496,7 +523,7 @@ Platform console for super admins (`is_super_admin`, no company; BRIEF §4 and �
 
 | Route | What |
 |---|---|
-| `/super` | Companies table (name, slug, plan, status, created, users and teams from `platform_company_counts()`, admin e-mails; sortable, CSV via `/super/export`), search, "Create company" form, recent platform actions |
+| `/super` | Companies table (name, slug, plan, status, created, members and teams from `platform_company_counts()`, admin e-mails with "last active"; sortable, CSV via `/super/export`), search, "Create company" form, recent platform actions |
 | `/super/companies/<id>` | Plan and limits, change plan, suspend / reactivate (with an optional reason), admins and their invitations, "Invite admin" (also re-sends a lost invitation), audit of platform actions for the company |
 | `/super/plans` | Read-only plan table, built from `PLAN_LIMITS` in `@ai-obs/db` (the one source that is enforced: invites, accepting an invitation, creating teams, retention, budgets) plus display names; a test fails if they disagree. Limits are placeholders (BRIEF §10) |
 
@@ -504,15 +531,15 @@ Platform console for super admins (`is_super_admin`, no company; BRIEF §4 and �
   server action. A signed-in non-super-admin gets **404**; an anonymous request is redirected to `/login` by `proxy.ts`.
   (`requireSuperAdmin()` in `lib/auth/session.ts` redirects instead, so the console does not use it.)
 - **Database.** Everything uses `dbFor('platform')` (role `app_platform`), never `withUserDb`. That role can read and write
-  `companies`, read admin contacts (`users` where the role is admin), insert admin `invitations` and `audit_log`, and call
-  `platform_company_counts()` and `platform_email_in_use()`. Its `audit_log` access is limited to `platform.%` actions (or rows without a company), so it can neither read a tenant's audit trail nor forge an `export` row (SEC-6). It has no grants on telemetry, teams or tokens, so even a bug here cannot read a turn
+  `companies`, read admin contacts (memberships with the admin role, with the identity columns), insert admin `invitations` and `audit_log`, and call
+  `platform_company_counts()` and `platform_invitee_status()`. Its `audit_log` access is limited to `platform.%` actions (or rows without a company), so it can neither read a tenant's audit trail nor forge an `export` row (SEC-6). It has no grants on telemetry, teams or tokens, so even a bug here cannot read a turn
   (`select … from turns` fails with `42501`; tested). The console therefore shows no member names, no teams and no telemetry.
 - **Create company.** One transaction inserts the company, an admin invitation (14 days, no team) and the audit row, then the
   invitation e-mail goes out (`lib/platform/mail.ts`: a link to `${APP_URL}/login`, no secret). The invitee signs in with that
   address (magic link, Google or GitHub), sees the invitation on `/signup` and joins explicitly (`auth_accept_invitation`), which makes them the company admin. If SMTP fails, the company
-  and invitation stay and the page says so; "Invite admin" sends it again. Refused: duplicate slug, an e-mail that already is
-  a user of any company (member, admin or super admin: `platform_email_in_use()`, SEC-7; a same-company admin gets "already an admin", anyone else
-  a generic "already belongs to a user"), an e-mail in `SUPER_ADMIN_EMAILS`. An empty slug is derived from the name.
+  and invitation stay and the page says so; "Invite admin" sends it again. Refused: duplicate slug, a super admin's e-mail (`platform_invitee_status()`, SEC-7) or one in `SUPER_ADMIN_EMAILS`; an
+  existing user of another company may become the first admin of a new one and accepts at `/invitations`. "Invite admin" says "already an admin" for a current admin of the company; for an existing member
+  the invitation is not offered, and a company admin can promote them instead. An empty slug is derived from the name.
 - **Change plan.** A downgrade is applied, with a warning listing what is over the new plan (`planOverages`): existing members, teams and invitations are kept, only growth is refused.
 - **Suspend.** Sets `companies.status = 'suspended'`: ingest answers 403 and sign-in is refused. Data is kept; reactivating restores access.
 - **Audit.** Each change inserts an `audit_log` row in the same transaction, with `company_id` of the target and the super admin as

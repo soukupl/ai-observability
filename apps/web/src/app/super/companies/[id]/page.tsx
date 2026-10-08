@@ -51,7 +51,7 @@ export default async function CompanyPage({ params, searchParams }: Props) {
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
         <KpiTile label="Plan" value={plan.name} sub={`raw retention up to ${plan.retentionLabel}`} />
         <KpiTile
-          label="Users"
+          label="Members"
           value={String(company.users)}
           sub={limitLabel(company.users, plan.maxUsers)}
           title={overLimit(company.users, plan.maxUsers) ? 'Over the plan limit (limits are informational for now)' : undefined}
@@ -69,8 +69,8 @@ export default async function CompanyPage({ params, searchParams }: Props) {
         title="Status"
         description={
           company.status === 'active'
-            ? 'Suspending stops ingest (403) and sign-in for this company. Data is kept.'
-            : 'This company is suspended: ingest returns 403 and its users cannot sign in.'
+            ? 'Suspending stops ingest (403) and dashboard access to this company. Data is kept.'
+            : 'This company is suspended: ingest returns 403 and its members cannot open it (their other companies are unaffected).'
         }
       >
         <StatusForm companyId={company.id} status={company.status} />
@@ -78,7 +78,7 @@ export default async function CompanyPage({ params, searchParams }: Props) {
 
       <Card title="Admins" description="Admin contacts only; no other users are visible to the platform.">
         {company.admins.length === 0 ? (
-          <p className="text-sm text-zinc-500 dark:text-zinc-400">No admin has signed in yet.</p>
+          <p className="text-sm text-zinc-500 dark:text-zinc-400">No admin has joined yet.</p>
         ) : (
           <ul className="divide-y divide-zinc-100 text-sm dark:divide-zinc-800">
             {company.admins.map((a) => (
@@ -88,7 +88,7 @@ export default async function CompanyPage({ params, searchParams }: Props) {
                   {a.name ? <span className="text-zinc-500 dark:text-zinc-400"> · {a.name}</span> : null}
                 </span>
                 <span className="text-xs text-zinc-500 dark:text-zinc-400">
-                  {a.lastLoginAt ? `last sign-in ${formatDateTime(a.lastLoginAt)}` : 'never signed in'}
+                  {a.lastActiveAt ? `last active ${formatDateTime(a.lastActiveAt)}` : 'not active here yet'}
                 </span>
               </li>
             ))}

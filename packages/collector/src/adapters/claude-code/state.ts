@@ -1,5 +1,6 @@
 import type { TurnDigest } from '../../analysis/digest.js';
 import type { Outcome, UsageEntry } from '../../protocol-types.js';
+import type { StreamKey } from '../../queue.js';
 import type { SessionStateStore } from '../../state.js';
 import type { Agg } from './analyze.js';
 
@@ -53,7 +54,12 @@ export interface SessionState {
   v: 1;
   sessionId: string;
   transcriptPath: string;
+  /** cwd of the latest hook */
   cwd: string;
+  /** the session's first cwd: its project key is resolved from it (C15). Absent in state written by 0.1.x. */
+  pkCwd?: string;
+  /** the session's stream, pinned at its first hook (C12, C15); every later event goes there */
+  stream?: StreamKey;
   /** byte offset of the first transcript line not yet turned into events */
   offset: number;
   startedSent: boolean;
@@ -86,6 +92,7 @@ export function newSessionState(sessionId: string, transcriptPath: string, cwd: 
     sessionId,
     transcriptPath,
     cwd,
+    pkCwd: cwd,
     offset: 0,
     startedSent: false,
     ended: false,

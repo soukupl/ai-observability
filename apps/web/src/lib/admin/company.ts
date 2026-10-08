@@ -34,12 +34,12 @@ export interface CompanyCounts {
   projects: number;
 }
 
-/** Counts for plan limits and the overview. Invitations / tokens are admin-visible only (RLS). */
+/** Counts for plan limits and the overview (`users` = memberships of this company). Invitations / tokens are admin-visible only (RLS). */
 export async function companyCounts(tx: Tx, companyId: string): Promise<CompanyCounts> {
   const [r] = await rows<Record<keyof CompanyCounts, number>>(
     tx,
     sql`select
-      (select count(*)::int from users where company_id = ${companyId}::uuid) as users,
+      (select count(*)::int from company_memberships where company_id = ${companyId}::uuid) as users,
       (select count(*)::int from invitations where company_id = ${companyId}::uuid and accepted_at is null and expires_at > now()) as "pendingInvitations",
       (select count(*)::int from teams where company_id = ${companyId}::uuid) as teams,
       (select count(*)::int from ingest_tokens where company_id = ${companyId}::uuid and revoked_at is null) as "activeTokens",

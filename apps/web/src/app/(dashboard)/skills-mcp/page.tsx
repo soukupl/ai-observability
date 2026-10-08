@@ -45,7 +45,7 @@ const IMPACT_COLUMNS: Column[] = [
   { key: 'durationDelta', header: 'Time Δ', kind: 'percent', align: 'right' },
   { key: 'note', header: '', kind: 'text', align: 'left' },
 ];
-const USERS_COLUMN: Column = { key: 'users', header: 'Users', kind: 'int', align: 'right', hint: 'Distinct users (unverified team-token turns have none).' };
+const USERS_COLUMN: Column = { key: 'users', header: 'Users', kind: 'int', align: 'right', hint: 'Distinct users (unverified company-token turns have none).' };
 
 const th = 'px-2 py-1.5 font-medium';
 /** `1 call`, `3 calls` */

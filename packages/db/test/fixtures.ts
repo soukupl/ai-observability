@@ -3,6 +3,7 @@ import type { Database } from '../src/client.js';
 import {
   agentSessions,
   companies,
+  companyMemberships,
   dailyRollups,
   runs,
   teamMemberships,
@@ -73,7 +74,28 @@ async function addTurn(tx: Tx, companyId: string, teamId: string, userId: string
   return t!.id;
 }
 
-/** Inserts a company with teams, people (each with one turn) and optionally an unverified turn. */
+/**
+ * Adds an existing identity to a company (ADR-0022: one login, many companies) as app_definer. Team memberships are
+ * up to the caller.
+ */
+export async function addMembership(
+  owner: Database,
+  userId: string,
+  companyId: string,
+  role: CompanyRole,
+  primaryTeamId: string | null = null,
+): Promise<Person> {
+  await owner.transaction(async (tx) => {
+    await tx.execute(sql`set local role app_definer`);
+    await tx.insert(companyMemberships).values({ companyId, userId, companyRole: role, primaryTeamId });
+  });
+  return { id: userId, companyId, role };
+}
+
+/**
+ * Inserts a company with teams, people (each an identity plus a membership, with one turn) and optionally an
+ * unverified turn.
+ */
 export async function createCompany(
   db: Database,
   slug: string,
@@ -100,8 +122,9 @@ export async function createCompany(
       const primary = fx.teams[m.teams[0]![0]]!;
       const [u] = await tx
         .insert(users)
-        .values({ companyId, email: `${m.key}@${slug}.test`, name: m.key, companyRole: role, primaryTeamId: primary })
+        .values({ email: `${m.key}@${slug}.test`, name: m.key })
         .returning({ id: users.id });
+      await tx.insert(companyMemberships).values({ companyId, userId: u!.id, companyRole: role, primaryTeamId: primary });
       fx.people[m.key] = { id: u!.id, companyId, role };
       for (const [teamKey, teamRole] of m.teams) {
         await tx.insert(teamMemberships).values({ companyId, teamId: fx.teams[teamKey]!, userId: u!.id, role: teamRole });

@@ -12,8 +12,11 @@ import {
 } from '../src/analysis/summaries.js';
 import { createContext } from '../src/context.js';
 import { nullLogger } from '../src/log.js';
+import { writeJsonAtomic } from '../src/fsutil.js';
 import type { IngestEvent } from '../src/protocol-types.js';
+import type { StreamKey } from '../src/queue.js';
 import { cleanupHomes, fakeAdapter, tmpHome, writeTestConfig } from './helpers.js';
+import { OPEN } from './queue-helpers.js';
 
 afterEach(cleanupHomes);
 
@@ -94,18 +97,34 @@ describe('runSummaryCommand', () => {
 });
 
 describe('summarizeAndQueue', () => {
+  const KEY: StreamKey = { kind: 'project', pk: 'github.com/acme/billing', bind: OPEN };
+  const OTHER: StreamKey = { kind: 'project', pk: 'github.com/acme/web', bind: OPEN };
+
   function ctxFor(summarize: (d: unknown[]) => Promise<Map<string, string>>) {
     const paths = tmpHome();
     const config = writeTestConfig(paths);
     const queued: IngestEvent[] = [];
+    const calls: Array<{ events: IngestEvent[]; key: StreamKey | null }> = [];
     const adapter = fakeAdapter({ summarize: async (d) => summarize(d) });
-    const ctx = createContext({ adapter, config, paths, queue: { enqueue: (e) => void queued.push(...e) }, log: nullLogger, projectNaming: 'plain' });
-    return { paths, ctx, queued, adapter };
+    const ctx = createContext({
+      adapter,
+      config,
+      paths,
+      queue: {
+        enqueue: (e, key) => {
+          queued.push(...e);
+          calls.push({ events: [...e], key });
+        },
+      },
+      log: nullLogger,
+    });
+    return { paths, ctx, queued, calls, adapter };
   }
 
-  it('enqueues turn_summary events only (never digests)', async () => {
-    const { ctx, queued } = ctxFor(async () => new Map([['turn-aaa', 'Added JWT refresh'], ['turn-bbb', 'Fixed flaky test']]));
-    await ctx.summarizeTurns(digests);
+  it('enqueues turn_summary events only (never digests) into the session stream', async () => {
+    const { ctx, queued, calls } = ctxFor(async () => new Map([['turn-aaa', 'Added JWT refresh'], ['turn-bbb', 'Fixed flaky test']]));
+    await ctx.summarizeTurns(digests, KEY);
+    expect(calls.map((c) => c.key)).toEqual([KEY]);
     expect(queued.map((e) => e.type)).toEqual(['turn_summary', 'turn_summary']);
     expect(JSON.stringify(queued)).not.toContain('Add JWT refresh Add JWT');
   });
@@ -116,25 +135,50 @@ describe('summarizeAndQueue', () => {
       if (fail) throw new Error('rate limited');
       return new Map((d as Array<{ turnId: string }>).map((x) => [x.turnId, `S ${x.turnId}`]));
     });
-    await ctx.summarizeTurns(digests);
+    await ctx.summarizeTurns(digests, KEY);
     expect(queued).toHaveLength(0);
     const pending = JSON.parse(readFileSync(pendingSummariesPath(paths.state, 'claude-code'), 'utf8')) as unknown[];
     expect(pending).toHaveLength(2);
 
     fail = false;
-    await ctx.summarizeTurns([buildDigest({ turnId: 'turn-ccc', prompt: 'p', toolNames: [], lastAssistantMessage: 'm' })]);
+    await ctx.summarizeTurns([buildDigest({ turnId: 'turn-ccc', prompt: 'p', toolNames: [], lastAssistantMessage: 'm' })], KEY);
     expect(queued.map((e) => (e as { turn_id: string }).turn_id).sort()).toEqual(['turn-aaa', 'turn-bbb', 'turn-ccc']);
     expect(JSON.parse(readFileSync(pendingSummariesPath(paths.state, 'claude-code'), 'utf8'))).toEqual([]);
   });
 
   it('gives up after 5 attempts', async () => {
     const { ctx, paths } = ctxFor(async () => new Map());
-    for (let i = 0; i < 6; i++) await ctx.summarizeTurns(i === 0 ? digests : []);
+    for (let i = 0; i < 6; i++) await ctx.summarizeTurns(i === 0 ? digests : [], KEY);
     expect(JSON.parse(readFileSync(pendingSummariesPath(paths.state, 'claude-code'), 'utf8'))).toEqual([]);
   });
 
   it('summarizeAndQueue reports counts', async () => {
     const { ctx, adapter } = ctxFor(async () => new Map([['turn-aaa', 'ok']]));
-    expect(await summarizeAndQueue(adapter, digests, ctx)).toEqual({ summarized: 1, pending: 1 });
+    expect(await summarizeAndQueue(adapter, digests, ctx, KEY)).toEqual({ summarized: 1, pending: 1 });
+  });
+
+  it('retried digests keep their own stream; summaries are enqueued grouped by stream', async () => {
+    let fail = true;
+    const { ctx, calls } = ctxFor(async (d) => {
+      if (fail) throw new Error('rate limited');
+      return new Map((d as Array<{ turnId: string }>).map((x) => [x.turnId, `S ${x.turnId}`]));
+    });
+    await ctx.summarizeTurns(digests, KEY);
+    fail = false;
+    await ctx.summarizeTurns([buildDigest({ turnId: 'turn-ccc', prompt: 'p', toolNames: [], lastAssistantMessage: 'm' })], OTHER);
+    const byKey = calls.map((c) => [c.key, c.events.map((e) => (e as { turn_id: string }).turn_id).sort()]);
+    expect(byKey).toEqual([
+      [KEY, ['turn-aaa', 'turn-bbb']],
+      [OTHER, ['turn-ccc']],
+    ]);
+  });
+
+  it('drops pending digests written by 0.1.x (no stream) and new digests of an unrecorded session', async () => {
+    const summarize = async (d: unknown[]) => new Map((d as Array<{ turnId: string }>).map((x) => [x.turnId, `S ${x.turnId}`]));
+    const { ctx, calls, paths } = ctxFor(summarize);
+    writeJsonAtomic(pendingSummariesPath(paths.state, 'claude-code'), [{ ...digests[0], attempts: 1, firstFailedAt: Date.now() }]);
+    await ctx.summarizeTurns([digests[1]!], null);
+    expect(calls).toEqual([]);
+    expect(JSON.parse(readFileSync(pendingSummariesPath(paths.state, 'claude-code'), 'utf8'))).toEqual([]);
   });
 });

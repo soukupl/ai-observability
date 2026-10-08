@@ -3,15 +3,16 @@ import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDb, type Database } from '../src/client.js';
 import { DB_ROLES } from '../src/connections.js';
-import { runMigrations } from '../src/migrate.js';
 import { PLAN_LIMITS } from '../src/schema/settings.js';
 import { withIngestContext } from '../src/rls.js';
+import { migrateTo } from './migrate-to.js';
 
 /**
  * Migration 0004 (review fixes SEC-1/3/4/6/7/10/11, dod:C2): invitation consent functions, plan capacity
- * at accept time, user tokens needing a live membership, team-token attribution limited to the token's
- * team, parked-patch ownership, platform audit scope and e-mail check, per-company project salt.
- * Own database (ai_obs_m0004_test).
+ * at accept time, user tokens needing a live membership, git-e-mail attribution limited to the team a
+ * token was bound to, parked-patch ownership, platform audit scope and e-mail check, per-company project salt.
+ * Own database (ai_obs_m0004_test), migrated up to 0004 only (migrateTo): these are the 0004 semantics, which
+ * migration 0014 (ADR-0022: memberships, company + user tokens) later replaced.
  */
 const base = new URL(process.env.TEST_DATABASE_URL || 'postgres://ai_obs:ai_obs@localhost:5432/ai_obs_test');
 base.pathname = '/ai_obs_m0004_test';
@@ -54,7 +55,7 @@ describe.skipIf(skip !== null)(skip ? `migration 0004 - SKIPPED: ${skip}` : 'mig
     const quiet = console.log;
     console.log = () => {};
     try {
-      await runMigrations(URL_);
+      await migrateTo(URL_, '0004_auth_invites_salt_hardening');
     } finally {
       console.log = quiet;
     }
@@ -96,7 +97,7 @@ describe.skipIf(skip !== null)(skip ? `migration 0004 - SKIPPED: ${skip}` : 'mig
     const admin = postgres(adminUrl.toString(), { max: 1, onnotice: () => {} });
     await admin.unsafe('drop database if exists "ai_obs_m0004_test" with (force)').catch(() => {});
     await admin.end({ timeout: 1 }).catch(() => {});
-  });
+  }, 30_000);
 
   async function invite(company: string, email: string, createdAt: string, role = 'member'): Promise<string> {
     return owner.transaction(async (tx) => {
@@ -150,7 +151,7 @@ describe.skipIf(skip !== null)(skip ? `migration 0004 - SKIPPED: ${skip}` : 'mig
     expect(PLAN_LIMITS.business.users).toBeNull();
   });
 
-  it('SEC-4: a user token stops resolving when its user leaves the token team; team tokens are unaffected', async () => {
+  it('SEC-4: a user token stops resolving when its user leaves the team it is bound to; kind team is unaffected', async () => {
     const look = async (h: string) => withIngestContext(ingest, ids.co, async (tx) => [...(await tx.execute(sql`select * from lookup_ingest_token(${h})`))]);
     expect(await look('h-bob')).toHaveLength(1);
     expect(await look('h-team')).toHaveLength(1);

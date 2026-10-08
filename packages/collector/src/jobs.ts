@@ -5,9 +5,12 @@ import { writeFileAtomic } from './fsutil.js';
 import type { HarnessName } from './protocol-types.js';
 import { ulid } from './ulid.js';
 
-/** On-disk job written by the hook fast path and consumed by the worker (local only, mode 0600). */
+/**
+ * On-disk job written by the hook fast path and consumed by the worker (local only, mode 0600).
+ * `v: 1` = `<ulid>.json` written by the 0.1.x hook; `v: 2` = `<ulid>.v2.json` (C25). Same fields.
+ */
 export interface JobFile {
-  v: 1;
+  v: 1 | 2;
   harness: HarnessName;
   hook: string;
   payload: unknown;
@@ -16,16 +19,20 @@ export interface JobFile {
   received_at: string;
 }
 
-const JOB_RE = /^[0-9A-HJKMNP-TV-Z]{26}\.json$/;
+/**
+ * Job file names: `<ulid>.json` (0.1.x hook) and `<ulid>.v2.json` (this hook). A 0.1.x worker still
+ * running after `init` matches only `<ulid>.json`, so it never processes a post-upgrade job (C25).
+ */
+export const JOB_RE = /^[0-9A-HJKMNP-TV-Z]{26}(\.v2)?\.json$/;
 
-/** Writes a job atomically (temp + rename) so the worker never sees a partial file. Returns its path. */
-export function writeJob(jobsDir: string, job: JobFile, now = Date.now()): string {
-  const file = join(jobsDir, `${ulid(now)}.json`);
-  writeFileAtomic(file, JSON.stringify(job));
+/** Writes a v2 job atomically (temp + rename) so the worker never sees a partial file. Returns its path. */
+export function writeJob(jobsDir: string, job: Omit<JobFile, 'v'> & { v?: JobFile['v'] }, now = Date.now()): string {
+  const file = join(jobsDir, `${ulid(now)}.v2.json`);
+  writeFileAtomic(file, JSON.stringify({ ...job, v: 2 }));
   return file;
 }
 
-/** Pending job files, oldest first (names are ULIDs). */
+/** Pending job files of both versions, oldest first (names start with ULIDs; `.json` sorts before `.v2.json` within one ms). */
 export function listJobs(jobsDir: string): string[] {
   try {
     return readdirSync(jobsDir)
@@ -37,7 +44,7 @@ export function listJobs(jobsDir: string): string[] {
   }
 }
 
-/** Jobs a previous worker crashed on (renamed to *.processing before handling). */
+/** Jobs a previous worker crashed on (renamed to *.json.processing before handling; both versions). */
 export function listCrashedJobs(jobsDir: string): string[] {
   try {
     return readdirSync(jobsDir)

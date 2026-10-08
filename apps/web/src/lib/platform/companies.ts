@@ -1,4 +1,4 @@
-import { auditLog, companies, invitations, users, type CompanyStatus, type Database, type Plan } from '@ai-obs/db';
+import { auditLog, companies, companyMemberships, invitations, users, type CompanyStatus, type Database, type Plan } from '@ai-obs/db';
 import { and, desc, eq, like, sql } from 'drizzle-orm';
 import { appUrl, superAdminEmails } from '../auth/config';
 import { planOverages } from '../admin/plans';
@@ -8,8 +8,9 @@ import { parseEmail, parseName, parsePlan, parseSlug, slugFromName, type Result 
 
 /**
  * Super-admin console data layer. Everything here runs on dbFor('platform') (role app_platform):
- * it can read and write companies, read admin contacts, insert admin invitations and audit rows,
- * and call platform_company_counts(). It has NO grants on telemetry, teams or tokens (ADR-0006),
+ * it can read and write companies, read admin contacts (admin memberships and their users), insert
+ * admin invitations and audit rows, and call platform_company_counts() / platform_invitee_status().
+ * It has NO grants on telemetry, teams or tokens (ADR-0006),
  * so a bug here cannot leak customer data. Every mutation writes an audit_log row with the target
  * company in the same transaction.
  */
@@ -32,6 +33,7 @@ export interface CompanyRow {
   plan: Plan;
   status: CompanyStatus;
   createdAt: number;
+  /** Members (company memberships). */
   users: number;
   teams: number;
   adminEmails: string[];
@@ -40,7 +42,8 @@ export interface CompanyRow {
 export interface AdminContact {
   email: string;
   name: string | null;
-  lastLoginAt: number | null;
+  /** Last time a session started in, or switched to, this company (not the last sign-in anywhere). */
+  lastActiveAt: number | null;
 }
 export interface PendingInvite {
   id: string;
@@ -82,12 +85,13 @@ export async function listCompanies(db: Database, opts: { q?: string; limit?: nu
   const counts = (await db.execute(sql`select company_id, users, teams from platform_company_counts()`)) as unknown as CountRow[];
   const countOf = new Map(counts.map((c) => [c.company_id, c]));
   const admins = await db
-    .select({ companyId: users.companyId, email: users.email })
-    .from(users)
-    .where(eq(users.companyRole, 'admin'))
+    .select({ companyId: companyMemberships.companyId, email: users.email })
+    .from(companyMemberships)
+    .innerJoin(users, eq(users.id, companyMemberships.userId))
+    .where(eq(companyMemberships.companyRole, 'admin'))
     .orderBy(users.email);
   const adminsOf = new Map<string, string[]>();
-  for (const a of admins) if (a.companyId) adminsOf.set(a.companyId, [...(adminsOf.get(a.companyId) ?? []), a.email]);
+  for (const a of admins) adminsOf.set(a.companyId, [...(adminsOf.get(a.companyId) ?? []), a.email]);
   return rows.map((c) => ({
     id: c.id,
     name: c.name,
@@ -112,9 +116,10 @@ export async function getCompanyDetail(db: Database, id: string): Promise<Compan
   const counts = (await db.execute(sql`select company_id, users, teams from platform_company_counts()`)) as unknown as CountRow[];
   const mine = counts.find((r) => r.company_id === id);
   const admins = await db
-    .select({ email: users.email, name: users.name, lastLoginAt: users.lastLoginAt })
-    .from(users)
-    .where(and(eq(users.companyId, id), eq(users.companyRole, 'admin')))
+    .select({ email: users.email, name: users.name, lastActiveAt: companyMemberships.lastActiveAt })
+    .from(companyMemberships)
+    .innerJoin(users, eq(users.id, companyMemberships.userId))
+    .where(and(eq(companyMemberships.companyId, id), eq(companyMemberships.companyRole, 'admin')))
     .orderBy(users.email);
   const invites = await db
     .select()
@@ -132,7 +137,7 @@ export async function getCompanyDetail(db: Database, id: string): Promise<Compan
     users: Number(mine?.users ?? 0),
     teams: Number(mine?.teams ?? 0),
     adminEmails: admins.map((a) => a.email),
-    admins: admins.map((a) => ({ email: a.email, name: a.name, lastLoginAt: ms(a.lastLoginAt) })),
+    admins: admins.map((a) => ({ email: a.email, name: a.name, lastActiveAt: ms(a.lastActiveAt) })),
     invitations: invites.map((i) => ({
       id: i.id,
       email: i.email,
@@ -183,7 +188,8 @@ async function insertInvitation(tx: PlatformTx, actor: Actor, companyId: string,
 
 async function sendInvitation(deps: PlatformDeps, companyName: string, email: string): Promise<string | null> {
   try {
-    const login = new URL('/login', appUrl(deps.env ?? process.env)).toString();
+    // New e-mails join on the sign-up step; existing accounts (members of another company) at /invitations (D9).
+    const login = new URL('/login?next=%2Finvitations', appUrl(deps.env ?? process.env)).toString();
     await deps.mailer.send(adminInvitationEmail(email, companyName, login, INVITATION_DAYS));
     return null;
   } catch {
@@ -196,15 +202,24 @@ function emailBlocked(email: string, env: NodeJS.ProcessEnv): string | null {
 }
 
 /**
- * Is the e-mail already registered as a user of any company (or a super admin)? The users policy only
- * lets app_platform see admin contacts, so a plain select would miss ordinary members; the
- * SECURITY DEFINER platform_email_in_use() answers just the boolean.
- * An invitation for a registered e-mail can never be accepted (auth_accept_invitation returns null).
+ * What the console may know about an invitee (SECURITY DEFINER platform_invitee_status): 'super_admin',
+ * 'admin' (already an admin of `companyId`) or null (no account, or an account that is not an admin
+ * there). Plain membership is never disclosed to the platform: a member of the company simply does not
+ * see the invitation (auth_pending_invitations hides it), and members of other companies may be invited,
+ * since one login can belong to several companies (ADR-0022).
  */
-async function emailInUse(tx: Pick<Database, 'execute'>, email: string): Promise<boolean> {
-  const rows = (await tx.execute(sql`select platform_email_in_use(${email}::text) as in_use`)) as unknown as Array<{ in_use: boolean }>;
-  return rows[0]?.in_use === true;
+export async function inviteeStatus(
+  tx: Pick<Database, 'execute'>,
+  email: string,
+  companyId: string | null,
+): Promise<'super_admin' | 'admin' | null> {
+  const rows = (await tx.execute(sql`select platform_invitee_status(${email}::text, ${companyId}::uuid) as status`)) as unknown as Array<{
+    status: 'super_admin' | 'admin' | null;
+  }>;
+  return rows[0]?.status ?? null;
 }
+
+const SUPER_ADMIN_REFUSED = 'That address belongs to a super admin; super admins cannot be company admins.';
 
 export interface CreateCompanyInput {
   name: unknown;
@@ -229,7 +244,7 @@ export async function createCompany(deps: PlatformDeps, actor: Actor, input: Cre
   let companyId: string;
   try {
     companyId = await deps.db.transaction(async (tx) => {
-      if (await emailInUse(tx, email.value)) throw Object.assign(new Error('email-taken'), { code: 'email-taken' });
+      if ((await inviteeStatus(tx, email.value, null)) === 'super_admin') throw Object.assign(new Error('super-admin'), { code: 'super-admin' });
       const [c] = await tx.insert(companies).values({ name: name.value, slug: slug.value, plan: plan.value }).returning({ id: companies.id });
       await insertInvitation(tx, actor, c!.id, email.value);
       await tx.insert(auditLog).values({
@@ -243,7 +258,7 @@ export async function createCompany(deps: PlatformDeps, actor: Actor, input: Cre
     });
   } catch (err) {
     if (pgCode(err) === '23505') return { ok: false, error: `The slug "${slug.value}" is already taken.` };
-    if (pgCode(err) === 'email-taken') return { ok: false, error: 'That e-mail already belongs to a user; they cannot be invited as the first admin of a new company.' };
+    if (pgCode(err) === 'super-admin') return { ok: false, error: SUPER_ADMIN_REFUSED };
     throw err;
   }
   const warning = await sendInvitation(deps, name.value, email.value);
@@ -256,25 +271,28 @@ export async function inviteAdmin(deps: PlatformDeps, actor: Actor, companyId: s
   if (!email.ok) return email;
   const blocked = emailBlocked(email.value, deps.env ?? process.env);
   if (blocked) return { ok: false, error: blocked };
-  type Outcome = { kind: 'ok'; name: string } | { kind: 'missing' } | { kind: 'already-admin' } | { kind: 'in-use' };
+  type Outcome = { kind: 'ok'; name: string } | { kind: 'missing' } | { kind: 'already-admin' } | { kind: 'super-admin' };
   const out = await deps.db.transaction(async (tx): Promise<Outcome> => {
     const [c] = await tx.select({ name: companies.name }).from(companies).where(eq(companies.id, companyId)).limit(1);
     if (!c) return { kind: 'missing' };
-    if (await emailInUse(tx, email.value)) {
-      // Admin contacts are visible to the platform, so a same-company admin gets the precise message;
-      // any other registered user (member, other company, super admin) only learns the address is taken.
-      const [admin] = await tx.select({ cid: users.companyId }).from(users).where(sql`lower(${users.email}) = ${email.value}`).limit(1);
-      return { kind: admin?.cid === companyId ? 'already-admin' : 'in-use' };
-    }
+    const status = await inviteeStatus(tx, email.value, companyId);
+    if (status === 'admin') return { kind: 'already-admin' };
+    if (status === 'super_admin') return { kind: 'super-admin' };
     await insertInvitation(tx, actor, companyId, email.value);
     await tx.insert(auditLog).values({ companyId, actorUserId: actor.id, action: 'platform.admin_invited', target: email.value, meta: {} });
     return { kind: 'ok', name: c.name };
   });
   if (out.kind === 'missing') return { ok: false, error: 'Company not found.' };
   if (out.kind === 'already-admin') return { ok: false, error: 'That person is already an admin of this company.' };
-  if (out.kind === 'in-use') return { ok: false, error: 'That e-mail already belongs to a user (of this or another company); they cannot be invited as an admin.' };
+  if (out.kind === 'super-admin') return { ok: false, error: SUPER_ADMIN_REFUSED };
   const warning = await sendInvitation(deps, out.name, email.value);
-  return { ok: true, notice: `Invitation sent to ${email.value}.`, ...(warning ? { warning } : {}) };
+  return {
+    ok: true,
+    notice:
+      `Invitation sent to ${email.value}. If they are already a member, the invitation is not offered to them; ` +
+      'a company admin can promote them instead.',
+    ...(warning ? { warning } : {}),
+  };
 }
 
 export async function changePlan(deps: PlatformDeps, actor: Actor, companyId: string, rawPlan: unknown): Promise<ActionResult> {

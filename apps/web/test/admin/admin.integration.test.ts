@@ -4,8 +4,8 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { listAuditLog } from '../../src/lib/admin/audit';
 import { createBudget, deleteBudget, updateBudget } from '../../src/lib/admin/budgets';
 import { updateSettings } from '../../src/lib/admin/company';
-import { createInvitation, invitationEmail, revokeInvitation } from '../../src/lib/admin/invitations';
-import { changeCompanyRole, removeUser } from '../../src/lib/admin/members';
+import { createInvitation, invitationEmail, listPendingInvitations, revokeInvitation } from '../../src/lib/admin/invitations';
+import { changeCompanyRole, listMembers, removeMember as removeCompanyMember } from '../../src/lib/admin/members';
 import { listAdminProjects, setProjectName, setProjectTeam } from '../../src/lib/admin/projects';
 import { addMember, createTeam, deleteTeam, removeMember, renameTeam, setMemberRole } from '../../src/lib/admin/teams';
 import { createToken, listTokens, revokeToken } from '../../src/lib/admin/tokens';
@@ -53,10 +53,8 @@ describe.skipIf(skipReason !== null)(skipReason ? `admin console — SKIPPED: ${
       const co: Co = { id: c!.id, teams: {}, people: {}, projectId: '' };
       for (const t of teamNames) co.teams[t] = (await q<{ id: string }>(tx, sql`insert into teams (company_id, name) values (${co.id}, ${t}) returning id`))[0]!.id;
       for (const [key, role, team, teamRole] of people) {
-        const [u] = await q<{ id: string }>(
-          tx,
-          sql`insert into users (company_id, email, name, company_role, primary_team_id) values (${co.id}, ${`${key}@${name.toLowerCase()}.test`}, ${key}, ${role}, ${co.teams[team]}) returning id`,
-        );
+        const [u] = await q<{ id: string }>(tx, sql`insert into users (email, name) values (${`${key}@${name.toLowerCase()}.test`}, ${key}) returning id`);
+        await tx.execute(sql`insert into company_memberships (company_id, user_id, company_role, primary_team_id) values (${co.id}, ${u!.id}, ${role}, ${co.teams[team]})`);
         await tx.execute(sql`insert into team_memberships (company_id, team_id, user_id, role) values (${co.id}, ${co.teams[team]}, ${u!.id}, ${teamRole})`);
         co.people[key] = { id: u!.id, companyId: co.id, companyRole: role, teams: [{ id: co.teams[team]!, role: teamRole }] };
       }
@@ -64,6 +62,21 @@ describe.skipIf(skipReason !== null)(skipReason ? `admin console — SKIPPED: ${
       return co;
     });
   }
+
+  /** Adds one more member (identity + membership + team membership) to an existing seeded company. */
+  async function addPerson(co: Co, company: string, key: string, role: 'admin' | 'member', team: string, teamRole: 'member' | 'lead'): Promise<Actor> {
+    return asOwner(async (tx) => {
+      const [u] = await q<{ id: string }>(tx, sql`insert into users (email, name) values (${`${key}@${company.toLowerCase()}.test`}, ${key}) returning id`);
+      await tx.execute(sql`insert into company_memberships (company_id, user_id, company_role, primary_team_id) values (${co.id}, ${u!.id}, ${role}, ${co.teams[team]})`);
+      await tx.execute(sql`insert into team_memberships (company_id, team_id, user_id, role) values (${co.id}, ${co.teams[team]}, ${u!.id}, ${teamRole})`);
+      const a: Actor = { id: u!.id, companyId: co.id, companyRole: role, teams: [{ id: co.teams[team]!, role: teamRole }] };
+      co.people[key] = a;
+      return a;
+    });
+  }
+  const mint = (a: Actor, name: string) => as(a, (tx) => createToken(tx, a, { kind: 'company', name }, ENDPOINT));
+  const tokenState = (ids: string[]) =>
+    asOwner((tx) => q<{ id: string; revoked_at: Date | null }>(tx, sql`select id, revoked_at from ingest_tokens where id in (${sql.join(ids.map((i) => sql`${i}::uuid`), sql`, `)})`));
 
   beforeAll(async () => {
     owner = harness.connectOwner();
@@ -123,41 +136,20 @@ describe.skipIf(skipReason !== null)(skipReason ? `admin console — SKIPPED: ${
       expect(actions).toEqual(expect.arrayContaining(['team.create', 'team.rename', 'team.member_add', 'team.member_role', 'team.member_remove', 'team.delete']));
     });
 
-    it('removing a member revokes their user tokens for that team only (SEC-4), audited', async () => {
+    it('removing a member from a team keeps their user tokens and moves their primary team', async () => {
       const a = acme.people.admin!;
       const m2 = acme.people.m2!;
       await as(a, (tx) => addMember(tx, a, { teamId: acme.teams.Platform, userId: m2.id, role: 'member' }));
-      const mk = (team: string) =>
-        asOwner(async (tx) => {
-          const [r] = await q<{ id: string }>(
-            tx,
-            sql`insert into ingest_tokens (company_id, team_id, user_id, kind, name, prefix, hash, created_by_user_id)
-                values (${acme.id}, ${team}, ${m2.id}, 'user', 'laptop', 'aiobs_u_x', ${`h-${team}-${Math.random()}`}, ${m2.id}) returning id`,
-          );
-          return r!.id;
-        });
-      const onPlatform = await mk(acme.teams.Platform);
-      const onMobile = await mk(acme.teams.Mobile);
-      const teamTok = await asOwner(async (tx) => {
-        const [r] = await q<{ id: string }>(
-          tx,
-          sql`insert into ingest_tokens (company_id, team_id, kind, name, prefix, hash, created_by_user_id)
-              values (${acme.id}, ${acme.teams.Platform}, 'team', 'fleet', 'aiobs_t_x', ${`h-team-${Math.random()}`}, ${a.id}) returning id`,
-        );
-        return r!.id;
-      });
-      const msg = await as(a, (tx) => removeMember(tx, a, { teamId: acme.teams.Platform, userId: m2.id }));
-      expect(msg).toMatch(/user token for this team was revoked/);
-      const state = await asOwner((tx) =>
-        q<{ id: string; revoked_at: Date | null }>(tx, sql`select id, revoked_at from ingest_tokens where id in (${onPlatform}, ${onMobile}, ${teamTok})`),
-      );
-      const revoked = (id: string) => state.find((r) => r.id === id)!.revoked_at !== null;
-      expect(revoked(onPlatform)).toBe(true);
-      expect(revoked(onMobile)).toBe(false);
-      expect(revoked(teamTok)).toBe(false);
-      const log = (await auditActions(acme)).filter((r) => r.action === 'token.revoke' && r.target === `token:${onPlatform}`);
-      expect(log).toHaveLength(1);
-      expect(log[0]!.meta).toMatchObject({ reason: 'member removed from team', userId: m2.id });
+      const ut = await as(m2, (tx) => createToken(tx, m2, { kind: 'user', name: 'm2 laptop' }, ENDPOINT));
+      const msg = await as(a, (tx) => removeMember(tx, a, { teamId: acme.teams.Mobile, userId: m2.id }));
+      expect(msg).toBe('Member removed.');
+      expect((await tokenState([ut.id]))[0]!.revoked_at).toBeNull();
+      const [pm] = await asOwner((tx) => q<{ primary_team_id: string | null }>(tx, sql`select primary_team_id from company_memberships where company_id = ${acme.id} and user_id = ${m2.id}`));
+      expect(pm!.primary_team_id).toBe(acme.teams.Platform);
+      // Put m2 back into Mobile for later tests.
+      await as(a, (tx) => addMember(tx, a, { teamId: acme.teams.Mobile, userId: m2.id, role: 'member' }));
+      await as(a, (tx) => removeMember(tx, a, { teamId: acme.teams.Platform, userId: m2.id }));
+      await as(a, (tx) => tx.execute(sql`update company_memberships set primary_team_id = ${acme.teams.Mobile} where company_id = ${acme.id} and user_id = ${m2.id}`));
     });
 
     it('a team with recorded turns cannot be deleted even when empty', async () => {
@@ -199,59 +191,146 @@ describe.skipIf(skipReason !== null)(skipReason ? `admin console — SKIPPED: ${
       expect(rows.map((r) => r.action)).toEqual(['invitation.create', 'invitation.create', 'invitation.revoke']);
     });
 
-    it('the plan user limit counts members + pending invitations (Free: 3)', async () => {
+    it('an account of another company can be invited; only this company counts as already a member', async () => {
+      const a = acme.people.admin!;
+      // owner@solo.test is a member of Solo, not of Acme: allowed.
+      const inv = await as(a, (tx) => createInvitation(tx, a, { email: 'owner@solo.test' }));
+      expect(inv.email).toBe('owner@solo.test');
+      // Accepting adds a membership to the SAME identity (no second users row).
+      const [acc] = await asOwner((tx) => q<{ user_id: string; company_id: string }>(tx, sql`select user_id, company_id from auth_accept_invitation('owner@solo.test', null, ${inv.id}::uuid)`));
+      expect(acc).toEqual({ user_id: solo.people.owner!.id, company_id: acme.id });
+      expect(await asOwner((tx) => q(tx, sql`select id from users where email = 'owner@solo.test'`))).toHaveLength(1);
+      const memberships = await asOwner((tx) => q(tx, sql`select company_id from company_memberships where user_id = ${solo.people.owner!.id}`));
+      expect(memberships).toHaveLength(2);
+      await expectAdminError(as(a, (tx) => createInvitation(tx, a, { email: 'owner@solo.test' })), /already a member/);
+      // listMembers reads the membership: lastActiveMs comes from company_memberships.last_active_at.
+      await asOwner((tx) => tx.execute(sql`update company_memberships set last_active_at = '2026-10-01T12:00:00Z' where company_id = ${acme.id} and user_id = ${solo.people.owner!.id}`));
+      const ms = await as(a, (tx) => listMembers(tx, acme.id));
+      expect(ms.find((m) => m.email === 'owner@solo.test')!.lastActiveMs).toBe(Date.UTC(2026, 9, 1, 12));
+      expect(ms.find((m) => m.email === 'admin@acme.test')!.lastActiveMs).toBeNull();
+      // Both memberships stay separate: Acme's directory does not leak Solo's people.
+      expect(ms.map((m) => m.email)).not.toContain('a@solo.test');
+      await asOwner((tx) => tx.execute(sql`delete from company_memberships where company_id = ${acme.id} and user_id = ${solo.people.owner!.id}`));
+    });
+
+    it('the plan member limit counts memberships + pending invitations (Free: 3)', async () => {
       const o = solo.people.owner!;
       await as(o, (tx) => createInvitation(tx, o, { email: 'a@solo.test' }));
       await as(o, (tx) => createInvitation(tx, o, { email: 'b@solo.test' }));
-      await expectAdminError(as(o, (tx) => createInvitation(tx, o, { email: 'c@solo.test' })), /free plan allows 3 users/);
+      await expectAdminError(as(o, (tx) => createInvitation(tx, o, { email: 'c@solo.test' })), /free plan allows 3 members/);
     });
   });
 
   describe('tokens', () => {
-    it('create + revoke: hash stored, plaintext shown once, audited without the secret', async () => {
+    it('create + revoke a company token: hash stored, plaintext shown once, audited without the secret', async () => {
       const a = acme.people.admin!;
-      const tok = await as(a, (tx) => createToken(tx, a, { kind: 'team', teamId: acme.teams.Mobile, name: 'Fleet' }, ENDPOINT));
-      expect(tok.plaintext).toMatch(/^aiobs_t_/);
+      const tok = await as(a, (tx) => createToken(tx, a, { kind: 'company', name: 'Fleet' }, ENDPOINT));
+      expect(tok.plaintext).toMatch(/^aiobs_c_/);
+      expect(tok.kind).toBe('company');
+      expect(tok.companyName).toBe('Acme');
       expect(tok.command).toBe(`npx ai-obs init --token ${tok.plaintext} --endpoint ${ENDPOINT}`);
-      expect(JSON.parse(tok.mdmJson!)).toMatchObject({ endpoint: ENDPOINT, token: tok.plaintext, team: 'Mobile' });
-      const [stored] = await asOwner((tx) => q<{ hash: string; prefix: string; user_id: string | null }>(tx, sql`select hash, prefix, user_id from ingest_tokens where id = ${tok.id}`));
-      expect(stored).toEqual({ hash: hashToken(tok.plaintext), prefix: tok.prefix, user_id: null });
+      expect(JSON.parse(tok.mdmJson!)).toMatchObject({ endpoint: ENDPOINT, token: tok.plaintext, company: 'acme' });
+      expect(tok.mdmFilename).toBe('ai-obs-acme.json');
+      const [stored] = await asOwner((tx) => q<{ hash: string; prefix: string; user_id: string | null; kind: string }>(tx, sql`select hash, prefix, user_id, kind from ingest_tokens where id = ${tok.id}`));
+      expect(stored).toEqual({ hash: hashToken(tok.plaintext), prefix: tok.prefix, user_id: null, kind: 'company' });
       expect(await as(a, (tx) => revokeToken(tx, a, { tokenId: tok.id }))).toMatch(/revoked/);
-      const [after] = await asOwner((tx) => q<{ revoked_at: Date | null }>(tx, sql`select revoked_at from ingest_tokens where id = ${tok.id}`));
-      expect(after!.revoked_at).not.toBeNull();
+      expect((await tokenState([tok.id]))[0]!.revoked_at).not.toBeNull();
       const rows = (await auditActions(acme)).filter((r) => r.action.startsWith('token.') && r.target === `token:${tok.id}`);
       expect(rows.map((r) => r.action)).toEqual(['token.create', 'token.revoke']);
       expect(JSON.stringify(rows)).not.toContain(tok.plaintext);
+      expect(rows[0]!.meta).toEqual({ kind: 'company', name: 'Fleet', prefix: tok.prefix });
     });
 
-    it('leads create team tokens only for led teams; members only user tokens for themselves', async () => {
+    it('company tokens: admins and leads create them, plain members cannot; user tokens are always the actor\'s own', async () => {
+      const admin = acme.people.admin!;
       const lead = acme.people.lead!;
       const m1 = acme.people.m1!;
-      const lt = await as(lead, (tx) => createToken(tx, lead, { kind: 'team', teamId: acme.teams.Platform, name: 'Platform fleet' }, ENDPOINT));
-      expect(lt.kind).toBe('team');
-      await expectAdminError(as(lead, (tx) => createToken(tx, lead, { kind: 'team', teamId: acme.teams.Mobile, name: 'x' }, ENDPOINT)), /leads of this team/);
-      await expectAdminError(as(m1, (tx) => createToken(tx, m1, { kind: 'team', teamId: acme.teams.Platform, name: 'x' }, ENDPOINT)), /leads of this team/);
-      const ut = await as(m1, (tx) => createToken(tx, m1, { kind: 'user', teamId: acme.teams.Platform, name: 'Laptop' }, ENDPOINT));
+      const lt = await as(lead, (tx) => createToken(tx, lead, { kind: 'company', name: 'Platform CI' }, ENDPOINT));
+      expect(lt.kind).toBe('company');
+      expect(lt.plaintext).toMatch(/^aiobs_c_/);
+      await expectAdminError(as(m1, (tx) => createToken(tx, m1, { kind: 'company', name: 'x' }, ENDPOINT)), /Only admins and leads can create company tokens/);
+      const ut = await as(m1, (tx) => createToken(tx, m1, { kind: 'user', name: 'Laptop' }, ENDPOINT));
+      expect(ut.plaintext).toMatch(/^aiobs_u_/);
       expect(ut.mdmJson).toBeUndefined();
-      // The lead sees the team token and their own, not m1's user token (RLS); m1 sees only their own.
+      const [own] = await asOwner((tx) => q<{ user_id: string }>(tx, sql`select user_id from ingest_tokens where id = ${ut.id}`));
+      expect(own!.user_id).toBe(m1.id);
+      // An admin's user token is the admin's own too.
+      const at = await as(admin, (tx) => createToken(tx, admin, { kind: 'user', name: 'Admin laptop' }, ENDPOINT));
+      const [aown] = await asOwner((tx) => q<{ user_id: string }>(tx, sql`select user_id from ingest_tokens where id = ${at.id}`));
+      expect(aown!.user_id).toBe(admin.id);
+      // The lead sees company tokens, not m1's user token (RLS); m1 sees only their own user token.
       const leadSees = await as(lead, (tx) => listTokens(tx, acme.id));
       expect(leadSees.map((t) => t.id)).toContain(lt.id);
       expect(leadSees.map((t) => t.id)).not.toContain(ut.id);
       expect((await as(m1, (tx) => listTokens(tx, acme.id))).map((t) => t.id)).toEqual([ut.id]);
+      // Admins keep seeing and revoking members' user tokens (D6).
+      expect((await as(admin, (tx) => listTokens(tx, acme.id, { onlyUserId: m1.id }))).map((t) => t.id)).toEqual([ut.id]);
       // The lead may not revoke m1's user token; m1 may.
       await expectAdminError(as(lead, (tx) => revokeToken(tx, lead, { tokenId: ut.id })), /not found|not allowed/);
       expect(await as(m1, (tx) => revokeToken(tx, m1, { tokenId: ut.id }))).toMatch(/revoked/);
+      // A lead revokes a company token; an admin revokes another member's user token.
+      expect(await as(lead, (tx) => revokeToken(tx, lead, { tokenId: lt.id }))).toMatch(/revoked/);
+      const ut2 = await as(m1, (tx) => createToken(tx, m1, { kind: 'user', name: 'Second laptop' }, ENDPOINT));
+      expect(await as(admin, (tx) => revokeToken(tx, admin, { tokenId: ut2.id }))).toMatch(/revoked/);
     });
 
-    it('RLS backstop: a member cannot insert a team token even without the app guard', async () => {
+    it('RLS backstop: a member cannot insert a company token even without the app guard', async () => {
       const m1 = acme.people.m1!;
       const code = await harness.pgErrorCode(
         as(m1, (tx) =>
-          tx.execute(sql`insert into ingest_tokens (company_id, team_id, kind, name, prefix, hash, created_by_user_id)
-            values (${acme.id}, ${acme.teams.Platform}, 'team', 'x', 'aiobs_t_x', 'deadbeef', ${m1.id})`),
+          tx.execute(sql`insert into ingest_tokens (company_id, kind, name, prefix, hash, created_by_user_id)
+            values (${acme.id}, 'company', 'x', 'aiobs_c_x', 'deadbeef', ${m1.id})`),
         ),
       );
       expect(code).toBe('42501');
+    });
+  });
+
+  describe('company tokens of someone who loses the right to mint them (D2, 4.2a)', () => {
+    const revokeAudits = async (tokenId: string) => (await auditActions(acme)).filter((r) => r.action === 'token.revoke' && r.target === `token:${tokenId}`);
+
+    it('lead -> member in their only team revokes their company tokens, once audited; user tokens are untouched', async () => {
+      const admin = acme.people.admin!;
+      const l1 = await addPerson(acme, 'Acme', 'lead1', 'member', 'Platform', 'lead');
+      const ct = await mint(l1, 'lead1 CI');
+      const ut = await as(l1, (tx) => createToken(tx, l1, { kind: 'user', name: 'lead1 laptop' }, ENDPOINT));
+      const msg = await as(admin, (tx) => setMemberRole(tx, admin, { teamId: acme.teams.Platform, userId: l1.id, role: 'member' }));
+      expect(msg).toBe('Now a team member. 1 company token they created was revoked.');
+      const st = await tokenState([ct.id, ut.id]);
+      expect(st.find((r) => r.id === ct.id)!.revoked_at).not.toBeNull();
+      expect(st.find((r) => r.id === ut.id)!.revoked_at).toBeNull();
+      const log = await revokeAudits(ct.id);
+      expect(log).toHaveLength(1);
+      expect(log[0]!.meta).toMatchObject({ kind: 'company', createdBy: l1.id, reason: 'creator no longer admin or lead' });
+    });
+
+    it('a lead of two teams removed from one keeps the token; removal from the last led team revokes it', async () => {
+      const admin = acme.people.admin!;
+      const l2 = await addPerson(acme, 'Acme', 'lead2', 'member', 'Platform', 'lead');
+      await as(admin, (tx) => addMember(tx, admin, { teamId: acme.teams.Mobile, userId: l2.id, role: 'lead' }));
+      const ct = await mint(l2, 'lead2 CI');
+      expect(await as(admin, (tx) => removeMember(tx, admin, { teamId: acme.teams.Platform, userId: l2.id }))).toBe('Member removed.');
+      expect((await tokenState([ct.id]))[0]!.revoked_at).toBeNull();
+      expect(await as(admin, (tx) => removeMember(tx, admin, { teamId: acme.teams.Mobile, userId: l2.id }))).toMatch(/1 company token they created was revoked/);
+      expect((await tokenState([ct.id]))[0]!.revoked_at).not.toBeNull();
+    });
+
+    it('admin -> member revokes company tokens unless they still lead a team; user tokens stay', async () => {
+      const admin = acme.people.admin!;
+      const ad2 = await addPerson(acme, 'Acme', 'admin2', 'admin', 'Mobile', 'member');
+      const ad3 = await addPerson(acme, 'Acme', 'admin3', 'admin', 'Mobile', 'lead');
+      const c2 = await mint(ad2, 'admin2 CI');
+      const c3 = await mint(ad3, 'admin3 CI');
+      const u2 = await as(ad2, (tx) => createToken(tx, ad2, { kind: 'user', name: 'admin2 laptop' }, ENDPOINT));
+      expect(await as(admin, (tx) => changeCompanyRole(tx, admin, { userId: ad2.id, role: 'member' }))).toBe('admin2@acme.test is now a member. 1 company token they created was revoked.');
+      expect(await as(admin, (tx) => changeCompanyRole(tx, admin, { userId: ad3.id, role: 'member' }))).toBe('admin3@acme.test is now a member.');
+      const st = await tokenState([c2.id, c3.id, u2.id]);
+      expect(st.find((r) => r.id === c2.id)!.revoked_at).not.toBeNull();
+      expect(st.find((r) => r.id === c3.id)!.revoked_at).toBeNull();
+      expect(st.find((r) => r.id === u2.id)!.revoked_at).toBeNull();
+      expect((await revokeAudits(c2.id))[0]!.meta).toMatchObject({ reason: 'creator no longer admin or lead' });
+      // Promoting back revokes nothing.
+      expect(await as(admin, (tx) => changeCompanyRole(tx, admin, { userId: ad2.id, role: 'admin' }))).toBe('admin2@acme.test is now an admin.');
     });
   });
 
@@ -313,13 +392,13 @@ describe.skipIf(skipReason !== null)(skipReason ? `admin console — SKIPPED: ${
       await expectAdminError(as(m1, (tx) => createTeam(tx, m1, { name: 'Hack' })), /Only company admins/);
       await expectAdminError(as(m1, (tx) => updateSettings(tx, m1, { individualVisibility: 'full', projectNaming: 'plain', retentionDays: 395 })), /Only company admins/);
       await expectAdminError(as(m1, (tx) => createInvitation(tx, m1, { email: 'x@y.test' })), /Only company admins/);
-      await expectAdminError(as(m1, (tx) => removeUser(tx, m1, { userId: acme.people.m2!.id })), /Only company admins/);
+      await expectAdminError(as(m1, (tx) => removeCompanyMember(tx, m1, { userId: acme.people.m2!.id })), /Only company admins/);
       await expectAdminError(as(m1, (tx) => changeCompanyRole(tx, m1, { userId: m1.id, role: 'admin' })), /Only company admins/);
     });
 
     it('a forged admin claim gets nothing from RLS either', async () => {
       const m1 = acme.people.m1!;
-      const forged: Actor = { ...m1, companyRole: 'admin' }; // passes the app guard; the DB checks users.company_role
+      const forged: Actor = { ...m1, companyRole: 'admin' }; // passes the app guard; the DB checks company_memberships.company_role
       // The company row is invisible for update (FOR UPDATE needs the admin policy), so nothing is created.
       await expect(as(forged, (tx) => createTeam(tx, forged, { name: 'Hack' }))).rejects.toThrow(/Company not found/);
       expect(await harness.pgErrorCode(as(forged, (tx) => tx.execute(sql`insert into teams (company_id, name) values (${acme.id}, 'Hack')`)))).toBe('42501');
@@ -333,31 +412,81 @@ describe.skipIf(skipReason !== null)(skipReason ? `admin console — SKIPPED: ${
     });
   });
 
-  describe('removing a user (ADR-0012)', () => {
+  describe('removing a member (ADR-0022, D1/D2/D8)', () => {
     it('refuses self-removal and demoting the last admin', async () => {
       const a = acme.people.admin!;
-      await expectAdminError(as(a, (tx) => removeUser(tx, a, { userId: a.id })), /yourself/);
-      await expectAdminError(as(a, (tx) => changeCompanyRole(tx, a, { userId: a.id, role: 'member' })), /at least one admin/);
+      await expectAdminError(as(a, (tx) => removeCompanyMember(tx, a, { userId: a.id })), /yourself/);
+      const only = solo.people.owner!;
+      await expectAdminError(as(only, (tx) => changeCompanyRole(tx, only, { userId: only.id, role: 'member' })), /at least one admin/);
     });
 
-    it('deletes raw telemetry, nulls user_id in rollups, keeps the rollup, audits', async () => {
+    it('keeps the history, deletes memberships and budgets, revokes their tokens (rows kept), audits', async () => {
       const a = acme.people.admin!;
-      const m1 = acme.people.m1!.id;
-      expect(await as(a, (tx) => removeUser(tx, a, { userId: m1 }))).toMatch(/removed/);
-      const left = await asOwner((tx) =>
-        q<{ users: number; turns: number; usage: number; tokens: number; rollups: number; anon: number }>(
+      const m1 = acme.people.m1!;
+      await as(a, (tx) => createBudget(tx, a, { scope: 'user', userId: m1.id, kind: 'tokens', limit: '1000' }));
+      const userTok = await as(m1, (tx) => createToken(tx, m1, { kind: 'user', name: 'm1 laptop' }, ENDPOINT));
+      const m1Company = await asOwner(async (tx) => {
+        const [r] = await q<{ id: string }>(
           tx,
-          sql`select (select count(*)::int from users where id = ${m1}) as users,
-                     (select count(*)::int from turns where company_id = ${acme.id}) as turns,
-                     (select count(*)::int from usage where company_id = ${acme.id}) as usage,
-                     (select count(*)::int from ingest_tokens where user_id = ${m1}) as tokens,
-                     (select count(*)::int from daily_rollups where company_id = ${acme.id}) as rollups,
-                     (select count(*)::int from daily_rollups where company_id = ${acme.id} and user_id is null) as anon`,
+          sql`insert into ingest_tokens (company_id, kind, name, prefix, hash, created_by_user_id)
+              values (${acme.id}, 'company', 'm1 CI', 'aiobs_c_m1', ${`h-m1-${Math.random()}`}, ${m1.id}) returning id`,
+        );
+        return r!.id;
+      });
+      const adminCompany = await mint(a, 'admin CI');
+      const msg = await as(a, (tx) => removeCompanyMember(tx, a, { userId: m1.id }));
+      expect(msg).toMatch(/m1@acme\.test removed from Acme\. 2 token\(s\) revoked/);
+      expect(msg).toMatch(/former member/);
+
+      const left = await asOwner((tx) =>
+        q<Record<string, number>>(
+          tx,
+          sql`select (select count(*)::int from users where id = ${m1.id}) as users,
+                     (select count(*)::int from company_memberships where user_id = ${m1.id} and company_id = ${acme.id}) as memberships,
+                     (select count(*)::int from team_memberships where user_id = ${m1.id} and company_id = ${acme.id}) as team_memberships,
+                     (select count(*)::int from budgets where user_id = ${m1.id}) as budgets,
+                     (select count(*)::int from turns where company_id = ${acme.id} and user_id = ${m1.id}) as turns,
+                     (select count(*)::int from usage where company_id = ${acme.id} and user_id = ${m1.id}) as usage,
+                     (select count(*)::int from daily_rollups where company_id = ${acme.id} and user_id = ${m1.id}) as rollups,
+                     (select count(*)::int from ingest_tokens where user_id = ${m1.id} and revoked_at is null) as active_tokens`,
         ),
       );
-      expect(left[0]).toEqual({ users: 0, turns: 0, usage: 0, tokens: 0, rollups: 1, anon: 1 });
-      const row = (await auditActions(acme)).find((r) => r.action === 'user.remove')!;
-      expect(row).toMatchObject({ target: `user:${m1}`, meta: { email: 'm1@acme.test' } });
+      // The identity, their turns, usage and rollups (still carrying user_id) survive; membership, team memberships and budget are gone.
+      expect(left[0]).toEqual({ users: 1, memberships: 0, team_memberships: 0, budgets: 0, turns: 1, usage: 1, rollups: 1, active_tokens: 0 });
+
+      const st = await tokenState([userTok.id, m1Company, adminCompany.id]);
+      expect(st.find((r) => r.id === userTok.id)!.revoked_at).not.toBeNull();
+      expect(st.find((r) => r.id === m1Company)!.revoked_at).not.toBeNull();
+      expect(st.find((r) => r.id === adminCompany.id)!.revoked_at).toBeNull();
+
+      const log = await auditActions(acme);
+      const row = log.find((r) => r.action === 'user.remove')!;
+      expect(row).toMatchObject({ target: `user:${m1.id}`, meta: { email: 'm1@acme.test', scope: 'company', revokedTokens: 2 } });
+      const revokes = log.filter((r) => r.action === 'token.revoke' && (r.target === `token:${userTok.id}` || r.target === `token:${m1Company}`));
+      expect(revokes).toHaveLength(2);
+      expect(revokes.every((r) => (r.meta as { reason?: string }).reason === 'member removed from company')).toBe(true);
+
+      // The ex-member's identity is hidden; their revoked tokens stay listed as "former member".
+      const listed = await as(a, (tx) => listTokens(tx, acme.id));
+      const ut = listed.find((t) => t.id === userTok.id)!;
+      expect(ut.userName).toBeNull();
+      expect(ut.revokedMs).not.toBeNull();
+      expect((await as(a, (tx) => listMembers(tx, acme.id))).map((m) => m.id)).not.toContain(m1.id);
+    });
+
+    it('an admin who left shows as "removed user" in the audit log and invitations', async () => {
+      const a = acme.people.admin!;
+      const ad2 = acme.people.admin2!;
+      const inv = await as(ad2, (tx) => createInvitation(tx, ad2, { email: 'late@acme.test' }));
+      await as(a, (tx) => removeCompanyMember(tx, a, { userId: ad2.id }));
+      const log = await as(a, (tx) => listAuditLog(tx, acme.id, { page: 1, pageSize: 200 }));
+      const earlier = log.rows.filter((r) => r.action === 'invitation.create' && (r.meta as { email?: string }).email === 'late@acme.test');
+      expect(earlier).toHaveLength(1);
+      expect(earlier[0]!.actor).toBe('system / removed user');
+      const pending = await as(a, (tx) => listPendingInvitations(tx, acme.id));
+      expect(pending.find((p) => p.id === inv.id)!.invitedBy).toBeNull();
+      // The identity row is not deleted.
+      expect(await asOwner((tx) => q(tx, sql`select id from users where id = ${ad2.id}`))).toHaveLength(1);
     });
 
     it('the admin reads the audit log, newest first', async () => {
@@ -365,7 +494,8 @@ describe.skipIf(skipReason !== null)(skipReason ? `admin console — SKIPPED: ${
       const log = await as(a, (tx) => listAuditLog(tx, acme.id, { page: 1, pageSize: 5 }));
       expect(log.total).toBeGreaterThan(10);
       expect(log.rows).toHaveLength(5);
-      expect(log.rows[0]!.action).toBe('user.remove');
+      // Entries of one transaction share a timestamp, so the removal's audit rows (token.revoke, user.remove) lead the log.
+      expect(log.rows.map((r) => r.action)).toContain('user.remove');
       expect(log.rows[0]!.actor).toBe('admin');
     });
   });

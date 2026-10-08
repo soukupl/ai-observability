@@ -13,7 +13,7 @@ export interface TurnRow {
   id: string;
   startedMs: number;
   durationMs: number;
-  teamId: string;
+  teamId: string | null;
   projectId: string | null;
   harness: string;
   model: string | null;
@@ -61,7 +61,7 @@ function toRow(r: Record<string, unknown>): TurnRow {
     id: String(r.id),
     startedMs: num(r.started_ms),
     durationMs: num(r.duration_ms),
-    teamId: String(r.team_id),
+    teamId: r.team_id ? String(r.team_id) : null,
     projectId: (r.project_id as string | null) ?? null,
     harness: String(r.harness),
     model: (r.model as string | null) ?? null,

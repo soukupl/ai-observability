@@ -3,12 +3,13 @@ import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDb, type Database } from '../src/client.js';
 import { runMigrations } from '../src/migrate.js';
-import { seed } from '../src/seed.js';
+import { DEMO_COMPANY_SLUG, DEMO_SECOND_COMPANY_SLUG, seed } from '../src/seed.js';
 
 /**
  * The demo seed writes daily_rollups with the worker's fold (ADR-0015): turn counts on the turn's
  * primary model × effort, tokens on each usage row's model × effort. Then raw reads (usage rows) and
- * rollup reads agree exactly on the seeded data. Own database (ai_obs_seed_test).
+ * rollup reads agree exactly on the seeded data. Also checks the demo tenancy (ADR-0022: alice is a member of Acme and
+ * Globex, the super admin of none) and that a second run is idempotent. Own database (ai_obs_seed_test).
  */
 const url = new URL(process.env.TEST_DATABASE_URL || 'postgres://ai_obs:ai_obs@localhost:5432/ai_obs_test');
 url.pathname = '/ai_obs_seed_test';
@@ -52,7 +53,7 @@ describe.skipIf(skip !== null)(skip ? `seed rollups - SKIPPED: ${skip}` : 'seed 
     const a = postgres(admin.toString(), { max: 1, onnotice: () => {} });
     await a.unsafe('drop database if exists "ai_obs_seed_test" with (force)').catch(() => {});
     await a.end({ timeout: 1 }).catch(() => {});
-  });
+  }, 30_000);
 
   const q = async (query: ReturnType<typeof sql>) => [...(await db.execute(query))] as Record<string, unknown>[];
   const dayOf = sql.raw(`(t.started_at at time zone 'UTC')::date::text`);
@@ -110,4 +111,71 @@ describe.skipIf(skip !== null)(skip ? `seed rollups - SKIPPED: ${skip}` : 'seed 
       order by 1, 2`);
     expect(roll).toEqual(raw);
   });
+  const tenancy = () =>
+    q(sql`select u.email, c.slug, m.company_role, t.name as primary_team
+      from company_memberships m join users u on u.id = m.user_id join companies c on c.id = m.company_id
+      left join teams t on t.id = m.primary_team_id order by c.slug, u.email`);
+
+  it('seeds Acme and Globex; alice is a member of both, the super admin of none (ADR-0022)', async () => {
+    const [cos] = await q(sql`select string_agg(slug || ':' || plan, ',' order by slug) as s from companies`);
+    expect(cos!.s).toBe(`${DEMO_COMPANY_SLUG}:team,${DEMO_SECOND_COMPANY_SLUG}:free`);
+    const ms = await tenancy();
+    expect(ms.filter((m) => m.email === 'alice@acme.example')).toEqual([
+      { email: 'alice@acme.example', slug: 'acme', company_role: 'admin', primary_team: 'Platform' },
+      { email: 'alice@acme.example', slug: 'globex', company_role: 'member', primary_team: 'Core' },
+    ]);
+    expect(ms.filter((m) => m.slug === 'globex')).toEqual([
+      { email: 'alice@acme.example', slug: 'globex', company_role: 'member', primary_team: 'Core' },
+      { email: 'gina@globex.example', slug: 'globex', company_role: 'admin', primary_team: 'Core' },
+    ]);
+    const [sa] = await q(sql`select count(m.id)::int as n from users u left join company_memberships m on m.user_id = u.id
+      where u.is_super_admin group by u.id`);
+    expect(sa).toEqual({ n: 0 });
+    const [globexTurns] = await q(sql`select count(*)::int as n from turns t join companies c on c.id = t.company_id
+      where c.slug = ${DEMO_SECOND_COMPANY_SLUG}`);
+    expect(globexTurns!.n).toBe(0);
+  });
+
+  it('a second seed run is idempotent (no duplicate users, same memberships)', async () => {
+    const before = await tenancy();
+    const [users1] = await q(sql`select count(*)::int as n from users`);
+    const quiet = console.log;
+    console.log = () => {};
+    try {
+      await seed(url.toString());
+    } finally {
+      console.log = quiet;
+    }
+    expect(await tenancy()).toEqual(before);
+    const [users2] = await q(sql`select count(*)::int as n from users`);
+    expect(users2!.n).toBe(users1!.n);
+    const [turns] = await q(sql`select count(*)::int as n from turns`);
+    expect(turns!.n).toBe(300);
+  }, 60_000);
+
+  it('a re-seed keeps what a demo identity has in another company (users are shared identities)', async () => {
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`set local role app_definer`);
+      await tx.execute(sql`with c as (insert into companies (name, slug) values ('Devco', 'devco') returning id),
+        a as (select id from users where email = 'alice@acme.example')
+        insert into company_memberships (company_id, user_id, company_role) select c.id, a.id, 'admin' from c, a`);
+      await tx.execute(sql`insert into turns (company_id, user_id, attribution, external_id, harness, started_at, ended_at)
+        select c.id, u.id, 'verified', 'devco-1', 'codex', now(), now()
+        from companies c, users u where c.slug = 'devco' and u.email = 'alice@acme.example'`);
+    });
+    const quiet = console.log;
+    console.log = () => {};
+    try {
+      await seed(url.toString());
+    } finally {
+      console.log = quiet;
+    }
+    expect((await tenancy()).filter((m) => m.slug === 'devco')).toEqual([
+      { email: 'alice@acme.example', slug: 'devco', company_role: 'admin', primary_team: null },
+    ]);
+    const [devTurns] = await q(sql`select count(*)::int as n from turns t join companies c on c.id = t.company_id where c.slug = 'devco'`);
+    expect(devTurns!.n).toBe(1);
+    const [acmeTurns] = await q(sql`select count(*)::int as n from turns t join companies c on c.id = t.company_id where c.slug = ${DEMO_COMPANY_SLUG}`);
+    expect(acmeTurns!.n).toBe(300);
+  }, 60_000);
 });

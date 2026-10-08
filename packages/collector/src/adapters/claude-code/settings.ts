@@ -13,6 +13,9 @@ import type { HookCommand, InstallScope } from '../types.js';
  */
 export const HOOK_EVENTS = ['SessionStart', 'UserPromptSubmit', 'Stop', 'StopFailure', 'SubagentStop', 'SessionEnd'] as const;
 
+/** SessionStart can print the token nudge and may run git; a stall must not hold session start for the 60 s default (C26). */
+export const SESSION_START_TIMEOUT_S = 5;
+
 /** ~/.claude, or $CLAUDE_CONFIG_DIR when set. */
 export function claudeDir(env: NodeJS.ProcessEnv = process.env): string {
   return env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude');
@@ -96,7 +99,7 @@ export function installHooksAt(path: string, hookCommand: (hookName: string) => 
   const hooks: Json = isObj(settings.hooks) ? { ...settings.hooks } : {};
   for (const event of HOOK_EVENTS) {
     const groups = withoutOurs(hooks[event]);
-    groups.push({ hooks: [{ type: 'command', command: hookCommand(event).shell }] });
+    groups.push({ hooks: [{ type: 'command', command: hookCommand(event).shell, ...(event === 'SessionStart' ? { timeout: SESSION_START_TIMEOUT_S } : {}) }] });
     hooks[event] = groups;
   }
   settings.hooks = hooks;

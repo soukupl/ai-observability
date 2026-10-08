@@ -25,7 +25,8 @@ function error(status: number, message: string, headers: Record<string, string> 
 
 /**
  * Bearer token → pre-lookup guard → lookup_ingest_token → per-token rate limit.
- * 401 unknown/revoked, 429 limited, 403 suspended company.
+ * 401 unknown, revoked or wrong-prefix token, or a user token whose membership was removed;
+ * 429 limited; 403 suspended company.
  *
  * The per-token bucket is keyed by token_id and only taken after a successful lookup, so random
  * bearers can neither get a fresh bucket each nor evict real tokens' buckets. Invalid bearers are
@@ -83,19 +84,26 @@ export async function handleIngest(request: Request, deps: IngestDeps): Promise<
   return Response.json(response, { headers: NO_STORE });
 }
 
-/** GET /api/v1/collector-config (BRIEF §5.1, §6). */
+/**
+ * GET /api/v1/collector-config (BRIEF §5.1, §6, ADR-0022). Besides naming and version, it names the
+ * token's company (the collector stores the token under `company.slug`) and, for a user token, the
+ * user's e-mail (`user` is null for a company token). Cached privately for 5 minutes per token.
+ */
 export async function handleCollectorConfig(request: Request, deps: IngestDeps): Promise<Response> {
   const auth = await authenticate(request, deps);
   if (!auth.ok) return auth.response;
   const env = deps.env ?? process.env;
+  const { token } = auth;
   const config: CollectorConfigResponse = {
-    project_naming: auth.token.projectNaming,
+    project_naming: token.projectNaming,
     min_collector_version: env.MIN_COLLECTOR_VERSION?.trim() || '0.0.0',
+    company: { name: token.company.name, slug: token.company.slug },
+    user: token.kind === 'user' && token.userEmail ? { email: token.userEmail } : null,
   };
   // The company's project salt (SEC-11): the collector HMACs hashed project keys with it. Best effort:
   // without it the collector falls back to plain SHA-256, so a read failure must not break the config.
   try {
-    const salt = await withIngestContext(deps.db, auth.token.companyId, async (tx) =>
+    const salt = await withIngestContext(deps.db, token.companyId, async (tx) =>
       (await rows<{ salt: string | null }>(tx, sql`select ingest_project_salt() as salt`))[0]?.salt,
     );
     if (salt) config.project_salt = salt;

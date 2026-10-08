@@ -1,4 +1,5 @@
-import { closeSync, openSync, readFileSync, rmSync, statSync, writeSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { closeSync, openSync, readFileSync, rmSync, statSync, utimesSync, writeSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { ensureDir } from './fsutil.js';
 
@@ -26,20 +27,45 @@ function isStale(path: string, staleMs: number): boolean {
 
 /**
  * Exclusive lock file (O_EXCL). Returns a release function, or null when another live process holds
- * it. A lock whose owner is dead, or older than `staleMs`, is taken over.
+ * it. A lock whose owner is dead, or that was not refreshed for `staleMs`, is taken over. The holder
+ * refreshes the lock's mtime while it holds it (heartbeat), so a long run (summaries, a large backlog)
+ * is never taken over by age while its process lives (C24). Release removes the file only while it is
+ * still this holder's.
  */
 export function tryLock(path: string, staleMs = 10 * 60_000): Release | null {
   ensureDir(dirname(path));
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const fd = openSync(path, 'wx', 0o600);
-      writeSync(fd, `${process.pid} ${new Date().toISOString()}`);
+      const stamp = `${process.pid} ${new Date().toISOString()} ${randomBytes(6).toString('hex')}`;
+      writeSync(fd, stamp);
       closeSync(fd);
+      const owned = (): boolean => {
+        try {
+          return readFileSync(path, 'utf8') === stamp;
+        } catch {
+          return false;
+        }
+      };
+      const beat = setInterval(
+        () => {
+          if (!owned()) return;
+          try {
+            const t = new Date();
+            utimesSync(path, t, t);
+          } catch {
+            /* removed meanwhile */
+          }
+        },
+        Math.max(1000, Math.min(60_000, Math.floor(staleMs / 4))),
+      );
+      beat.unref();
       let released = false;
       return () => {
         if (released) return;
         released = true;
-        rmSync(path, { force: true });
+        clearInterval(beat);
+        if (owned()) rmSync(path, { force: true });
       };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;

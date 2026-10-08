@@ -43,8 +43,8 @@ export async function getBudgetProgress(ctx: QueryCtx): Promise<BudgetsResult> {
   const nextMonth = dayString(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 1));
   const list = await rows<{ id: string; team_id: string | null; user_id: string | null; kind: 'tokens' | 'cost'; limit_value: unknown; user_name: string | null }>(
     ctx.tx,
-    sql`select b.id, b.team_id, b.user_id, b.kind, b.limit_value::float8 as limit_value, u.name as user_name
-        from budgets b left join users u on u.id = b.user_id and u.company_id = b.company_id
+    sql`select b.id, b.team_id, b.user_id, b.kind, b.limit_value::float8 as limit_value, coalesce(u.name, u.email) as user_name
+        from budgets b left join users u on u.id = b.user_id
         where b.company_id = ${ctx.viewer.companyId}::uuid order by b.kind, b.created_at`,
   );
   const teams = new Map((await listTeams(ctx)).map((t) => [t.id, t.name]));

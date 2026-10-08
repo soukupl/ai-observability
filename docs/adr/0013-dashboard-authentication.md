@@ -45,3 +45,15 @@ The schema reserves `identity_providers` per company so SAML/OIDC SSO and SCIM c
   the per-e-mail limit is the backstop.
 - **Consequences.** One extra click for invited users; an attacker's invitation now needs the victim's consent and shows
   who sent it. A deployment must list its operators in `SUPER_ADMIN_EMAILS` and keep the list current.
+
+## Amendment 2026-10-08 — one login, many companies (ADR-0022)
+
+- **Decided by:** Ladislav Soukup (owner, grilling Q1 and Q6 of 2026-10-08); details by Claude.
+
+- An invitation to an existing e-mail adds a **membership**; the invitee accepts it at `/invitations` (the e-mail links to
+  `/login?next=/invitations`). New e-mails still pick it on `/signup`. Signing up with an existing e-mail logs in.
+- A user with no membership goes back to the sign-up step; one whose companies are all suspended gets an invitations-only
+  sign-up step when invited.
+- The session carries `auth_sessions.active_company_id` (validated on every request; the header switcher changes it). The
+  last active company is `company_memberships.last_active_at`, so login lands where the user last was.
+- Plan limits count memberships. Consent (SEC-1) is unchanged: nothing is accepted automatically.

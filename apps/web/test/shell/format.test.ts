@@ -67,7 +67,7 @@ describe('navFor', () => {
   it('members get the views and My tokens', () => {
     expect(navFor({ companyRole: 'member', isSuperAdmin: false, company })).toEqual([...VIEW_NAV, TOKENS_NAV]);
   });
-  it('team leads also get Team tokens', () => {
+  it('team leads also get Company tokens', () => {
     expect(navFor({ companyRole: 'member', isSuperAdmin: false, company, teams: [{ role: 'lead' }] })).toEqual([...VIEW_NAV, TOKENS_NAV, LEAD_NAV]);
   });
   it('admins get the Admin link, super admins the Super link', () => {

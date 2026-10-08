@@ -82,7 +82,7 @@ export default async function TurnDetailPage({ params, searchParams }: Props) {
                 {turn.outcomeProvisional && <Badge tone="warn" title="Outcome may still change when the next prompt arrives">provisional</Badge>}
               </span>
             </Fact>
-            {turn.userName !== undefined && <Fact label="User">{turn.userName ?? (turn.userId ? 'unknown user' : '—')}</Fact>}
+            {turn.userName !== undefined && <Fact label="User">{turn.userName ?? (turn.userId ? 'former member' : '—')}</Fact>}
             {turn.attribution && !limited && (
               <Fact label="Attribution">
                 <AttributionBadge attribution={turn.attribution} />

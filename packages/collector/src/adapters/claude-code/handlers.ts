@@ -71,6 +71,7 @@ export async function handleHook(event: HookInvocation, ctx: CollectorContext, d
     }
   } else {
     st.transcriptPath = transcriptPath;
+    st.pkCwd ??= st.cwd; // state written by 0.1.x: pin the session's own cwd before it is overwritten
     st.cwd = event.cwd;
   }
   if (st.ended && event.hook !== 'SessionEnd') st.ended = false; // resumed
@@ -116,11 +117,11 @@ export async function handleHook(event: HookInvocation, ctx: CollectorContext, d
     const firstTurn = st.turns[0]?.agg.startedAt;
     const at = firstTurn !== undefined ? Math.min(firstTurn, receivedAt) : receivedAt;
     const harnessVersion = await cachedVersion(ctx.paths.state, deps.probe, ctx.now().getTime());
-    const project = await ctx.projectKey(st.cwd);
+    const project = await ctx.projectKey(st.pkCwd ?? st.cwd);
     em.events.unshift(sessionStartEvent({ harness: ctx.harness, sessionId, at, harnessVersion, project }));
     st.startedSent = true;
   }
-  await finish(em, ctx);
+  await finish(em, ctx, receivedAt);
 }
 
 /** Ends a session: remaining turns, open sub-agents, final outcome of every unsettled turn, session_end. */
@@ -134,17 +135,23 @@ function endSession(em: Emitter, reason: string, at: number): void {
   em.state.ended = true;
 }
 
-/** Enqueue, save the cursor, then (session over) summarize its turns. */
-async function finish(em: Emitter, ctx: CollectorContext): Promise<void> {
+/**
+ * Enqueue into the session's stream (pinned at its first hook, which always carries `session_start`;
+ * `capturedAt` = that job's received_at; C12, C15), save the cursor and the pin, then (session over)
+ * summarize its turns.
+ */
+async function finish(em: Emitter, ctx: CollectorContext, capturedAt: number): Promise<void> {
   // Turns about to fall out of the state file never see a follow-up: settle them now.
   settleTurns(em, evictedUnsettledTurns(em.state), em.state.lastSeen);
-  if (em.events.length) ctx.queue.enqueue(em.events);
+  const summarize = em.state.ended && em.state.digests.length > 0;
+  const key = em.events.length || summarize ? await ctx.streamFor(em.state, capturedAt) : null;
+  if (em.events.length) ctx.queue.enqueue(em.events, key);
   saveSession(ctx.state, em.state);
-  if (em.state.ended && em.state.digests.length) {
+  if (summarize) {
     const digests = em.state.digests;
     em.state.digests = [];
     saveSession(ctx.state, em.state);
-    await ctx.summarizeTurns(digests); // retries failures itself
+    await ctx.summarizeTurns(digests, key); // retries failures itself
   }
 }
 
@@ -165,9 +172,10 @@ export async function sweepCrashedSessions(ctx: CollectorContext): Promise<void>
       continue;
     }
     try {
+      st.pkCwd ??= st.cwd;
       const em = new Emitter(ctx.harness, st);
       endSession(em, 'crashed', st.lastSeen);
-      await finish(em, ctx);
+      await finish(em, ctx, now);
     } catch (err) {
       ctx.log.warn('claude-code: sweep failed for a session', { error: String(err).slice(0, 200) });
     }

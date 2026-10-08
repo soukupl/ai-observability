@@ -1,6 +1,6 @@
 # ADR-0011: Local file queue with idempotent ingest
 
-- **Status:** Accepted
+- **Status:** Accepted; amended 2026-10-08 by [ADR-0022](0022-company-memberships-and-token-kinds.md) (see the amendment below)
 - **Date:** 2026-10-05
 - **Deciders:** Ladislav Soukup (owner); options proposed by Claude
 - **Tags:** collector, api, reliability
@@ -14,7 +14,7 @@ double counted, and we do not want a long-running daemon on developer machines.
 
 The collector appends events to `~/.ai-obs/queue/*.ndjson` and sends batches (≤ 500 events / 1 MB) on
 hook triggers and `ai-obs flush`. Every event has a client-generated ULID `event_id`; the server stores
-seen IDs and ignores duplicates. The queue is capped (~50 MB / 30 days, oldest dropped first).
+seen IDs and ignores duplicates. The queue is capped (~50 MB / 30 days, oldest dropped first). (see the amendment of 2026-10-08)
 
 ## Consequences
 
@@ -46,5 +46,16 @@ seen IDs and ignores duplicates. The queue is capped (~50 MB / 30 days, oldest d
 - **Limits (DP-07, SEC-12).** Out-of-range counts reject the event (never clamp); tool keys, agent types and outcome signals are
   normalised server-side so an older or third-party collector cannot store paths or internal names. A team token matches a git e-mail only
   to a member of the token's team (SEC-10).
+  *Amended by ADR-0022: team tokens no longer exist; a company token matches a git e-mail to any member of its company (bound to the ingest company).*
 - **Ingest guard (SEC-9).** Failed authentications are answered from a negative cache and an IP budget before any DB call; the per-token
   bucket is keyed by token id after lookup.
+
+## Amendment 2026-10-08 (ADR-0022)
+
+- **Decided by:** Claude, within the owner-approved brief `docs/briefs/multi-company-tokens.md`.
+- The queue is split into streams per project and binding. Each session is bound when it is recorded to the token it resolved to (or left
+  open when there was no choice) and is sent only with that token; open data is sent after `ai-obs use`. Streams that cannot be sent (held,
+  rejected, unconfirmed) are exempt from the 30-day cap, which counts from when a stream became sendable; the size cap still applies and its
+  drops are counted. Delivery state and backoff are
+  per token. The files written by the 0.1.x collector are a frozen stream: they are moved to `queue/dead/pre-upgrade/` by the first
+  registration and never sent.

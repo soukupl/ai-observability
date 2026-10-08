@@ -12,7 +12,7 @@ describe('ingest tokens', () => {
 
   it.each([
     ['user', 'aiobs_u_'],
-    ['team', 'aiobs_t_'],
+    ['company', 'aiobs_c_'],
   ] as const)('generates a %s token with prefix, display prefix and hash', (kind, prefix) => {
     const t = generateToken(kind);
     expect(t.kind).toBe(kind);
@@ -31,7 +31,10 @@ describe('ingest tokens', () => {
 
   it('parses Bearer headers and rejects anything else', () => {
     expect(parseBearer('Bearer aiobs_u_xyz')).toEqual({ token: 'aiobs_u_xyz', kind: 'user' });
-    expect(parseBearer('bearer aiobs_t_xyz')).toEqual({ token: 'aiobs_t_xyz', kind: 'team' });
+    expect(parseBearer('bearer aiobs_c_xyz')).toEqual({ token: 'aiobs_c_xyz', kind: 'company' });
+    // The retired team-scoped prefix is not an ai-obs token any more (ADR-0022).
+    expect(parseBearer('Bearer aiobs_t_xyz')).toBeNull();
+    expect(parseBearer('Bearer aiobs_c_')).toBeNull();
     expect(parseBearer(null)).toBeNull();
     expect(parseBearer('Bearer ')).toBeNull();
     expect(parseBearer('Bearer aiobs_u_')).toBeNull();

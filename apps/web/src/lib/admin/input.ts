@@ -15,7 +15,7 @@ export function parse<T extends z.ZodType>(schema: T, input: unknown): z.infer<T
 /** FormData → plain object (last value wins; files ignored). */
 export function formObject(fd: FormData): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const [k, v] of fd.entries()) if (typeof v === 'string' && !k.startsWith('$ACTION')) out[k] = v;
+  for (const [k, v] of fd.entries()) if (typeof v === 'string' && !k.startsWith('$ACTION') && k !== '_companyId') out[k] = v;
   return out;
 }
 

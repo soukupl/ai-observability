@@ -24,7 +24,7 @@ const rows = <T>(r: unknown): T[] => r as T[];
 interface Candidate {
   id: string;
   companyId: string;
-  teamId: string;
+  teamId: string | null;
   userId: string | null;
   projectId: string | null;
   harness: string;
@@ -104,7 +104,7 @@ export async function detectRunaways(ctx: WorkerContext): Promise<number> {
 interface AlertRow {
   id: string;
   turnId: string;
-  teamId: string;
+  teamId: string | null;
   userId: string | null;
   startedAt: Date;
   tokens: number;
@@ -119,7 +119,7 @@ interface AlertRow {
 
 /**
  * Mails pending alerts, at most one digest per company per hour (the newest `notified_at` of the company).
- * Recipients: the user of each turn, always; in `full` visibility also the leads of the turn's team (with the
+ * Recipients: the user of each turn while they are still a member of the company; in `full` visibility also the leads of the turn's team (with the
  * person's name); in aggregates-only mode the company admins get an anonymous digest instead (ADR-0008, SEC-2).
  * Alerts are claimed (notified_at) before sending and released when every mail of the company failed.
  */
@@ -148,11 +148,15 @@ export async function sendRunawayDigests(ctx: WorkerContext): Promise<{ sent: nu
           c.tokens::float8 as tokens, c.cost_usd::float8 as "costUsd", c.duration_ms::float8 as "durationMs", c.reasons,
           tm.name as "teamName",
           coalesce(p.display_name, case when p.key like 'sha256:%' then left(p.key, 15) || '…' else p.key end) as "projectName",
-          coalesce(u.name, u.email) as person, u.email as "userEmail"
+          -- A removed member (D1: the turn keeps their user_id) is neither mailed nor named.
+          case when cm.user_id is not null then coalesce(u.name, u.email)
+               when c.user_id is not null then 'former member' end as person,
+          case when cm.user_id is not null then u.email end as "userEmail"
         from c
         left join teams tm on tm.id = c.team_id
         left join projects p on p.id = c.project_id
         left join users u on u.id = c.user_id
+        left join company_memberships cm on cm.company_id = ${co.companyId}::uuid and cm.user_id = c.user_id
         order by c.started_at`),
     );
     if (!claimed.length) continue;
@@ -162,7 +166,8 @@ export async function sendRunawayDigests(ctx: WorkerContext): Promise<{ sent: nu
         full
           ? sql`select u.email, m.team_id as "teamId" from team_memberships m join users u on u.id = m.user_id
                 where m.company_id = ${co.companyId}::uuid and m.role = 'lead'`
-          : sql`select u.email, null::uuid as "teamId" from users u where u.company_id = ${co.companyId}::uuid and u.company_role = 'admin'`,
+          : sql`select u.email, null::uuid as "teamId" from company_memberships cm join users u on u.id = cm.user_id
+                where cm.company_id = ${co.companyId}::uuid and cm.company_role = 'admin'`,
       ),
     );
     // email → items, kept apart for personal (own turns), named (leads) and anonymous (admins) digests

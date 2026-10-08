@@ -50,3 +50,13 @@ rows; deleting a user removes their raw rows and nulls `user_id` in rollups.
   past retention they show n/a.
 - **CSV exports** are capped at 50,000 rows and paged by keyset, so ties on `started_at` cannot repeat or skip rows; a capped turns
   CSV ends with a visible `TRUNCATED` row and the response carries `X-Truncated: true`.
+
+## Amendment 2026-10-08 — members are removed from a company, not deleted (ADR-0022)
+
+- **Decided by:** Ladislav Soukup (owner, confirmed the non-destructive removal); options proposed by Claude.
+
+- Admins now remove a **membership**, not a user. Removing one deletes the person's team memberships and per-user budgets in
+  that company and revokes their tokens there. Their raw telemetry and rollups are kept with their `user_id` and shown as
+  "former member".
+- The cascade above (raw rows deleted, rollups anonymised) now applies only when an operator deletes the identity itself;
+  no screen does that.

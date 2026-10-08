@@ -39,7 +39,7 @@ history (`src/jobs/rollups.ts: recomputeDay`, rules in `src/rollups/slice.ts`):
 - **Watermark.** `rollups.watermark` in `$WORKER_STATE_DIR/worker-state.json`, moved forward only when the whole
   pass succeeded, with a 10 minute overlap. There is no state table, so losing the file only costs a full re-fold.
 - **Dimensions.** company, day, team, user, project, harness, model, effort. `user_id` is null for unverified
-  team-token turns.
+  company-token turns.
 - **Counts** (turns, runs, duration, phase ms, outcomes) belong to the turn's own model and effort. **Tokens and
   requests** come from the `usage` rows and belong to each usage row's model and effort, so a mixed-model turn
   is priced right: a model that only appears in sub-agent usage gets a row with `turns = 0`. Totals equal the raw
@@ -47,7 +47,7 @@ history (`src/jobs/rollups.ts: recomputeDay`, rules in `src/rollups/slice.ts`):
 - **Cost is not stored.** `agg_rollups` computes it at query time.
 - Days outside the company's retention window, and days with no raw turns left, are never touched, so the
   permanent rollups cannot shrink when raw rows expire.
-- **Deleted users.** Deleting a user deletes their raw rows and sets `daily_rollups.user_id` to null (ADR-0012).
+- **Deleted users.** Removing a member from a company keeps their raw rows and rollups with their `user_id` (shown as "former member"; ADR-0012 amendment, ADR-0022), so nothing is anonymised. Only when an operator deletes the user identity itself are their raw rows deleted and `daily_rollups.user_id` set to null (ADR-0012); that is the path described below.
   Those anonymised rows are kept on every later rewrite of the day; only the other rows are rebuilt. To tell them
   apart from rows of unverified turns (also `user_id` null), every row the worker writes has an id that records
   whether it had a user: a random UUID with version digit `8` followed by `a` (had a user) or `0` (did not). A row
@@ -79,7 +79,7 @@ For each budget (team and/or user, period `month`, kind `tokens` or `cost`), on 
   marks are reset. The pure rules are `src/budgets/evaluate.ts`.
 - **Exactly once.** The worker claims the mark with a conditional `UPDATE ... RETURNING` before sending, so two workers
   never double-send. If every delivery fails, the claim is released and the next hourly pass retries.
-- **Recipients.** Team budget: company admins plus the leads of the budget's team. User budget: in
+- **Recipients.** Team budget: company admins (memberships with `company_role = admin`) plus the leads of the budget's team. User budget: in
   `individualVisibility = 'full'` the same plus the user; in **aggregates-only mode (the default) only the user**,
   because the mail names the person and their exact usage, which admins and leads must not see in that mode
   (ADR-0008). One mail per address, de-duplicated. Plain text plus simple HTML (`src/budgets/mail.ts`), linking to `${APP_URL}/overview`.

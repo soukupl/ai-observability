@@ -1,5 +1,9 @@
+import Link from 'next/link';
 import type { ReactNode } from 'react';
 import { logout } from '@/lib/auth/actions';
+import type { MembershipSummary } from '@/lib/auth/session';
+import { CompanySwitcher, CompanySwitchList } from './CompanySwitcher';
+import { companySwitcherModel } from './company-switcher-model';
 import { NavLinks } from './NavLinks';
 import { ThemeToggle } from './ThemeToggle';
 import { navFor } from './nav';
@@ -12,15 +16,22 @@ export interface ShellUser {
   companyRole: 'admin' | 'member';
   isSuperAdmin: boolean;
   teams: { id: string; name: string; role: 'member' | 'lead' }[];
-  company: { name: string; settings: { individualVisibility: 'aggregates-only' | 'full' } } | null;
+  /** The active company (null for super admins). */
+  company: { id: string; name: string; settings: { individualVisibility: 'aggregates-only' | 'full' } } | null;
+  /** Every company the user can switch to (ADR-0022); [] for super admins. */
+  memberships: MembershipSummary[];
 }
 
 /**
- * Dashboard frame: sidebar (a menu on phones), top bar with theme toggle and user menu, and the
- * visibility-mode footer line (the banner itself is rendered by the dashboard layout). Server component: only NavLinks / ThemeToggle are client code.
+ * Dashboard frame: sidebar (a menu on phones), top bar with the company switcher, theme toggle and user
+ * menu, and the visibility-mode footer line (the banner itself is rendered by the dashboard layout).
+ * The company switcher is in the header from md up and in the user menu (the phone placement); both
+ * render from companySwitcherModel. `pendingInvitations` adds an "Invitations (n)" link to the user menu.
+ * Server component: only NavLinks / ThemeToggle are client code.
  */
-export function AppShell({ user, children }: { user: ShellUser; children: ReactNode }) {
+export function AppShell({ user, pendingInvitations = 0, children }: { user: ShellUser; pendingInvitations?: number; children: ReactNode }) {
   const items = navFor(user);
+  const switcher = companySwitcherModel(user);
   const mode = user.company?.settings.individualVisibility;
   const role = user.isSuperAdmin ? 'super admin' : user.companyRole === 'admin' ? 'admin' : user.teams.some((t) => t.role === 'lead') ? 'lead' : 'member';
   return (
@@ -48,7 +59,7 @@ export function AppShell({ user, children }: { user: ShellUser; children: ReactN
             </nav>
           </details>
           <span className="font-semibold md:hidden">ai-obs</span>
-          <span className="hidden truncate text-sm text-zinc-500 md:inline dark:text-zinc-400">{user.company?.name ?? 'Platform'}</span>
+          <CompanySwitcher model={switcher} />
           <div className="ml-auto flex items-center gap-2">
             <ThemeToggle />
             <details className="relative">
@@ -62,6 +73,17 @@ export function AppShell({ user, children }: { user: ShellUser; children: ReactN
                   {user.company?.name ? `${user.company.name} · ` : ''}
                   {role}
                 </div>
+                {switcher.mode === 'switcher' && (
+                  <div className="mt-3 border-t border-zinc-100 pt-2 dark:border-zinc-800">
+                    <div className="mb-1 px-3 text-xs font-medium text-zinc-500 dark:text-zinc-400">Switch company</div>
+                    <CompanySwitchList items={switcher.items} />
+                  </div>
+                )}
+                {pendingInvitations > 0 && (
+                  <Link href="/invitations" className="mt-3 block rounded-md px-3 py-1.5 text-sm font-medium hover:bg-zinc-100 dark:hover:bg-zinc-800">
+                    Invitations ({pendingInvitations})
+                  </Link>
+                )}
                 <form action={logout} className="mt-3">
                   <button
                     type="submit"

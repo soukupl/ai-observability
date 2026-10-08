@@ -2,14 +2,14 @@ import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@ai-obs/db';
 import type { WorkerContext } from '../src/context.js';
-import { monthToDate, runBudgets } from '../src/jobs/budgets.js';
+import { monthToDate, recipients, runBudgets } from '../src/jobs/budgets.js';
 import { runRetention } from '../src/jobs/retention.js';
 import { recomputeDay, runRollups } from '../src/jobs/rollups.js';
 import { detectRunaways, sendRunawayDigests } from '../src/jobs/runaways.js';
 import { loadConfig } from '../src/lib/config.js';
 import type { MailMessage } from '../src/lib/mailer.js';
 import { memoryStateStore } from '../src/lib/state.js';
-import { addBudget, addNoise, addTurn, openWorkerTestDb, ownerTx, seedCompany, type Seeded } from './db-fixture.js';
+import { addBudget, addMembership, addNoise, addTurn, openWorkerTestDb, removeMembership, ownerTx, seedCompany, type Seeded } from './db-fixture.js';
 
 type Harness = Awaited<ReturnType<typeof openWorkerTestDb>>['h'];
 
@@ -23,6 +23,11 @@ let worker: Database;
 let co: Seeded;
 
 const rows = async <T = Record<string, unknown>>(q: ReturnType<typeof sql>) => (await owner.execute(q)) as unknown as T[];
+
+const alerts = (companyId: string) =>
+  rows<{ external_id: string; reasons: string[]; notified: boolean }>(sql`
+    select t.external_id, a.reasons, a.notified_at is not null as notified from runaway_alerts a join turns t on t.id = a.turn_id
+    where a.company_id = ${companyId} order by t.external_id`);
 
 function makeCtx(over: { now?: Date; mails?: MailMessage[]; failMail?: boolean } = {}): WorkerContext & { state: ReturnType<typeof memoryStateStore> } {
   const mails = over.mails ?? [];
@@ -575,6 +580,102 @@ describe('worker jobs against Postgres', () => {
       const sum = (u: Array<{ input: number }>) => u.reduce((a, r) => a + r.input, 0);
       expect(sum(await monthToDate(makeCtx(), scope, '2026-10-01', '2026-10-04'))).toBe(110);
       expect(sum(await monthToDate(makeCtx({ now: new Date('2026-10-31T23:00:00Z') }), scope, '2026-10-01', '2026-10-30'))).toBe(1);
+    });
+  });
+
+  describe('company memberships (ADR-0022)', () => {
+    const emailsOf = (mails: MailMessage[]) => mails.map((m) => m.to).sort();
+    const setRole = (companyId: string, userId: string, role: 'admin' | 'member') =>
+      ownerTx(owner, (tx) => tx.execute(sql`update company_memberships set company_role = ${role}::company_role where company_id = ${companyId}::uuid and user_id = ${userId}::uuid`));
+
+    it('mails a budget only to the admins of its own company, never to an admin of another company who is a member here', async (ctx) => {
+      if (skip) return ctx.skip();
+      const a = await seedCompany(owner, { slug: 'mm-a', plan: 'business' });
+      const b = await seedCompany(owner, { slug: 'mm-b', plan: 'business' });
+      // the identity alice@mm-a.test is an admin of A and an ordinary member of B
+      await addMembership(owner, a.alice, b.companyId, 'member', b.teamA);
+      expect(await recipients(makeCtx(), { companyId: b.companyId, teamId: null, userId: null, visibility: 'aggregates-only' })).toEqual(['alice@mm-b.test']);
+      expect(await recipients(makeCtx(), { companyId: a.companyId, teamId: null, userId: null, visibility: 'aggregates-only' })).toEqual(['alice@mm-a.test']);
+      // a user budget on the shared identity in B, full visibility: the identity is still a member of B, so it gets it, as does B's admin
+      expect(await recipients(makeCtx(), { companyId: b.companyId, teamId: null, userId: a.alice, visibility: 'full' })).toEqual(['alice@mm-a.test', 'alice@mm-b.test']);
+      // a user who is not a member of the company is not a recipient of that company's user budget
+      expect(await recipients(makeCtx(), { companyId: b.companyId, teamId: null, userId: a.bob, visibility: 'aggregates-only' })).toEqual([]);
+
+      await addBudget(owner, b.companyId, { teamId: b.teamA, kind: 'tokens', limit: 1000 });
+      await addTurn(owner, b.companyId, { key: 'mm-b1', at: '2026-10-05T09:00:00Z', stamp: AFTER_NOW, user: b.carol, team: b.teamA, usage: [[OPUS, 'high', 850, 0, 0, 0]] });
+      const mails: MailMessage[] = [];
+      await runBudgets(makeCtx({ mails }));
+      const mine = mails.filter((m) => m.to.endsWith('@mm-b.test') || m.to === 'alice@mm-a.test');
+      expect(emailsOf(mine)).toEqual(['alice@mm-b.test', 'bob@mm-b.test']); // B's admin and the lead of team A; never alice@mm-a.test
+    });
+
+    it('the runaway digest of an aggregates-only company reaches its own admins only, resolved through memberships', async (ctx) => {
+      if (skip) return ctx.skip();
+      const a = await seedCompany(owner, { slug: 'mm-run-a' });
+      const b = await seedCompany(owner, { slug: 'mm-run-b' });
+      await addMembership(owner, a.alice, b.companyId, 'member', b.teamA);
+      await addTurn(owner, b.companyId, { key: 'mm-huge', at: '2026-10-05T10:00:00Z', user: b.dave, team: b.teamB, usage: [[OPUS, 'high', 30_000_000, 0, 0, 0]] });
+      expect(await detectRunaways(makeCtx())).toBeGreaterThanOrEqual(1);
+      const mails: MailMessage[] = [];
+      await sendRunawayDigests(makeCtx({ mails }));
+      const ours = mails.filter((m) => /@mm-run-[ab]\.test$/.test(m.to) || m.to === 'alice@mm-run-a.test');
+      expect(emailsOf(ours)).toEqual(['alice@mm-run-b.test', 'dave@mm-run-b.test']);
+    });
+
+    it('a removed member is not mailed: not for a team budget, not in the runaway digest', async (ctx) => {
+      if (skip) return ctx.skip();
+      const x = await seedCompany(owner, { slug: 'mm-removed', plan: 'business' });
+      await setRole(x.companyId, x.bob, 'admin'); // bob: admin of the company and lead of team A
+      await addBudget(owner, x.companyId, { teamId: x.teamA, kind: 'tokens', limit: 1000 });
+      const budgetScope = { companyId: x.companyId, teamId: x.teamA, userId: null, visibility: 'aggregates-only' as const };
+      expect(await recipients(makeCtx(), budgetScope)).toEqual(['alice@mm-removed.test', 'bob@mm-removed.test']);
+      await addTurn(owner, x.companyId, { key: 'rm-huge', at: '2026-10-05T10:00:00Z', user: x.dave, team: x.teamB, usage: [[OPUS, 'high', 30_000_000, 0, 0, 0]] });
+      await removeMembership(owner, x.bob, x.companyId);
+
+      expect(await recipients(makeCtx(), budgetScope)).toEqual(['alice@mm-removed.test']);
+      await addTurn(owner, x.companyId, { key: 'rm-b1', at: '2026-10-05T09:00:00Z', stamp: AFTER_NOW, user: x.carol, team: x.teamA, usage: [[OPUS, 'high', 850, 0, 0, 0]] });
+      await detectRunaways(makeCtx());
+      const mails: MailMessage[] = [];
+      await runBudgets(makeCtx({ mails }));
+      await sendRunawayDigests(makeCtx({ mails }));
+      const ours = emailsOf(mails.filter((m) => m.to.endsWith('@mm-removed.test')));
+      expect(ours).toContain('alice@mm-removed.test');
+      expect(ours).not.toContain('bob@mm-removed.test');
+      // the identity and his raw telemetry are still there (ADR-0022): only the mail routing changed
+      expect(await rows(sql`select 1 from users where id = ${x.bob}`)).toHaveLength(1);
+    });
+
+    it('the user of a runaway turn who was removed before the digest is neither mailed nor named', async (ctx) => {
+      if (skip) return ctx.skip();
+      const x = await seedCompany(owner, { slug: 'mm-gone', plan: 'business' });
+      await addTurn(owner, x.companyId, { key: 'gone-huge', at: '2026-10-05T10:00:00Z', user: x.dave, team: x.teamB, usage: [[OPUS, 'high', 30_000_000, 0, 0, 0]] });
+      await detectRunaways(makeCtx());
+      await removeMembership(owner, x.dave, x.companyId);
+      const mails: MailMessage[] = [];
+      await sendRunawayDigests(makeCtx({ mails }));
+      const ours = mails.filter((m) => m.to.endsWith('@mm-gone.test'));
+      expect(ours.length).toBeGreaterThan(0); // the admins' digest still goes out
+      expect(emailsOf(ours)).not.toContain('dave@mm-gone.test');
+      expect(ours.map((m) => m.text).join('\n')).not.toMatch(/dave/i);
+    });
+
+    it('runaway baselines never mix companies: the same person is judged against their history in the turn\'s own company', async (ctx) => {
+      if (skip) return ctx.skip();
+      const a = await seedCompany(owner, { slug: 'mm-base-a' });
+      const b = await seedCompany(owner, { slug: 'mm-base-b' });
+      await addMembership(owner, a.dave, b.companyId, 'member', b.teamB); // dave@mm-base-a.test is also a member of B
+      // a high normal in A (100k tokens per turn), a low one in B (1k per turn)
+      for (let i = 0; i < 50; i++) {
+        const at = new Date(NOW.getTime() - (2 + i * 0.5) * 86_400_000).toISOString();
+        await addTurn(owner, a.companyId, { key: `base-a-${i}`, at, stamp: '2026-09-01T00:00:00Z', user: a.dave, team: a.teamB, usage: [[OPUS, 'high', 100_000, 0, 0, 0]] });
+        await addTurn(owner, b.companyId, { key: `base-b-${i}`, at, stamp: '2026-09-01T00:00:00Z', user: a.dave, team: b.teamB, usage: [[OPUS, 'high', 1000, 0, 0, 0]] });
+      }
+      // 10k tokens: 10x his B normal (a runaway there), a tenth of his A normal (would not be one if the baselines were mixed)
+      await addTurn(owner, b.companyId, { key: 'base-b-big', at: '2026-10-05T10:00:00Z', user: a.dave, team: b.teamB, usage: [[OPUS, 'high', 10_000, 0, 0, 0]] });
+      await addTurn(owner, b.companyId, { key: 'base-b-ok', at: '2026-10-05T10:30:00Z', user: a.dave, team: b.teamB, usage: [[OPUS, 'high', 1200, 0, 0, 0]] });
+      await detectRunaways(makeCtx());
+      expect((await alerts(b.companyId)).map((r) => r.external_id)).toEqual(['t-base-b-big']);
+      expect(await alerts(a.companyId)).toEqual([]);
     });
   });
 });

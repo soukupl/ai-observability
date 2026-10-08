@@ -17,7 +17,7 @@ const COLUMNS: Column[] = [
   { key: 'plan', header: 'Plan' },
   { key: 'status', header: 'Status' },
   { key: 'createdAt', header: 'Created', kind: 'datetime' },
-  { key: 'users', header: 'Users', kind: 'int' },
+  { key: 'users', header: 'Members', kind: 'int' },
   { key: 'teams', header: 'Teams', kind: 'int' },
   { key: 'admins', header: 'Admin contacts' },
 ];

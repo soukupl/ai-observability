@@ -3,7 +3,7 @@
 Zero-dependency Node CLI that records how AI coding agents are used: tokens, models, effort levels,
 phases, sub-agent runs, outcomes and one-line summaries. It reads exact numbers from harness hooks and
 local transcripts and sends batched, idempotent events to an ai-obs server.
-Design: [BRIEF §5](../../BRIEF.md), ADR-0001, ADR-0004, ADR-0005, ADR-0008, ADR-0011.
+Design: [BRIEF §5](../../BRIEF.md), ADR-0001, ADR-0004, ADR-0005, ADR-0008, ADR-0011, ADR-0022 (several tokens, per-repository choice).
 
 - Node ≥ 20, **no runtime dependencies** (only `node:` built-ins).
 - Harnesses: Claude Code and Codex. Each one is an adapter in `src/adapters/<name>/`.
@@ -15,19 +15,92 @@ npx ai-obs init --token aiobs_u_… --endpoint https://obs.example.com          
 npx ai-obs init --token aiobs_u_… --endpoint https://obs.example.com --project  # hooks in this repo only
 ```
 
+A user token (`aiobs_u_`) identifies you in one company. A company token (`aiobs_c_`, made by an admin or lead) writes
+into a company and matches you by git e-mail. A machine can hold several tokens (see "Several companies").
+
 `init` does the following:
 
-1. Checks the endpoint and token. A rejected token aborts with no changes. An unreachable server
-   only gives a warning, and events queue locally until it can be reached.
-2. Writes `~/.ai-obs/config.json` (mode 0600). A re-run keeps the existing `machine_id`.
-3. Copies the collector (`bin/`, `dist/`, `package.json`) to `~/.ai-obs/app`, so hooks keep working
+1. Checks the endpoint and token with `GET /api/v1/collector-config`, which also returns the company (name and slug)
+   and, for a user token, your e-mail. A 429 is retried after `Retry-After` (at most 3 tries and 60 s in total, never
+   waiting past that budget). A rejected token (401, 403, or a 429 that does not clear) aborts with no changes. An
+   unreachable or old server (no company in the reply) only gives a warning, and events queue locally until it can be
+   reached.
+2. Stores the token in `~/.ai-obs/config.json` (mode 0600) under the company slug (`--name` overrides) and caches its
+   collector-config per token. A re-run keeps the existing `machine_id`. The write runs under the worker lock.
+3. Moves the batches the 0.1.x collector left in `queue/*.ndjson` to `queue/dead/pre-upgrade/` (see "Upgrading from 0.1").
+4. Copies the collector (`bin/`, `dist/`, `package.json`) to `~/.ai-obs/app`, so hooks keep working
    after the npx cache is cleared.
-4. Installs hooks in every detected harness. Each hook runs
+5. Installs hooks in every detected harness. Each hook runs
    `<node> ~/.ai-obs/app/bin/ai-obs.js hook <harness> <hook>`. With `--project`, the hooks go into the
    repo's harness config, but the token is never written into the repo.
-5. Fetches `GET /api/v1/collector-config` to learn the company's project-naming mode (and its `project_salt`, if the server sends one).
 6. Prints the next steps only you can do. For Codex: **open Codex once and run `/hooks` to trust the
    new hooks**. Codex does not run untrusted hooks, so nothing is recorded until you do.
+
+### Several companies
+
+```sh
+npx ai-obs init --token aiobs_u_<acme> --endpoint https://obs.example.com          # registered as "acme"
+npx ai-obs token add --token aiobs_c_<globex> --endpoint https://obs.example.com   # registered as "globex"
+cd ~/work/billing && ai-obs use acme                                               # this repository reports to acme
+```
+
+- **With one token nothing changes:** every repository reports to it and no question is asked.
+- **With two or more tokens a repository must be assigned.** The key is the normalized git remote, else the
+  repository top-level path (the main checkout's, so every `git worktree` of a repository shares it), else the directory
+  (`ai-obs use` prints it). Until then its events stay in the local queue and
+  nothing is sent. The choice lives in `~/.ai-obs/projects.json`, never leaves the machine and is written only by `use`.
+- **The SessionStart question.** When a repository has no usable choice, the SessionStart hook puts a short text into the
+  agent's context: the project key, the registered token names and the command `ai-obs use <name> --project-dir <dir>`. The
+  agent asks you and runs it. It appears at most once per session (a changed situation is shown once more), also when the
+  repository's token is rejected, suspended or unconfirmed, and once after kept events were dropped. It needs no network
+  and carries only token names, company slugs, hosts, the sanitized project key and directory. The text is at most 1000
+  characters: when it is longer, it drops the token details first, then writes the collector's command once (then not at
+  all), then drops `--project-dir`, and only then lists fewer tokens (`… and N more`). `status` and `doctor` show the
+  same facts.
+- **Queued data stays with the company it was recorded for.** `use <name>` sends the data that waited because the
+  repository had no choice, and binds new sessions. Data recorded while the repository was assigned to another token
+  stays with that token. `ai-obs use <name> --move-queued` moves it (and prints how many events). A running session keeps
+  its token until it ends. A session that started while the repository had no choice sends what it records after
+  `use <name>` to `<name>`; what it recorded before is open data and goes wherever the repository's choice points when it
+  is sent (so if you change the choice again before it was sent, that part follows the new choice).
+- `ai-obs use <name> --all-held` assigns every repository whose data is waiting. When `init` / `token add` take you from
+  one token to two, they list the recently seen repositories that will now ask.
+- `ai-obs use --none` marks a repository as belonging to no company: new events are not recorded and the question stops.
+  Queued data is kept (shown as `opted-out`), and `--discard-queued` deletes it. `use --clear` removes any choice.
+- A damaged `projects.json` is never overwritten: `use` refuses, and `use --reset-projects` sets it aside as
+  `projects.json.broken-<id>` and starts an empty one.
+- `token remove <name>` forgets a token. Events queued for it stay on the machine.
+- Registering the same token at another endpoint (a corrected URL, `http` → `https`, a server that moved) makes it a new
+  identity: events queued for the old endpoint stay on the machine and repositories assigned to it ask again. The command
+  says how many; `ai-obs use <name> --move-queued` in each repository sends them to the new endpoint.
+
+### Replace, rotate, confirm
+
+- Same endpoint and same company slug as a registered token: the new token **replaces** it (rotation; data queued for the
+  old one is sent with the new one). The output says so, and says when the kind changed (user to company).
+- Same slug on another endpoint, or a name already in use: refused until you pass `--name <other>`.
+- Offline, or against an old server, the company is unknown. With a single token the entry is named `default` (or your
+  `--name`) and is confirmed by the first successful collector-config fetch, which renames `default` to the company slug.
+  With another token already registered, `--name` is required and the token sends nothing until
+  `ai-obs token confirm <name>` (or a later fetch) proves its company.
+
+### Upgrading from 0.1
+
+Version 0.2 reads a 0.1.x `config.json` but keeps no token from it: the server revoked every old token (ADR-0022), so
+run `ai-obs init --token <new token>` with a user token from the dashboard or a company token from your admin.
+
+- Any CLI command prints an upgrade banner while no valid token is registered. The 0.1.x hook runtime in `~/.ai-obs/app`
+  shows nothing until `init` copies the new one (`status` / `doctor` say when the runtime is outdated). With no token,
+  nothing is recorded.
+- **Pre-upgrade data is never sent.** Batches written by 0.1.x (`queue/*.ndjson`) cannot be tied to any token, so the first
+  successful `init` / `token add` moves them to `queue/dead/pre-upgrade/`, and `status` / `doctor` report once "N pre-upgrade
+  batches kept in queue/dead/pre-upgrade, not sent: tokens were reset". Delete the directory when you no longer need them.
+- Old `jobs/<id>.json` hook jobs and 0.1.x session state are still processed. A session state without a working directory
+  has its events dropped (logged).
+- `init` and `token add` refresh the hook runtime. `init` also reinstalls the hooks (the Claude Code SessionStart entry
+  gets a 5 s timeout).
+- Operators: see the rollout note in the root README about the per-IP failed-auth budget, and raise
+  `MIN_COLLECTOR_VERSION` to 0.2.0.
 
 **Node path caveat (nvm, fnm, Volta, asdf, Homebrew).** Hooks run the absolute path of the Node that
 executed `init` (`process.execPath`), so they do not depend on `PATH` at hook time. With a
@@ -48,35 +121,52 @@ Options:
 
 | Option | Purpose |
 |---|---|
+| `--name <name>` | Token name (`init`, `token add`): 1–63 of `a-z`, `0-9`, `-`. Default: the company slug the server reports |
+| `--endpoint <url>` | Server of this token. Default for `init` / `token add`: `AI_OBS_ENDPOINT`, else the endpoint in `config.json`. When that default was used and the server answers 401 / 403, the message suggests `--endpoint` |
 | `--harness claude-code,codex` | Limit setup to these harnesses |
 | `--project-dir <dir>` | Repo root for `--project`. Default: the git top level of the current directory |
-| `--git-email <email>` | Override the detected `git config user.email`. It is sent only to match team tokens to users |
+| `--git-email <email>` | Override the detected `git config user.email`. It is sent only so a company token (`aiobs_c_`) can match you to a member of the company (company-token matching) |
 | `--home <dir>` | Collector home. Works with every command |
+| `--yes` | With `uninstall --purge`: skip the confirmation |
 
 ## Commands
 
 | Command | Does |
 |---|---|
-| `init --token <t> --endpoint <url> [--project]` | Configure, as described above |
-| `doctor` | Checks the config, the endpoint, the token, the server's minimum version, each harness (installed, version supported, hooks installed), the hook runtime, the queue and the last send. Also checks that the node binary and script baked into the installed hook commands still exist (✗ with "run `ai-obs init` again" when they do not), and for Codex whether the hooks are still waiting to be trusted via `/hooks` (`!`). Prints ✓, ! or ✗ per check and exits 1 if any check shows ✗ |
-| `status` | Shows local state without using the network: endpoint, masked token, queue size and age, pending hook jobs, summaries waiting for retry, last send and last error |
-| `flush [--wait <s>]` | First runs every adapter's idle-session sweep (Codex ends sessions idle for 1 h, Claude Code ones silent for 24 h) and retries pending summaries, then sends the queue now and ignores the retry backoff. Data therefore does not wait for the next hook |
-| `uninstall [--purge] [--project-dir <dir>]` | Removes our hooks from user scope and from the current repo. `--purge` also deletes `~/.ai-obs`, including any unsent events |
+| `init [--token <t>] [--endpoint <url>] [--name <n>] [--project]` | Register the token and configure the harnesses, as described above. Without `--token` it keeps the registered tokens and only refreshes the runtime and hooks |
+| `token add --token <t> [--endpoint <url>] [--name <n>]` | Register another company's token. Changes no hooks |
+| `token list` | Registered tokens: name, kind, company, endpoint, state, and the repositories using each |
+| `token confirm <name>` | Fetch the company of an unconfirmed token and start sending with it |
+| `token remove <name>` / `token remove --invalid` | Forget a token. `--invalid` deletes malformed entries from `config.json` (nothing else deletes them) |
+| `use <name> [--project-dir <dir>]` | Assign this repository (key: remote, else top level, else path) to a token. Flags: `--move-queued` (also move data recorded under its previous token), `--all-held` (every repository whose data is waiting) |
+| `use --none [--discard-queued]` / `use --clear` / `use --reset-projects` | Stop recording this repository (keep or delete its queue) / remove its choice / set a damaged `projects.json` aside |
+| `doctor` | Checks the config, each token (endpoint, collector-config, rejection, company), the server's minimum version, this project's token, each harness (installed, version supported, hooks installed), the hook runtime, the queue and the last send. Also checks that the node binary and script baked into the installed hook commands still exist (✗ with "run `ai-obs init` again" when they do not), and for Codex whether the hooks are still waiting to be trusted via `/hooks` (`!`). Prints ✓, ! or ✗ per check and exits 1 if any check shows ✗ |
+| `status` | Shows local state without using the network: tokens and their state (a rejected or suspended token is marked), this project's token, queue size per token and what is waiting or kept (unassigned, opted out, unconfirmed, pre-upgrade), dropped events, pending hook jobs, summaries waiting for retry, last send and last error |
+| `flush [--wait <s>]` | First runs every adapter's idle-session sweep (Codex ends sessions idle for 1 h, Claude Code ones silent for 24 h) and retries pending summaries, then sends the queue now, ignores the retry backoff and retries a rejected token once. Held data stays held (exit 0) |
+| `uninstall [--purge [--yes]] [--project-dir <dir>]` | Removes our hooks from user scope and from the current repo. `--purge` also deletes `~/.ai-obs`, including tokens, assignments and any unsent events |
 | `hook <harness> <hook>` | Internal. Harness hooks call it. It always exits 0 |
 
 ## Files (`~/.ai-obs`, or `$AI_OBS_HOME`)
 
 | Path | Content |
 |---|---|
-| `config.json` | `{endpoint, token, machine_id, created_at, git_email?}`, mode 0600 |
+| `config.json` | Version 2, mode 0600: `{endpoint?, machine_id, created_at, git_email?, tokens[], invalid_tokens?, routing_epochs, legacy?}`. A token entry has `name`, `company {name, slug}`, `email?`, `git_email?` (the git e-mail of the directory it was registered in; sent with that token only, else the top-level `git_email`), `endpoint`, `token`, `added_at`, `prior_fps?` (rotation) and `provisional_name?`. `routing_epochs` records when the single token changed, so a session is bound by what was in force when it started. `legacy` holds the masked 0.1.x token. Malformed entries are kept under `invalid_tokens` |
+| `projects.json` | Mode 0600, written only by `ai-obs use`: project key → `{token, endpoint, company_slug?, token_fp, assigned_at}` or `{token: null, none: true}`. Never sent. Routing matches the token identity, not the name |
 | `project-secret` | Random 32-byte hex secret (mode 0600, created on first use, never sent) that keys the hash of a repo with no remote |
-| `queue/*.ndjson` | Event queue. Segments are named by ULID. The cap is ~50 MB / 30 days, and the oldest segments are dropped first (logged) |
-| `queue/dead/` | Batches the server refused as a whole (HTTP 400), kept for inspection (max 5 MB) |
-| `jobs/*.json` | Hook invocations waiting for the worker. They hold the raw hook payload and stay on this machine |
-| `state/<harness>/<session>.json` | Per-session adapter state, such as transcript cursors and provisional outcomes |
-| `state/summaries/<harness>.json` | Turn digests whose summary failed. They are retried for up to 5 attempts or 7 days and stay on this machine |
-| `state/collector-config.json` | Cached collector-config. TTL 6 h; after a failed fetch, the next try waits 10 min |
-| `state/delivery.json` | Last attempt, last success, last error and backoff |
+| `queue/p/o-<id>/`, `queue/p/t-<id>/` | One stream per project and binding, each with `stream.json` (plain key, binding) and `*.ndjson` segments named by ULID. `o-` = recorded while the project had no usable choice (open); `t-` = bound to one token |
+| `queue/u/…` | Streams whose project key could not be resolved when recorded (git timed out). A later flush adopts them into their project stream |
+| `queue/*.ndjson` | The pre-upgrade stream written by 0.1.x: frozen, never sent, moved to `queue/dead/pre-upgrade/` by the first registration |
+| `queue/dead/` | Batches the server refused as a whole (HTTP 400), kept for inspection (max 5 MB), and `pre-upgrade/` |
+| | Queue caps: ~50 MB for the whole queue (oldest segment first) and 30 days for streams that can be sent now, counted from when the stream became sendable (`sendable_since` in its `stream.json`), so waiting data released by `use` or a confirmed / unblocked token gets its full 30 days. Waiting, rejected, unconfirmed and opted-out streams are exempt from the age cap. Every drop is counted in `state/dropped.json` and shown in `status`, `doctor` and `flush`, and once in the next SessionStart text (`state/dropped-shown.json`) |
+| `jobs/*.v2.json` | Hook invocations waiting for the worker (0.1.x wrote `<id>.json`, still read). They hold the raw hook payload and stay on this machine |
+| `state/<harness>/<session>.json` | Per-session adapter state, such as transcript cursors, provisional outcomes and the session's pinned stream |
+| `state/summaries/<harness>.json` | Turn digests whose summary failed, with their stream key. They are retried for up to 5 attempts or 7 days and stay on this machine |
+| `state/collector-config/<name>.json` | Cached collector-config per token. TTL 6 h; after a failed fetch, the next try waits 10 min |
+| `state/delivery.json` | Per token: last attempt, last success, last error, backoff and a `blocked` flag (401 / 403) |
+| `state/dropped.json` | Counters of events dropped by the size cap, split into waiting and sendable |
+| `state/project-keys.json` | Working directory → project key cache (500 entries) that the hook reads without running git |
+| `state/nudged/<session>` | Marker that the SessionStart text was shown in a session (deleted after 7 days) |
+| `state/pre-upgrade.json` | Number of batches moved to `queue/dead/pre-upgrade/` and whether it was reported |
 | `log/collector.log` | Errors and warnings from hooks and the worker. Rotated at 1 MB. Prompts and paths are never logged |
 | `app/` | The collector copy that hooks run |
 | `worker.lock` | Held by the single worker or a `flush` |
@@ -84,24 +174,40 @@ Options:
 ## How hooks work
 
 ```
-harness hook ─▶ ai-obs hook <harness> <hook>      (< 100 ms, always exit 0)
+harness hook ─▶ ai-obs hook <harness> <hook>      (always exit 0)
                  ├─ read stdin JSON (50 ms idle timeout)
-                 ├─ write jobs/<ulid>.json  (payload, cwd, harness env vars minus secrets)
-                 └─ spawn detached worker ─▶ dist/worker-main.js
-                                               ├─ take worker.lock (or exit: the holder picks the job up)
-                                               ├─ for each job, oldest first: adapter.handleHook(job, ctx)
-                                               │     (+ adapter.sweepCrashedSessions after session-start hooks)
-                                               ├─ flush queue (≤ 500 events / 1 MB, gzip, Bearer token)
-                                               └─ release lock, re-scan jobs/
+                 ├─ write jobs/<ulid>.v2.json  (payload, cwd, harness env vars minus secrets)
+                 ├─ spawn detached worker ─▶ dist/worker-main.js
+                 └─ SessionStart only: print the token question when there is one (local files only)
+
+worker:  take worker.lock (or exit: the holder picks the job up)
+         ├─ for each job, oldest first: adapter.handleHook(job, ctx)
+         │     binds each session once, at its first event: project key + the token in force
+         │     (or "open" when there was no choice) → one queue stream per project and binding
+         │     (+ adapter.sweepCrashedSessions after session-start hooks)
+         ├─ flush: route every stream to its token (held streams are skipped); per token
+         │     ≤ 500 events / 1 MB per batch, gzip, that token's Bearer token and naming
+         └─ release lock, re-scan jobs/ (and run again when config.json or projects.json changed)
 ```
 
+- **SessionStart question.** The time budget counts in-process from hook entry (Node start-up is not counted). The hook
+  reads the project key from `state/project-keys.json`, and uses a cached key only while the directory's git config is
+  unchanged (a re-clone, `git init` or `git remote set-url` makes it resolve again). On a cache miss it runs git for at
+  most 40 ms, and only when less than 40 ms have passed, then kills it. When git is slower than that (often the first
+  session in a freshly cloned repository), this session gets no question: its events are kept, the worker caches the
+  key, and the next session asks. It does no network call and prints at most once per session and text. The Claude
+  Code `SessionStart` entry has `timeout: 5`. Every other hook prints nothing.
 - **Recursion guard.** `bin/ai-obs.js` exits immediately when `AI_OBS_SUMMARIZING` is set. The
   summarizer sets that variable on the headless model call it starts.
 - **Delivery.** A batch is acked (removed from the queue) only after a 2xx response. Server
-  duplicates and per-event rejections count as delivered. On network errors, 5xx, 429 (which honours
-  `Retry-After`) or 401/403, events stay queued with exponential backoff (30 s up to 1 h). Hook-triggered
-  flushes respect the backoff; `ai-obs flush` ignores it. On 413 the batch size is halved; on 400 the
-  batch goes to `queue/dead/`.
+  duplicates and per-event rejections count as delivered. State is per token: on network errors, 5xx or 429
+  (which honours `Retry-After`) that token's events stay queued with exponential backoff (30 s up to 1 h), and
+  the other tokens keep sending. A 401 or 403 (rejected or suspended) keeps that token's batches, stops sending
+  with it, and shows in `status`, `doctor` and the SessionStart text; automatic flushes skip it and `ai-obs flush`
+  tries it once. `maxBatches` per flush counts per token. Hook-triggered flushes respect the backoff;
+  `ai-obs flush` ignores it. On 413 the batch size is halved; on 400 the batch goes to `queue/dead/`.
+  Nothing is sent with a token whose collector-config was never fetched. Project and skill / MCP names are
+  rewritten at send time with the receiving company's naming mode and salt.
 - **Idempotency.** Event builders derive `event_id` from a seed plus the event time (`ulidFrom`), so
   re-processing a transcript after a crash produces the same IDs, and the server de-duplicates them.
 - **Crashed jobs.** A job is renamed to `*.processing` before it is handled. If the worker dies, the
@@ -121,7 +227,7 @@ in `src/adapters/index.ts`. The contract is in [`src/adapters/types.ts`](src/ada
 | `installedHookCommands({projectDir?})` | Optional. The shell commands of our installed hooks; `doctor` checks that their node binary and script still exist |
 | `installHooks({scope, projectDir?, hookCommand})` | Writes `hookCommand(hookName).shell` (or `.argv`) for each hook. Idempotent, and keeps unrelated config |
 | `uninstallHooks({scope, projectDir?})` | Removes only our entries; use `isAiObsHookCommand()` to recognize them |
-| `handleHook(invocation, ctx)` | Runs in the worker. Reads the transcript from the cursor in `ctx.state`, builds events with `src/events.ts` and calls `ctx.queue.enqueue(events)` |
+| `handleHook(invocation, ctx)` | Runs in the worker. Reads the transcript from the cursor in `ctx.state`, builds events with `src/events.ts` and enqueues them into the session's pinned stream (`ctx.streamFor(holder, capturedAt)`) |
 | `sweepCrashedSessions(ctx)` | Finishes sessions that never got an end hook and emits `session_end` with reason `crashed` |
 | `summarize(digests, ctx)` | One headless call to the cheapest model. Implement it with `summarizeWithCommand()`. Never call it directly; use `ctx.summarizeTurns(digests)` |
 
@@ -136,8 +242,8 @@ Shared, harness-neutral helpers:
 | `src/analysis/corrections.ts` | `looksLikeCorrection(nextPrompt)`: EN and CZ heuristics |
 | `src/analysis/digest.ts` | `buildDigest()`. Truncates the prompt and the last message to 300 chars. Digests are used locally only |
 | `src/analysis/summaries.ts` | `summarizeWithCommand`, `runSummaryCommand` (sets `AI_OBS_SUMMARIZING=1`, 120 s timeout), `buildSummaryPrompt`, `parseSummaryResponse` |
-| `src/project-key.ts` / `ctx.projectKey(cwd)` | Normalized git remote, or `sha256:`, following the company's naming mode |
-| `src/analysis/usage.ts` | Skill / MCP usage (ADR-0016): `parseMcpTool`, `addSkill`, `addMcp`, `mcpFromTools`, `mergeSkills` / `mergeMcp`, wire normalisation, `skillReadBy` (Codex SKILL.md reads) and `applyUsageNaming` / `hashUsageName`. Adapters pass **plain** names to `turnEvent` / `runEvent` (`skills`, `mcp`); `ctx.queue` hashes them in `hashed` mode before anything is queued |
+| `src/project-key.ts` `resolveProjectKey(cwd)` | The plain project key: normalized git remote, else git top level, else the directory. Hashing happens at send time |
+| `src/analysis/usage.ts` | Skill / MCP usage (ADR-0016): `parseMcpTool`, `addSkill`, `addMcp`, `mcpFromTools`, `mergeSkills` / `mergeMcp`, wire normalisation, `skillReadBy` (Codex SKILL.md reads) and `applyUsageNaming` / `hashUsageName`. Adapters pass **plain** names to `turnEvent` / `runEvent` (`skills`, `mcp`); the sender hashes them in `hashed` mode when it sends |
 
 Token convention (matches `packages/db`): `input` excludes cache reads and writes; `reasoning` is part
 of `output`; a turn's totals are the sum of its `usage` rows.
@@ -155,12 +261,15 @@ Outcome flow:
 The real hook and transcript format (field names, version 2.1.289) is documented in
 [`src/adapters/claude-code/FORMAT.md`](src/adapters/claude-code/FORMAT.md).
 
+**SessionStart output.** The token question is printed as JSON, `{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "…"}}`, one line.
+
 **Hooks.** The adapter writes `SessionStart`, `UserPromptSubmit`, `Stop`, `StopFailure`,
 `SubagentStop` and `SessionEnd` to `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR`), or to
 `<repo>/.claude/settings.json` with `--project`.
 
 - It adds one group per event, `{hooks:[{type:"command", command:"<node> <bin> hook claude-code <Event>"}]}`.
 - Re-running `init` replaces our entry, and `uninstall` removes only ours.
+- The `SessionStart` entry has `timeout: 5` (seconds). Re-running `init` rewrites it, so existing installs get it.
 - Before each change, the previous file is copied to `settings.json.ai-obs.bak`.
 - A file that is not valid JSON is never overwritten.
 
@@ -283,6 +392,8 @@ sub-agents and session end show up.
 to `~/.codex/hooks.json`, or to `<repo>/.codex/hooks.json` with `--project`. It appends its own
 matcher groups and leaves other hooks alone.
 
+**SessionStart output.** Codex gets the question as plain text on stdout. codex-cli 0.154.0 rejected the JSON form, so the switch `SESSION_START_OUTPUT` in `src/nudge.ts` is `text` for Codex (see [FORMAT.md](src/adapters/codex/FORMAT.md), "Hook output"). The Codex hook entries are not changed by this release, so they need no new trust.
+
 **After `init`, open Codex once and run `/hooks` to trust the new hooks.** Codex does not run untrusted
 hooks. `ai-obs doctor` lists the ai-obs hooks that are still untrusted.
 
@@ -313,7 +424,7 @@ How the adapter works:
 | Variable | Effect |
 |---|---|
 | `AI_OBS_HOME` | Collector home (default `~/.ai-obs`). It is passed on to the worker |
-| `AI_OBS_ENDPOINT` | Overrides the configured endpoint at runtime (not persisted). `init` also uses it as the default `--endpoint` |
+| `AI_OBS_ENDPOINT` | Default `--endpoint` for `init` / `token add` only. Each token keeps its own endpoint, so it has no effect at runtime |
 | `AI_OBS_SUMMARIZING` | Set by the collector on its own summarizer process. When it is set, every `ai-obs` invocation exits 0 immediately |
 | `AI_OBS_CODEX_SUMMARY_MODEL` | Model for Codex turn summaries. By default it is the smallest listed model in `$CODEX_HOME/models_cache.json` |
 | `CODEX_HOME` | Codex home (default `~/.codex`). It is read from the hook environment |
@@ -324,7 +435,7 @@ How the adapter works:
 - **Never sent:** prompts, responses, code, diffs or file paths (ADR-0008). The only model-written text
   that leaves the machine is the ≤ 140-char turn summary. Before it is sent, it is whitespace-collapsed
   and any path in it is reduced to its last segment.
-- **Project identity:** the normalized git remote, with credentials, `user@` and port stripped.
+- **Project identity:** the normalized git remote, with credentials, `user@` and port stripped. The queue keeps the plain key and plain skill / MCP names (local files, mode 0600); they are hashed or named **at send time** with the receiving company's salt and naming mode, so each company sees only its own form. `projects.json` and the assignment key never leave the machine, and neither does a plain path key.
   - **`hashed` mode:** `sha256:` + a hash of that remote, with no name. When collector-config sends a
     per-company `project_salt` (this server does, since migration 0004), the hash is HMAC-SHA256 keyed by it (the same on every machine, so
     keys still agree). Without one (an older server) it is plain sha256, which anyone with the key (the server, DB
@@ -336,26 +447,29 @@ How the adapter works:
     home-directory path (or the OS user name in it). The key is per machine; if the secret cannot be
     created, the collector falls back to plain sha256 of the path. Keys made before this change
     (plain sha256) differ, so such a project shows up once more as a new project.
-  - Until the server has been reached once, the collector assumes `hashed` without a salt.
+  - A token whose collector-config was never fetched sends nothing (its events wait), so no unsalted hash of a project is created.
 - **Skill and MCP names** (ADR-0016) follow the same mode: plain skill, MCP server and tool names in `plain`, `sha256:` +
   HMAC-SHA256 under the company salt (plain sha256 without one) of `skill:<name>`, `mcp:<server>`, `mcp:<server>/<tool>` in
-  `hashed`, applied in `ctx.queue` before an event reaches the queue. Skill arguments and MCP inputs / outputs are never read.
+  `hashed`, applied by the sender when it sends the batch. Skill arguments and MCP inputs / outputs are never read.
   MCP reliability (`mcp_stats`: errors, refused calls, latency histogram) comes from pairing each call with its result;
   error texts are only matched locally (to tell a refusal from an error) and never sent.
 - **Hook job files** keep only harness-related env vars (`CLAUDE_*`, `CODEX_*`, `AI_OBS_*`) and drop
   any whose name suggests a secret. Job files are deleted after processing.
 - **Local only:** prompt digests for summaries, edit fingerprints for revert detection (hashes only)
   and next-prompt correction checks.
-- The git e-mail is sent only in the batch `identity`, to match team tokens to users.
-- The token lives only in `~/.ai-obs/config.json` (0600), never in a repo.
+- The git e-mail is sent only in the batch `identity`, so a company token (`aiobs_c_`) can match you to a member of the company (user tokens `aiobs_u_` already identify you).
+- The SessionStart question carries only token names, company slugs, hosts, the sanitized project key and directory, never a token.
+- Tokens live only in `~/.ai-obs/config.json` (0600), never in a repo.
 
 ## Development
 
 ```sh
 pnpm --filter ai-obs typecheck
 pnpm --filter ai-obs test     # = vitest run --project collector (no network: local http servers, temp homes)
-pnpm --filter ai-obs build    # dist/; the real-process hook timing test (< 100 ms) runs only when dist exists
+pnpm --filter ai-obs build    # dist/; the real-process hook tests (test/hook-process.test.ts) run only when dist exists
 ```
+
+Test helpers (`test/helpers.ts`): `writeTestConfig` / `writeTestTokens` (registered tokens with their caches), `writeProjects`, `tokenResponder` (per-token fake server), `okResponder`, `gitRepo`, and `queueStore` (`test/queue-helpers.ts`). The multi-company definition-of-done test is `test/multi-token.integration.test.ts`: two local servers, the real CLI, hook and worker.
 
 The Claude Code fixture turn ids are prefixed `cc-fixture-`, so demos that send them do not collide with
 `packages/protocol/fixtures/valid-batch.json` (`turn-1`, …); a test guards this.

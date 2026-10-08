@@ -122,14 +122,17 @@ export async function recipients(ctx: WorkerContext, b: Pick<BudgetRow, 'company
   const found = rows<{ email: string }>(
     await ctx.db.execute(
       onlyTheUser
-        ? sql`select u.email from users u where u.id = ${b.userId}::uuid and u.company_id = ${b.companyId}`
+        ? sql`select u.email from company_memberships cm join users u on u.id = cm.user_id
+            where cm.company_id = ${b.companyId} and cm.user_id = ${b.userId}::uuid`
         : sql`
-      select u.email from users u where u.company_id = ${b.companyId} and u.company_role = 'admin'
+      select u.email from company_memberships cm join users u on u.id = cm.user_id
+        where cm.company_id = ${b.companyId} and cm.company_role = 'admin'
       union
       select u.email from team_memberships m join users u on u.id = m.user_id
         where m.company_id = ${b.companyId} and m.role = 'lead' and ${b.teamId}::uuid is not null and m.team_id = ${b.teamId}::uuid
       union
-      select u.email from users u where ${b.userId}::uuid is not null and u.id = ${b.userId}::uuid and u.company_id = ${b.companyId}`,
+      select u.email from company_memberships cm join users u on u.id = cm.user_id
+        where ${b.userId}::uuid is not null and cm.user_id = ${b.userId}::uuid and cm.company_id = ${b.companyId}`,
     ),
   );
   return [...new Set(found.map((r) => r.email.toLowerCase()))].sort();

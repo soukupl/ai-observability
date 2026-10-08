@@ -5,6 +5,7 @@ import type { CollectorContext, HarnessAdapter, HookInvocation } from '../../src
 import { createContext } from '../../src/context.js';
 import { nullLogger } from '../../src/log.js';
 import type { IngestEvent } from '../../src/protocol-types.js';
+import type { StreamKey } from '../../src/queue.js';
 import { tmpHome, writeTestConfig } from '../helpers.js';
 
 export const FIXTURES = new URL('./fixtures/', import.meta.url);
@@ -23,6 +24,8 @@ export interface CodexTestEnv {
   adapter: HarnessAdapter;
   ctx: CollectorContext;
   events: IngestEvent[];
+  /** the stream key of every enqueue call, in order */
+  keys: Array<StreamKey | null>;
   /** runs one hook through the adapter like the worker does (incl. the sweep after SessionStart) */
   hook(name: string, payload: Record<string, unknown>, receivedAt?: string): Promise<void>;
   writeMain(lines: readonly string[]): void;
@@ -44,16 +47,21 @@ export function codexTestEnv(opts: { now?: string; deps?: CodexAdapterDeps } = {
   chmodSync(bin, 0o755);
   const adapter = createCodexAdapter({ home: codexHome, stopWaitMs: 0, codexBin: bin, version: async () => '0.154.0', ...opts.deps });
   const events: IngestEvent[] = [];
+  const keys: Array<StreamKey | null> = [];
   const now = new Date(opts.now ?? '2026-10-05T10:20:00Z');
   const ctx = createContext({
     adapter,
     config,
     paths,
-    queue: { enqueue: (e) => void events.push(...e) },
+    queue: {
+      enqueue: (e, key) => {
+        events.push(...e);
+        keys.push(key);
+      },
+    },
     log: nullLogger,
-    projectNaming: 'plain',
     now: () => now,
-    resolveProject: async () => ({ key: 'github.com/acme/app', name: 'app' }),
+    resolveProject: async () => 'github.com/acme/app',
   });
   return {
     codexHome,
@@ -62,6 +70,7 @@ export function codexTestEnv(opts: { now?: string; deps?: CodexAdapterDeps } = {
     adapter,
     ctx,
     events,
+    keys,
     async hook(name, payload, receivedAt = now.toISOString()) {
       const inv: HookInvocation = { harness: 'codex', hook: name, payload: { session_id: SESSION, transcript_path: mainPath, cwd: '/work/acme-app', ...payload }, cwd: '/work/acme-app', env: {}, receivedAt };
       await adapter.handleHook(inv, ctx);

@@ -16,7 +16,7 @@ export interface TurnListRow {
   id: string;
   startedMs: number;
   durationMs: number;
-  teamId: string;
+  teamId: string | null;
   teamName: string | null;
   projectId: string | null;
   projectName: string | null;
@@ -76,8 +76,8 @@ function mapRow(r: Record<string, unknown>, lk: Lookups, withUsers: boolean, cos
     id: String(r.id),
     startedMs,
     durationMs: num(r.duration_ms),
-    teamId: String(r.team_id),
-    teamName: lk.team.get(String(r.team_id)) ?? null,
+    teamId: r.team_id ? String(r.team_id) : null,
+    teamName: r.team_id ? (lk.team.get(String(r.team_id)) ?? null) : 'No team',
     projectId: (r.project_id as string | null) ?? null,
     projectName: r.project_id ? (lk.project.get(String(r.project_id)) ?? null) : null,
     harness: String(r.harness),
@@ -119,8 +119,8 @@ async function directRows(
   const conds = turnConds(ctx, d);
   if (outcome) conds.push(sql`t.outcome = ${outcome}::outcome`);
   if (after) conds.push(sql`(t.started_at < ${after.raw}::timestamptz or (t.started_at = ${after.raw}::timestamptz and t.id > ${after.id}::uuid))`);
-  const userCols: SQL = withUsers ? sql`, t.user_id, u.name as user_name` : sql``;
-  const join: SQL = withUsers ? sql`left join users u on u.id = t.user_id and u.company_id = t.company_id` : sql``;
+  const userCols: SQL = withUsers ? sql`, t.user_id, coalesce(u.name, u.email) as user_name` : sql``;
+  const join: SQL = withUsers ? sql`left join users u on u.id = t.user_id` : sql``;
   return rows<Record<string, unknown>>(
     ctx.tx,
     sql`select ${LIST_COLS}, (t.user_id = ${ctx.viewer.id}::uuid) as is_mine ${userCols}
@@ -414,8 +414,8 @@ export async function getTurnDetail(ctx: QueryCtx, turnId: string, atMs?: number
   const lk = await lookups(ctx);
   const withUsers = canSeeUsers(ctx.viewer);
 
-  const userCols: SQL = withUsers ? sql`, t.user_id, u.name as user_name` : sql``;
-  const join: SQL = withUsers ? sql`left join users u on u.id = t.user_id and u.company_id = t.company_id` : sql``;
+  const userCols: SQL = withUsers ? sql`, t.user_id, coalesce(u.name, u.email) as user_name` : sql``;
+  const join: SQL = withUsers ? sql`left join users u on u.id = t.user_id` : sql``;
   const [own] = await rows<Record<string, unknown>>(
     ctx.tx,
     sql`select ${LIST_COLS}, (extract(epoch from t.ended_at) * 1000)::bigint as ended_ms, t.phases_ms, t.tools, t.files_touched,

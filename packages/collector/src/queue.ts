@@ -1,7 +1,18 @@
-import { appendFileSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { appendFileSync, existsSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { ensureDir, writeFileAtomic } from './fsutil.js';
+import { ensureDir, errorMessage, readJsonFile, writeFileAtomic, writeJsonAtomic } from './fsutil.js';
 import { nullLogger, type Logger } from './log.js';
+import { isPathKey } from './project-key.js';
+import {
+  adoptKey,
+  resolveStream,
+  streamDirName,
+  unresolvedDirName,
+  type Binding,
+  type RoutingView,
+  type StreamIdentity,
+} from './projects.js';
 import { MAX_BATCH_BYTES, MAX_BATCH_EVENTS, type IngestEvent } from './protocol-types.js';
 import { decodeTime, ulid } from './ulid.js';
 
@@ -14,6 +25,10 @@ export interface QueueOptions {
   segmentBytes?: number;
   log?: Logger;
   now?: () => number;
+  /** enforce the caps after each enqueue (default true; streams opened by a QueueStore pass false: the store caps) */
+  autoCap?: boolean;
+  /** where refused batches go (default `<dir>/dead`; the store uses the shared queue/dead) */
+  deadDir?: string;
 }
 
 export interface BatchLimits {
@@ -44,6 +59,12 @@ export interface QueueStats {
 
 /** Room left in a batch for the envelope (schema, collector, machine, identity). */
 const ENVELOPE_RESERVE = 4096;
+
+export interface SegmentInfo {
+  file: string;
+  size: number;
+  createdAt: number;
+}
 const SEGMENT_RE = /^[0-9A-HJKMNP-TV-Z]{26}\.ndjson$/;
 
 /**
@@ -57,6 +78,8 @@ export class EventQueue {
   private readonly segmentBytes: number;
   private readonly log: Logger;
   private readonly now: () => number;
+  private readonly autoCap: boolean;
+  private readonly deadDir: string;
 
   constructor(
     readonly dir: string,
@@ -67,9 +90,11 @@ export class EventQueue {
     this.segmentBytes = opts.segmentBytes ?? 1024 * 1024;
     this.log = opts.log ?? nullLogger;
     this.now = opts.now ?? Date.now;
+    this.autoCap = opts.autoCap ?? true;
+    this.deadDir = opts.deadDir ?? join(dir, 'dead');
   }
 
-  /** Appends events (one write per call) and enforces the cap. */
+  /** Appends events (one write per call) and enforces the cap (unless `autoCap` is false). */
   enqueue(events: readonly IngestEvent[]): void {
     if (!events.length) return;
     ensureDir(this.dir);
@@ -79,7 +104,7 @@ export class EventQueue {
     const target =
       newest && newest.size + data.length <= this.segmentBytes ? newest.file : `${ulid(this.now())}.ndjson`;
     appendFileSync(join(this.dir, target), data, { mode: 0o600 });
-    this.enforceCap();
+    if (this.autoCap) this.enforceCap();
   }
 
   /** Oldest-first batch of at most `maxEvents` events / `maxBytes` bytes, or null when empty. */
@@ -143,9 +168,9 @@ export class EventQueue {
     }
   }
 
-  /** Moves a batch the server refused as a whole into dead/ (capped at 5 MB) and acks it. */
-  deadLetter(batch: QueueBatch, reason: string): void {
-    const deadDir = join(this.dir, 'dead');
+  /** Moves a batch the server refused as a whole into dead/ (capped at 5 MB) and acks it. `meta` is added to the log line. */
+  deadLetter(batch: QueueBatch, reason: string, meta: Record<string, unknown> = {}): void {
+    const deadDir = this.deadDir;
     try {
       ensureDir(deadDir);
       const body = batch.events.map((e) => JSON.stringify(e)).join('\n') + '\n';
@@ -160,7 +185,7 @@ export class EventQueue {
     } catch (err) {
       this.log.error('queue: dead-letter write failed', { error: String(err) });
     }
-    this.log.warn('queue: batch dead-lettered', { events: batch.events.length, reason: reason.slice(0, 200) });
+    this.log.warn('queue: batch dead-lettered', { ...meta, events: batch.events.length, reason: reason.slice(0, 200) });
     this.ack(batch);
   }
 
@@ -197,7 +222,8 @@ export class EventQueue {
     };
   }
 
-  private segments(dir = this.dir): Array<{ file: string; size: number; createdAt: number }> {
+  /** Segment files of this queue, oldest first (name order = age order). */
+  segments(dir = this.dir): SegmentInfo[] {
     let names: string[];
     try {
       names = readdirSync(dir);
@@ -217,6 +243,11 @@ export class EventQueue {
       });
   }
 
+  /** Non-empty lines of one segment (what a cap drop loses). */
+  countEvents(file: string): number {
+    return this.readLines(file).filter((l) => l.trim()).length;
+  }
+
   private readLines(file: string): string[] {
     try {
       const text = readFileSync(join(this.dir, file), 'utf8');
@@ -226,5 +257,453 @@ export class EventQueue {
     } catch {
       return [];
     }
+  }
+}
+
+// ---------------------------------------------------------------- streams (design §3.1)
+
+export { streamDirName, unresolvedDirName };
+
+/** Where a session's events go, pinned once per session (C15): a project stream, or an unresolved one (git timed out, C16). */
+export type StreamKey = { kind: 'project'; pk: string; bind: Binding } | { kind: 'unresolved'; cwd: string; bind: Binding };
+
+/** One stream directory: `p/<o|t>-<id>/`, `u/<o|t>-<id>/`, the root segments (pre-upgrade) or a directory we cannot read (unknown). */
+export interface StreamRef {
+  kind: 'project' | 'unresolved' | 'pre-upgrade' | 'unknown';
+  dir: string;
+  pk?: string;
+  cwd?: string;
+  bind?: Binding;
+}
+export interface StreamStats extends QueueStats {
+  stream: StreamRef;
+}
+/** Totals over all streams plus the non-empty streams. */
+export interface StoreStats extends QueueStats {
+  streams: StreamStats[];
+}
+/** Receives the events a cap run dropped (state/dropped.json, C13). */
+export type DroppedRecorder = (drops: { held: number; sendable: number }) => void;
+export interface CapResult {
+  droppedFiles: number;
+  droppedBytes: number;
+  droppedEvents: number;
+  /** of droppedEvents: events of streams that do not resolve to a sendable token */
+  droppedHeldEvents: number;
+}
+export interface StoreOptions extends QueueOptions {
+  /** fresh routing per call (loadRouting, C17); null = not configured */
+  routing: () => RoutingView | null;
+  dropped?: DroppedRecorder;
+}
+
+const STREAM_FILE = 'stream.json';
+/** A stream not observed for longer than this starts a new sendable period (observe, C13). */
+export const SEEN_GAP_MS = 2 * 24 * 3600_000;
+/** `seen_at` of a stream whose state did not change is rewritten at most this often. */
+const SEEN_REFRESH_MS = 3600_000;
+/** A `.tmp-*` stream directory older than this was left by a crash and is removed by prune(). */
+const TMP_STALE_MS = 10 * 60_000;
+
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+const nonEmpty = (v: unknown): v is string => typeof v === 'string' && v.length > 0;
+
+function parseBinding(v: unknown): Binding | null {
+  if (!isObject(v)) return null;
+  if (v.kind === 'open') return { kind: 'open' };
+  if (v.kind !== 'token' || !nonEmpty(v.name) || !isObject(v.id)) return null;
+  const id = v.id;
+  if (!nonEmpty(id.endpoint) || !nonEmpty(id.token_fp)) return null;
+  if (id.company_slug !== undefined && !nonEmpty(id.company_slug)) return null;
+  return {
+    kind: 'token',
+    id: { endpoint: id.endpoint, ...(nonEmpty(id.company_slug) ? { company_slug: id.company_slug } : {}), token_fp: id.token_fp },
+    name: v.name,
+  };
+}
+
+/** The routing identity of a stream directory (design §3.2 table B input). */
+export function identityOfRef(ref: StreamRef): StreamIdentity {
+  if (ref.kind === 'project' && ref.pk !== undefined && ref.bind) return { kind: 'project', pk: ref.pk, bind: ref.bind };
+  if (ref.kind === 'unresolved' && ref.cwd !== undefined && ref.bind) return { kind: 'unresolved', cwd: ref.cwd, bind: ref.bind };
+  if (ref.kind === 'pre-upgrade') return { kind: 'pre-upgrade' };
+  return { kind: 'unknown' };
+}
+
+/** A project key as it may appear in the log: never a local path. */
+export function loggableKey(pk: string | undefined): string | undefined {
+  if (pk === undefined) return undefined;
+  return isPathKey(pk) ? '(local path)' : pk;
+}
+
+/**
+ * The queue as streams keyed by (project key, binding) (design §3.1, C1). Each stream is an EventQueue
+ * directory with a `stream.json`; root segments are the frozen pre-upgrade stream, which no API writes.
+ * Mutation is serialized by the worker lock, like EventQueue. The store enforces the caps across all
+ * streams: the 30-day age cap only for streams that resolve to a sendable token, counted from when
+ * they became sendable; the size cap for all (C13).
+ */
+export class QueueStore {
+  readonly projectsDir: string;
+  readonly unresolvedDir: string;
+  readonly deadDir: string;
+  private readonly opts: StoreOptions;
+  private readonly log: Logger;
+  private readonly now: () => number;
+  private readonly maxBytes: number;
+  private readonly maxAgeMs: number;
+
+  constructor(
+    readonly root: string,
+    opts: StoreOptions,
+  ) {
+    this.opts = opts;
+    this.projectsDir = join(root, 'p');
+    this.unresolvedDir = join(root, 'u');
+    this.deadDir = join(root, 'dead');
+    this.log = opts.log ?? nullLogger;
+    this.now = opts.now ?? Date.now;
+    this.maxBytes = opts.maxBytes ?? 50 * 1024 * 1024;
+    this.maxAgeMs = opts.maxAgeMs ?? 30 * 24 * 3600_000;
+  }
+
+  /**
+   * Appends events to the key's stream (created on first use) and enforces the caps. A null key (no
+   * cwd, C16) or a project the user opted out of (`use --none`, C19) drops the events (logged).
+   */
+  enqueue(events: readonly IngestEvent[], key: StreamKey | null): void {
+    if (!events.length) return;
+    if (!key) {
+      this.log.warn('queue: events without a project key dropped', { count: events.length });
+      return;
+    }
+    if (key.kind === 'project' && this.optedOut(key.pk)) {
+      this.log.info('queue: project opted out (ai-obs use --none), events dropped', { count: events.length });
+      return;
+    }
+    let ref = this.ensure(key);
+    if (!ref) {
+      this.log.error('queue: stream directory unusable, events dropped', { count: events.length });
+      return;
+    }
+    try {
+      this.stream(ref).enqueue(events);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      ref = this.ensure(key); // pruned between ensure and append
+      if (!ref) return;
+      this.stream(ref).enqueue(events);
+    }
+    this.enforceCap(ref);
+  }
+
+  /** Non-empty streams, oldest first (by their oldest segment). */
+  streams(): StreamRef[] {
+    return this.scan(false).map((x) => x.ref);
+  }
+
+  /** The stream as an EventQueue (no auto cap: the store caps; refused batches go to the shared queue/dead). */
+  stream(ref: StreamRef): EventQueue {
+    const { routing: _r, dropped: _d, ...q } = this.opts;
+    return new EventQueue(ref.dir, { ...q, autoCap: false, deadDir: this.deadDir });
+  }
+
+  /**
+   * An unresolved stream whose key is now known moves into its project stream (binding per adoptKey):
+   * segments are renamed into the target, the u/ directory is removed. A project the user opted out of
+   * keeps the events (held `opted-out` until `--discard-queued`, C19).
+   */
+  adopt(ref: StreamRef, pk: string): void {
+    if (ref.kind !== 'unresolved' || !ref.bind) return;
+    const view = this.opts.routing();
+    if (!view) return;
+    const target = this.ensure({ kind: 'project', pk, bind: adoptKey(view, pk, ref.bind).bind });
+    if (!target) return;
+    this.moveSegments(ref.dir, target.dir);
+    rmSync(ref.dir, { recursive: true, force: true });
+  }
+
+  /**
+   * Records whether a stream is sendable now (stream.json `sendable_since` / `seen_at`) and returns the
+   * start of its current sendable period (ms), or null while it is held. The 30-day age cap counts from
+   * there (C13), so data released after being held (a `use`, a confirmed or unblocked token) gets its
+   * full 30 days from the release. A stream not seen for more than SEEN_GAP_MS (the collector did not
+   * run) starts a new period: a hold in that gap could not be seen. Never throws.
+   */
+  observe(ref: StreamRef, sendable: boolean): number | null {
+    if (ref.kind !== 'project' && ref.kind !== 'unresolved') return null;
+    const file = join(ref.dir, STREAM_FILE);
+    const raw = readJsonFile<unknown>(file);
+    if (!isObject(raw)) return null;
+    const now = this.now();
+    const ms = (v: unknown) => (typeof v === 'string' ? Date.parse(v) : Number.NaN);
+    const since0 = ms(raw.sendable_since);
+    const seen = ms(raw.seen_at);
+    const fresh = Number.isFinite(seen) && now >= seen && now - seen <= SEEN_GAP_MS;
+    const since = sendable ? (Number.isFinite(since0) && fresh ? since0 : now) : null;
+    const changed = since === null ? Number.isFinite(since0) : since !== since0;
+    if (changed || !fresh || now - seen > SEEN_REFRESH_MS) {
+      const { sendable_since: _s, seen_at: _t, ...rest } = raw;
+      try {
+        writeJsonAtomic(
+          file,
+          { ...rest, ...(since !== null ? { sendable_since: new Date(since).toISOString() } : {}), seen_at: new Date(now).toISOString() },
+          0o600,
+        );
+      } catch {
+        /* the stream was removed meanwhile */
+      }
+    }
+    return since;
+  }
+
+  /**
+   * `use <name> --move-queued` (C12): merges the key's other token-bound streams into the stream bound
+   * to `to`. Returns the number of events moved.
+   */
+  rebind(pk: string, to: Binding): number {
+    const sources = this.scan(false).filter(
+      (x) => x.ref.kind === 'project' && x.ref.pk === pk && x.ref.bind?.kind === 'token' && x.ref.dir !== join(this.projectsDir, streamDirName(pk, to)),
+    );
+    if (!sources.length) return 0;
+    const target = this.ensure({ kind: 'project', pk, bind: to });
+    if (!target) return 0;
+    let moved = 0;
+    for (const { ref } of sources) {
+      moved += this.moveSegments(ref.dir, target.dir);
+      rmSync(ref.dir, { recursive: true, force: true });
+    }
+    this.log.info('queue: queued events moved to another token', { events: moved, project: loggableKey(pk) });
+    return moved;
+  }
+
+  /** `use --discard-queued`: deletes every stream of the key. Returns the number of events deleted. */
+  dropKey(pk: string): number {
+    let events = 0;
+    for (const { ref } of this.scan(true)) {
+      if (ref.kind !== 'project' || ref.pk !== pk) continue;
+      events += this.countDir(ref.dir);
+      rmSync(ref.dir, { recursive: true, force: true });
+    }
+    if (events) this.log.info('queue: queued events discarded', { events, project: loggableKey(pk) });
+    return events;
+  }
+
+  /** Removes stream directories without segments and stale `.tmp-*` directories. */
+  prune(): void {
+    for (const parent of [this.projectsDir, this.unresolvedDir]) {
+      for (const name of this.dirNames(parent)) {
+        const dir = join(parent, name);
+        try {
+          if (name.startsWith('.tmp-')) {
+            if (this.now() - statSync(dir).mtimeMs > TMP_STALE_MS) rmSync(dir, { recursive: true, force: true });
+            continue;
+          }
+          if (!this.segmentsOf(dir).length) rmSync(dir, { recursive: true, force: true });
+        } catch {
+          /* vanished */
+        }
+      }
+    }
+  }
+
+  /**
+   * Caps across all streams (C13): segments older than maxAge are dropped only for streams that resolve
+   * to a sendable (non-blocked) token and have been sendable for longer than maxAge (observe); then the
+   * globally oldest segments go until the total is under maxBytes (never the newest segment of
+   * `justWritten`). Dropped events are counted (held / sendable) into the `dropped` recorder and logged.
+   */
+  enforceCap(justWritten?: StreamRef): CapResult {
+    const result: CapResult = { droppedFiles: 0, droppedBytes: 0, droppedEvents: 0, droppedHeldEvents: 0 };
+    const all = this.scan(false).flatMap(({ ref }) => {
+      const q = this.queueOf(ref);
+      return q.segments().map((seg) => ({ ref, seg, q }));
+    });
+    let total = all.reduce((s, x) => s + x.seg.size, 0);
+    const cutoff = this.now() - this.maxAgeMs;
+    if (total <= this.maxBytes && !all.some((x) => x.seg.createdAt < cutoff)) return result;
+
+    const view = this.opts.routing();
+    const sendableByDir = new Map<string, boolean>();
+    const sendable = (ref: StreamRef): boolean => {
+      let v = sendableByDir.get(ref.dir);
+      if (v === undefined) {
+        const r = view ? resolveStream(view, identityOfRef(ref)) : null;
+        v = !!view && r?.kind === 'token' && !Object.prototype.hasOwnProperty.call(view.blocked, r.token.name);
+        sendableByDir.set(ref.dir, v);
+      }
+      return v;
+    };
+    const sinceByDir = new Map<string, number | null>();
+    /** start of the stream's current sendable period (observe), null while held */
+    const sendableSince = (ref: StreamRef): number | null => {
+      if (!sinceByDir.has(ref.dir)) sinceByDir.set(ref.dir, view ? this.observe(ref, sendable(ref)) : null);
+      return sinceByDir.get(ref.dir) ?? null;
+    };
+    let held = 0;
+    let sent = 0;
+    const dropped = new Set<(typeof all)[number]>();
+    const drop = (x: (typeof all)[number]) => {
+      const events = x.q.countEvents(x.seg.file);
+      try {
+        rmSync(join(x.ref.dir, x.seg.file), { force: true });
+      } catch {
+        return;
+      }
+      dropped.add(x);
+      total -= x.seg.size;
+      result.droppedFiles++;
+      result.droppedBytes += x.seg.size;
+      result.droppedEvents += events;
+      if (sendable(x.ref)) sent += events;
+      else held += events;
+    };
+    all.sort((a, b) => a.seg.createdAt - b.seg.createdAt || (a.seg.file < b.seg.file ? -1 : a.seg.file > b.seg.file ? 1 : 0));
+    // age cap: only data that has been sendable for the whole period (held time does not count, C13)
+    for (const x of all) {
+      if (x.seg.createdAt >= cutoff) continue;
+      const since = sendableSince(x.ref);
+      if (since !== null && since < cutoff) drop(x);
+    }
+    const keep = justWritten ? this.segmentsOf(justWritten.dir).at(-1)?.file : undefined;
+    for (const x of all) {
+      if (total <= this.maxBytes) break;
+      if (dropped.has(x) || (justWritten && x.ref.dir === justWritten.dir && x.seg.file === keep)) continue;
+      drop(x);
+    }
+    result.droppedHeldEvents = held;
+    if (result.droppedFiles) {
+      this.log.warn('queue: cap reached, dropped oldest segments', { ...result });
+      try {
+        this.opts.dropped?.({ held, sendable: sent });
+      } catch (err) {
+        this.log.error('queue: cannot record dropped events', { error: errorMessage(err) });
+      }
+    }
+    return result;
+  }
+
+  stats(): StoreStats {
+    const streams = this.scan(false).map(({ ref }) => ({ ...this.queueOf(ref).stats(), stream: ref }));
+    const oldest = streams.map((s) => s.oldestAt).filter((x): x is number => x !== null);
+    return {
+      files: streams.reduce((s, x) => s + x.files, 0),
+      bytes: streams.reduce((s, x) => s + x.bytes, 0),
+      events: streams.reduce((s, x) => s + x.events, 0),
+      oldestAt: oldest.length ? Math.min(...oldest) : null,
+      streams,
+    };
+  }
+
+  // -------------------------------------------------------------- internals
+
+  private optedOut(pk: string): boolean {
+    const view = this.opts.routing();
+    if (!view || view.projects.status !== 'ok') return false;
+    const a = Object.prototype.hasOwnProperty.call(view.projects.entries, pk) ? view.projects.entries[pk] : undefined;
+    return !!a && a.token === null;
+  }
+
+  private queueOf(ref: StreamRef): EventQueue {
+    return ref.kind === 'pre-upgrade' ? new EventQueue(this.root, { autoCap: false, deadDir: this.deadDir, log: this.log }) : this.stream(ref);
+  }
+
+  private segmentsOf(dir: string): SegmentInfo[] {
+    return new EventQueue(dir, { autoCap: false }).segments();
+  }
+
+  private countDir(dir: string): number {
+    const q = new EventQueue(dir, { autoCap: false });
+    return q.segments().reduce((n, s) => n + q.countEvents(s.file), 0);
+  }
+
+  private dirNames(parent: string): string[] {
+    try {
+      return readdirSync(parent, { withFileTypes: true })
+        .filter((d) => d.isDirectory())
+        .map((d) => d.name)
+        .sort();
+    } catch {
+      return [];
+    }
+  }
+
+  /** The stream of a directory, as read from its stream.json; anything that does not hash to its name is unknown. */
+  private readRef(dir: string, name: string, kind: 'project' | 'unresolved'): StreamRef {
+    const raw = readJsonFile<unknown>(join(dir, STREAM_FILE));
+    const bind = isObject(raw) ? parseBinding(raw.bind) : null;
+    if (isObject(raw) && bind) {
+      if (kind === 'project' && nonEmpty(raw.pk) && streamDirName(raw.pk, bind) === name) return { kind, dir, pk: raw.pk, bind };
+      if (kind === 'unresolved' && nonEmpty(raw.cwd) && unresolvedDirName(raw.cwd, bind) === name) return { kind, dir, cwd: raw.cwd, bind };
+    }
+    return { kind: 'unknown', dir };
+  }
+
+  /** All streams (optionally the empty ones too), oldest segment first; the pre-upgrade stream when root segments exist. */
+  private scan(includeEmpty: boolean): Array<{ ref: StreamRef; oldest: number }> {
+    const out: Array<{ ref: StreamRef; oldest: number }> = [];
+    const rootSegs = this.segmentsOf(this.root);
+    if (rootSegs.length) out.push({ ref: { kind: 'pre-upgrade', dir: this.root }, oldest: rootSegs[0]!.createdAt });
+    for (const [parent, kind] of [
+      [this.projectsDir, 'project'],
+      [this.unresolvedDir, 'unresolved'],
+    ] as const) {
+      for (const name of this.dirNames(parent)) {
+        if (name.startsWith('.tmp-')) continue;
+        const dir = join(parent, name);
+        const segs = this.segmentsOf(dir);
+        if (!segs.length && !includeEmpty) continue;
+        out.push({ ref: this.readRef(dir, name, kind), oldest: segs[0]?.createdAt ?? Infinity });
+      }
+    }
+    return out.sort((a, b) => a.oldest - b.oldest || (a.ref.dir < b.ref.dir ? -1 : a.ref.dir > b.ref.dir ? 1 : 0));
+  }
+
+  /**
+   * The key's stream directory, created atomically with its stream.json in place (temp dir + rename;
+   * another writer winning the race is fine). Null when a directory of that name exists but is not
+   * this stream (never append into it).
+   */
+  private ensure(key: StreamKey): StreamRef | null {
+    const project = key.kind === 'project';
+    const parent = project ? this.projectsDir : this.unresolvedDir;
+    const name = project ? streamDirName(key.pk, key.bind) : unresolvedDirName(key.cwd, key.bind);
+    const dir = join(parent, name);
+    const expected = (): StreamRef | null => {
+      const ref = this.readRef(dir, name, key.kind);
+      return ref.kind === key.kind ? ref : null;
+    };
+    if (existsSync(join(dir, STREAM_FILE))) return expected();
+    ensureDir(parent);
+    const tmp = join(parent, `.tmp-${randomBytes(6).toString('hex')}`);
+    try {
+      ensureDir(tmp);
+      const body = project ? { pk: key.pk, bind: key.bind } : { cwd: key.cwd, bind: key.bind };
+      writeJsonAtomic(join(tmp, STREAM_FILE), { ...body, created_at: new Date(this.now()).toISOString() }, 0o600);
+      renameSync(tmp, dir);
+    } catch (err) {
+      rmSync(tmp, { recursive: true, force: true });
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'EEXIST' && code !== 'ENOTEMPTY' && code !== 'EPERM') throw err;
+    }
+    return expected();
+  }
+
+  /** Renames every segment of `from` into `to` (ULID names keep time order). Returns the events moved. */
+  private moveSegments(from: string, to: string): number {
+    const q = new EventQueue(from, { autoCap: false });
+    let events = 0;
+    for (const seg of q.segments()) {
+      events += q.countEvents(seg.file);
+      const src = join(from, seg.file);
+      const dest = join(to, seg.file);
+      if (existsSync(dest)) {
+        appendFileSync(dest, readFileSync(src), { mode: 0o600 });
+        rmSync(src, { force: true });
+      } else {
+        renameSync(src, dest);
+      }
+    }
+    return events;
   }
 }

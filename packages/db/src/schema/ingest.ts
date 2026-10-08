@@ -5,8 +5,10 @@ import { tokenKindEnum } from './enums.js';
 import { companies, teams, users } from './tenancy.js';
 
 /**
- * Collector tokens (ADR-0007). Stored as a hash; `prefix` is the non-secret beginning shown in the UI.
- * User tokens have user_id; team tokens have user_id = null. Both are scoped to one team.
+ * Collector tokens (ADR-0007, ADR-0022). Stored as a hash; `prefix` is the non-secret beginning shown in the UI.
+ * Company tokens (`aiobs_c_`, user_id null; CI / bots / rollout, match users by git e-mail company-wide) and user
+ * tokens (`aiobs_u_`, identify one member of one company; resolve only while the membership exists). No team
+ * binding. Revocation is one-way (trigger).
  */
 export const ingestTokens = pgTable(
   'ingest_tokens',
@@ -15,8 +17,7 @@ export const ingestTokens = pgTable(
     companyId: uuid('company_id')
       .notNull()
       .references(() => companies.id, { onDelete: 'cascade' }),
-    teamId: uuid('team_id').notNull(),
-    userId: uuid('user_id'),
+    userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }),
     kind: tokenKindEnum('kind').notNull(),
     name: text('name').notNull(),
     prefix: text('prefix').notNull(),
@@ -29,8 +30,6 @@ export const ingestTokens = pgTable(
   (t) => [
     index('ingest_tokens_company_idx').on(t.companyId),
     check('ingest_tokens_kind_user', sql`(${t.kind} = 'user') = (${t.userId} is not null)`),
-    foreignKey({ columns: [t.companyId, t.teamId], foreignColumns: [teams.companyId, teams.id] }).onDelete('cascade'),
-    foreignKey({ columns: [t.companyId, t.userId], foreignColumns: [users.companyId, users.id] }).onDelete('cascade'),
   ],
 );
 
@@ -42,7 +41,7 @@ export const machines = pgTable(
     companyId: uuid('company_id')
       .notNull()
       .references(() => companies.id, { onDelete: 'cascade' }),
-    userId: uuid('user_id'),
+    userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }),
     machineId: text('machine_id').notNull(),
     os: text('os'),
     firstSeenAt: tstz('first_seen_at').notNull().defaultNow(),
@@ -51,7 +50,6 @@ export const machines = pgTable(
   (t) => [
     unique('machines_company_machine_uq').on(t.companyId, t.machineId),
     unique('machines_company_id_uq').on(t.companyId, t.id),
-    foreignKey({ columns: [t.companyId, t.userId], foreignColumns: [users.companyId, users.id] }).onDelete('cascade'),
   ],
 );
 

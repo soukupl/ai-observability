@@ -21,7 +21,7 @@ export function remaining(limit: number | null, used: number): number | null {
 export function capacityError(plan: Plan, resource: LimitedResource, used: number, adding = 1): string | null {
   const limit = planLimits(plan)[resource];
   if (limit === null || used + adding <= limit) return null;
-  const what = resource === 'users' ? 'users (members + pending invitations)' : 'teams';
+  const what = resource === 'users' ? 'members (members + pending invitations)' : 'teams';
   return `The ${plan} plan allows ${limit} ${what}; you have ${used}. Ask the platform admin to change the plan.`;
 }
 

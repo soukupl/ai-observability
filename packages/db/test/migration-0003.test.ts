@@ -3,14 +3,14 @@ import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDb, type Database } from '../src/client.js';
 import { DB_ROLES } from '../src/connections.js';
-import { runMigrations } from '../src/migrate.js';
 import { priceInEffect } from '../src/prices.js';
 import { withRlsContext } from '../src/rls.js';
+import { migrateTo } from './migrate-to.js';
 
 /**
  * Migration 0003: estimate_cost_usd falls back to a model's earliest price row for days before it
  * (review DP-03), and agg_turn_list pages deterministically when turns share started_at (DP-12).
- * Own database (ai_obs_m0003_test).
+ * Own database (ai_obs_m0003_test), migrated up to 0003 only (migrateTo), so the old-shape rows below stay valid.
  */
 const base = new URL(process.env.TEST_DATABASE_URL || 'postgres://ai_obs:ai_obs@localhost:5432/ai_obs_test');
 base.pathname = '/ai_obs_m0003_test';
@@ -63,7 +63,7 @@ describe.skipIf(skip !== null)(skip ? `migration 0003 - SKIPPED: ${skip}` : 'mig
     const quiet = console.log;
     console.log = () => {};
     try {
-      await runMigrations(URL_);
+      await migrateTo(URL_, '0003_price_fallback_turn_list_order');
     } finally {
       console.log = quiet;
     }
@@ -100,7 +100,7 @@ describe.skipIf(skip !== null)(skip ? `migration 0003 - SKIPPED: ${skip}` : 'mig
     const admin = postgres(adminUrl.toString(), { max: 1, onnotice: () => {} });
     await admin.unsafe('drop database if exists "ai_obs_m0003_test" with (force)').catch(() => {});
     await admin.end({ timeout: 1 }).catch(() => {});
-  });
+  }, 30_000);
 
   const cost = async (model: string, day: string | null) =>
     ([...(await db.execute(sql`select estimate_cost_usd(${model}, ${day}::date, 1000000, 0, 0, 0)::float8 as usd`))][0] as {

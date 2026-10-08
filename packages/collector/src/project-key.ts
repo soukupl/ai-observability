@@ -1,26 +1,12 @@
 import { createHash, createHmac, randomBytes } from 'node:crypto';
-import { linkSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { basename, dirname } from 'node:path';
+import { linkSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, dirname, isAbsolute, resolve as resolvePath } from 'node:path';
 import { ensureDir } from './fsutil.js';
-import { gitRemoteUrl, gitTopLevel } from './git.js';
+import { gitRemoteUrlResult, gitRepoRootResult } from './git.js';
 import type { ProjectNamingMode, ProjectRef } from './protocol-types.js';
 
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
 const hmac = (key: string, s: string) => createHmac('sha256', key).update(s).digest('hex');
-
-/** Keys for hashed project references (SEC-11: plain sha256 of a guessable string is reversible). */
-export interface ProjectKeySecrets {
-  /**
-   * Local per-machine secret for the no-remote fallback (`HMAC(secret, "path:" + absPath)`). It
-   * never leaves the machine, so the server cannot reverse the key to a home-directory path.
-   */
-  pathSecret?: string | null;
-  /**
-   * Per-company salt from GET /api/v1/collector-config (`project_salt`) for hashed-mode remotes
-   * (`HMAC(salt, remote)`): the same on every machine of the company, so keys still agree.
-   */
-  projectSalt?: string | null;
-}
 
 /**
  * Normalizes a git remote to `host/path`: strips protocol, credentials / `user@`, port, `.git` and
@@ -68,29 +54,54 @@ export function normalizeRemote(remote: string): string | null {
   return `${host}/${path}`;
 }
 
+/** Default git budget of a key resolution outside the hook (worker, sender, `use`): latency does not matter there (C16). */
+export const RESOLVE_TIMEOUT_MS = 5000;
+
 /**
- * Project reference for the ingest format. Plain mode: normalized remote + last segment as name.
- * Hashed mode: `sha256:` + hash of the normalized remote, no name — HMAC-SHA256 keyed by the
- * company's `projectSalt` when the server provides one, else plain sha256 (reversible with a
- * dictionary of org/repo names; see README). No (usable) remote: `sha256:` + HMAC of the absolute
- * path keyed by the local `pathSecret`, in both modes — the path never leaves the machine and the key
- * cannot be reversed without the secret. (Without a secret: plain sha256, the pre-SEC-11 key.)
+ * The plain project key of a working directory (Q4, C2): the normalized git remote, else the git
+ * top-level (of the main checkout, for a linked worktree), else `realpath(cwd)` outside a repo
+ * (`path.resolve(cwd)` when the directory is gone). Local only, never sent as such (sendRef). Null only
+ * when git timed out. `bounded` (the hook) kills git at the deadline instead of waiting for it (C26).
+ * Never throws.
  */
-export function projectRef(input: { remote: string | null; absPath: string; naming: ProjectNamingMode } & ProjectKeySecrets): ProjectRef {
-  const normalized = input.remote ? normalizeRemote(input.remote) : null;
-  if (!normalized) {
-    const path = `path:${input.absPath}`;
-    return { key: `sha256:${input.pathSecret ? hmac(input.pathSecret, path) : sha256(path)}` };
+export async function resolveProjectKey(cwd: string, opts: { timeoutMs?: number; bounded?: boolean } = {}): Promise<string | null> {
+  const d = { until: Date.now() + (opts.timeoutMs ?? RESOLVE_TIMEOUT_MS), bounded: opts.bounded === true };
+  const [top, remote] = await Promise.all([gitRepoRootResult(cwd, d), gitRemoteUrlResult(cwd, d)]);
+  if (top.timedOut || remote.timedOut) return null;
+  const normalized = remote.out ? normalizeRemote(remote.out) : null;
+  if (normalized) return normalized;
+  if (top.out && isAbsolute(top.out)) return top.out;
+  try {
+    return realpathSync(cwd);
+  } catch {
+    return resolvePath(cwd);
   }
-  if (input.naming === 'hashed') return { key: `sha256:${input.projectSalt ? hmac(input.projectSalt, normalized) : sha256(normalized)}` };
-  const name = basename(normalized).slice(0, 200);
-  return name ? { key: normalized, name } : { key: normalized };
 }
 
-/** Resolves the project of a working directory via git (never throws). */
-export async function resolveProject(cwd: string, naming: ProjectNamingMode, secrets: ProjectKeySecrets = {}): Promise<ProjectRef> {
-  const [top, remote] = await Promise.all([gitTopLevel(cwd), gitRemoteUrl(cwd)]);
-  return projectRef({ remote, absPath: top ?? cwd, naming, ...secrets });
+/** A key that is a local path (no usable remote): always sent as a keyed hash. */
+export function isPathKey(pk: string): boolean {
+  return isAbsolute(pk);
+}
+
+/**
+ * Send-time project reference for the receiving token (C3, contract §5.5). Path key →
+ * `sha256:` + HMAC(local path secret, `path:` + path) (plain sha256 without a secret); hashed →
+ * `sha256:` + HMAC(company salt, key) (plain sha256 without a salt), no name; plain → the key and its
+ * last segment as name.
+ */
+export function sendRef(pk: string, o: { naming: ProjectNamingMode; salt?: string | null; pathSecret: string | null }): ProjectRef {
+  if (isPathKey(pk)) {
+    const path = `path:${pk}`;
+    return { key: `sha256:${o.pathSecret ? hmac(o.pathSecret, path) : sha256(path)}` };
+  }
+  if (o.naming === 'hashed') return { key: `sha256:${o.salt ? hmac(o.salt, pk) : sha256(pk)}` };
+  const name = basename(pk).slice(0, 200);
+  return name ? { key: pk, name } : { key: pk };
+}
+
+/** What `ctx.projectKey` returns at capture (plain naming); the sender overwrites it from the stream key. */
+export function localRef(pk: string, pathSecret: string | null): ProjectRef {
+  return sendRef(pk, { naming: 'plain', pathSecret });
 }
 
 /**

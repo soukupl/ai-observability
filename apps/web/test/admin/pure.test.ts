@@ -3,8 +3,9 @@ import { auditCsv, metaSummary } from '../../src/lib/admin/audit';
 import { pgCode, userMessage } from '../../src/lib/admin/errors';
 import { formObject, parse } from '../../src/lib/admin/input';
 import { invitationEmail, invitationInput } from '../../src/lib/admin/invitations';
-import { canCreateToken, canEnterAdmin, canManageBudgets, canRevokeToken, isLead, tokenTeams } from '../../src/lib/admin/permissions';
+import { canCreateToken, canEnterAdmin, canManageBudgets, canRevokeToken, isLead } from '../../src/lib/admin/permissions';
 import { budgetsAllowed, capacityError, formatLimit, PLAN_LIMITS, planOverages, remaining, retentionBounds, retentionError } from '../../src/lib/admin/plans';
+import { staleCompany } from '../../src/lib/admin/run';
 import { collectorCommand, mdmConfig } from '../../src/lib/admin/tokens';
 import { AdminError, type Actor } from '../../src/lib/admin/types';
 
@@ -25,7 +26,7 @@ describe('plan limits (BRIEF §10)', () => {
     expect(capacityError('free', 'teams', 0)).toBeNull();
     expect(capacityError('free', 'teams', 1)).toMatch(/free plan allows 1 teams/);
     expect(capacityError('free', 'users', 2)).toBeNull();
-    expect(capacityError('free', 'users', 3)).toMatch(/pending invitations/);
+    expect(capacityError('free', 'users', 3)).toMatch(/free plan allows 3 members.*pending invitations/);
     expect(capacityError('team', 'users', 49)).toBeNull();
     expect(capacityError('team', 'users', 48, 3)).not.toBeNull();
     expect(capacityError('business', 'teams', 10_000)).toBeNull();
@@ -59,31 +60,28 @@ describe('plan limits (BRIEF §10)', () => {
   });
 });
 
-describe('token-kind permissions (BRIEF §4)', () => {
-  it('user tokens: own teams, admins any team', () => {
-    expect(canCreateToken(member, 'user', T1)).toBe(true);
-    expect(canCreateToken(member, 'user', T2)).toBe(false);
-    expect(canCreateToken(admin, 'user', T2)).toBe(true);
+describe('token-kind permissions (ADR-0022, brief Q2/Q9)', () => {
+  it('user tokens: anyone, for themselves', () => {
+    expect(canCreateToken(member, 'user')).toBe(true);
+    expect(canCreateToken(lead, 'user')).toBe(true);
+    expect(canCreateToken(admin, 'user')).toBe(true);
   });
-  it('team tokens: admins, and leads of that team only', () => {
-    expect(canCreateToken(member, 'team', T1)).toBe(false);
-    expect(canCreateToken(lead, 'team', T1)).toBe(true);
-    expect(canCreateToken(lead, 'team', T2)).toBe(false);
-    expect(canCreateToken(admin, 'team', T2)).toBe(true);
-    expect(tokenTeams(lead, 'team', [T1, T2])).toEqual([T1]);
-    expect(tokenTeams(admin, 'team', [T1, T2])).toEqual([T1, T2]);
+  it('company tokens: admins, and leads of any team; plain members never', () => {
+    expect(canCreateToken(member, 'company')).toBe(false);
+    expect(canCreateToken(lead, 'company')).toBe(true);
+    expect(canCreateToken(admin, 'company')).toBe(true);
   });
-  it('revoke: own user tokens, led team tokens, admins all', () => {
-    const mine = { kind: 'user' as const, teamId: T1, userId: 'u-me' };
-    const someoneElses = { kind: 'user' as const, teamId: T1, userId: 'u-other' };
-    const teamTok = { kind: 'team' as const, teamId: T1, userId: null };
+  it('revoke: own user tokens, company tokens for leads, admins everything (D6)', () => {
+    const mine = { kind: 'user' as const, userId: 'u-me' };
+    const someoneElses = { kind: 'user' as const, userId: 'u-other' };
+    const companyTok = { kind: 'company' as const, userId: null };
     expect(canRevokeToken(member, mine)).toBe(true);
     expect(canRevokeToken(member, someoneElses)).toBe(false);
     expect(canRevokeToken(lead, someoneElses)).toBe(false);
-    expect(canRevokeToken(member, teamTok)).toBe(false);
-    expect(canRevokeToken(lead, teamTok)).toBe(true);
-    expect(canRevokeToken(lead, { ...teamTok, teamId: T2 })).toBe(false);
+    expect(canRevokeToken(member, companyTok)).toBe(false);
+    expect(canRevokeToken(lead, companyTok)).toBe(true);
     expect(canRevokeToken(admin, someoneElses)).toBe(true);
+    expect(canRevokeToken(admin, companyTok)).toBe(true);
   });
   it('admin area: admins and leads; budgets managed by admins only', () => {
     expect(canEnterAdmin(admin)).toBe(true);
@@ -97,12 +95,12 @@ describe('token-kind permissions (BRIEF §4)', () => {
 
 describe('helpers', () => {
   it('collector command and MDM config', () => {
-    expect(collectorCommand('aiobs_t_x', 'https://obs.example/')).toBe('npx ai-obs init --token aiobs_t_x --endpoint https://obs.example');
-    expect(mdmConfig('aiobs_t_x', 'https://obs.example', 'Core')).toEqual({
+    expect(collectorCommand('aiobs_c_x', 'https://obs.example/')).toBe('npx ai-obs init --token aiobs_c_x --endpoint https://obs.example');
+    expect(mdmConfig('aiobs_c_x', 'https://obs.example', { slug: 'acme' })).toEqual({
       endpoint: 'https://obs.example',
-      token: 'aiobs_t_x',
-      team: 'Core',
-      install: 'npx ai-obs init --token aiobs_t_x --endpoint https://obs.example',
+      token: 'aiobs_c_x',
+      company: 'acme',
+      install: 'npx ai-obs init --token aiobs_c_x --endpoint https://obs.example',
     });
   });
   it('invitation e-mail links to the login page and escapes HTML', () => {
@@ -111,7 +109,8 @@ describe('helpers', () => {
       { appUrl: 'https://obs.example', inviter: 'Alice' },
     );
     expect(m.to).toBe('new@x.test');
-    expect(m.text).toContain('https://obs.example/login');
+    expect(m.text).toContain('https://obs.example/login?next=/invitations');
+    expect(m.text).toContain('open Invitations');
     expect(m.text).toContain('2026-10-13');
     expect(m.html).toContain('Acme &amp; Co');
     expect(m.html).not.toContain('A<b>');
@@ -123,6 +122,16 @@ describe('helpers', () => {
     fd.set('name', 'x');
     fd.set('$ACTION_ID_abc', '');
     expect(formObject(fd)).toEqual({ name: 'x' });
+    fd.set('_companyId', 'c-1');
+    expect(formObject(fd)).toEqual({ name: 'x' });
+  });
+  it('D10: a form rendered for another company, or without the field, is refused', () => {
+    const fd = new FormData();
+    expect(staleCompany(fd, 'B')).toMatchObject({ status: 'error', message: expect.stringMatching(/active company changed/) });
+    fd.set('_companyId', 'A');
+    expect(staleCompany(fd, 'B')).toMatchObject({ status: 'error' });
+    fd.set('_companyId', 'B');
+    expect(staleCompany(fd, 'B')).toBeNull();
   });
   it('error messages never leak SQL', () => {
     expect(userMessage(new AdminError('Nope.'))).toBe('Nope.');
@@ -132,7 +141,7 @@ describe('helpers', () => {
     expect(pgCode({ cause: { code: '23503' } })).toBe('23503');
   });
   it('audit meta summary and CSV', () => {
-    expect(metaSummary({ kind: 'team', limit: 5, after: { a: 1 } })).toBe('kind=team, limit=5, after={"a":1}');
+    expect(metaSummary({ kind: 'company', limit: 5, after: { a: 1 } })).toBe('kind=company, limit=5, after={"a":1}');
     expect(metaSummary({ s: 'x'.repeat(300) }).length).toBe(120);
     const csv = auditCsv([{ id: '1', atMs: Date.UTC(2026, 9, 6), actor: 'Alice', action: 'team.create', target: 'team:1', meta: { name: 'A' } }]);
     expect(csv.headers).toEqual(['at', 'actor', 'action', 'target', 'meta']);

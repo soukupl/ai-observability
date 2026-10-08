@@ -1,5 +1,7 @@
 import {
+  schemas,
   validateBatch,
+  type CollectorConfigResponse as ProtocolCollectorConfigResponse,
   type IngestBatchInput,
   type IngestEventInput,
   MAX_BATCH_BYTES,
@@ -9,6 +11,7 @@ import {
   MAX_SUMMARY_LENGTH,
   PHASES,
   SCHEMA_VERSION,
+  TOKEN_PREFIXES,
 } from '@ai-obs/protocol';
 import { describe, expect, it } from 'vitest';
 import { provisionalOutcome } from '../src/analysis/outcome.js';
@@ -67,8 +70,32 @@ describe('collector events conform to @ai-obs/protocol', () => {
 
   it('local types are assignable to the protocol input types (compile-time)', () => {
     const events: IngestEventInput[] = allEvents();
-    const batch: IngestBatchInput = buildEnvelope(buildConfig({ endpoint: 'https://x.io', token: 'aiobs_t_x' }), allEvents());
+    const batch: IngestBatchInput = buildEnvelope(buildConfig({ endpoint: 'https://x.io', token: 'aiobs_c_x' }), allEvents());
     expect(events.length + batch.events.length).toBe(14);
+  });
+
+  it('token prefixes match the server: user and company tokens are accepted, the dropped team prefix is not (ADR-0022)', () => {
+    expect([local.USER_TOKEN_PREFIX, local.COMPANY_TOKEN_PREFIX]).toEqual([TOKEN_PREFIXES.user, TOKEN_PREFIXES.company]);
+    expect(Object.keys(TOKEN_PREFIXES).sort()).toEqual(['company', 'user']);
+    expect(buildConfig({ endpoint: 'https://x.io', token: 'aiobs_c_abc' }).tokens[0]?.token).toBe('aiobs_c_abc');
+    expect(() => buildConfig({ endpoint: 'https://x.io', token: `${local.LEGACY_TEAM_TOKEN_PREFIX}abc` })).toThrow(/aiobs_u_ or aiobs_c_/);
+  });
+
+  it('collector-config: the local response type (company, user) matches the protocol schema both ways', () => {
+    const user: local.CollectorConfigResponse = {
+      project_naming: 'hashed',
+      min_collector_version: '0.2.0',
+      project_salt: 'company-salt-0123456789',
+      company: { name: 'Acme Corp', slug: 'acme' },
+      user: { email: 'alice@acme.example' },
+    };
+    const company: local.CollectorConfigResponse = { project_naming: 'plain', min_collector_version: '0.2.0', company: { name: 'Globex', slug: 'globex' }, user: null };
+    const older: local.CollectorConfigResponse = { project_naming: 'plain', min_collector_version: '0.1.0' };
+    for (const v of [user, company, older]) {
+      const asProtocol: ProtocolCollectorConfigResponse = v; // compile-time: local → protocol
+      const back: local.CollectorConfigResponse = schemas.collectorConfigResponse.parse(asProtocol); // protocol → local
+      expect(back).toEqual(v);
+    }
   });
 
   it('constants match', () => {

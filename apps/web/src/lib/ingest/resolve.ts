@@ -13,15 +13,15 @@ export const sessionKey = (harness: string, sessionId: string) => `${harness}:${
 export const turnKey = (harness: string, turnId: string) => `${harness}:${turnId}`;
 
 /**
- * Team attribution of a turn, first match wins (BRIEF §4): the company's project → team mapping,
- * the token's team, the user's primary team.
+ * Team attribution of a turn, first match wins (BRIEF §4, ADR-0022): the company's project → team mapping,
+ * then the attributed user's primary team in this company, else no team (unverified senders, users without
+ * a primary team). Tokens carry no team.
  */
 export function resolveTeam(input: {
   projectTeamId: string | null | undefined;
-  tokenTeamId: string | null | undefined;
   primaryTeamId: string | null | undefined;
 }): string | null {
-  return input.projectTeamId || input.tokenTeamId || input.primaryTeamId || null;
+  return input.projectTeamId || input.primaryTeamId || null;
 }
 
 /**
@@ -41,8 +41,9 @@ export function hashProjectKey(key: string): string {
 }
 
 /**
- * User token → the token's user (verified). Team token → the user whose e-mail equals the batch's
- * git e-mail AND who belongs to the token's team (matched; SEC-10), else no user (unverified).
+ * User token → the token's user (verified). Company token → the member of the token's company whose
+ * e-mail equals the batch's git e-mail (matched), else no user (unverified). ingest_match_user_by_email
+ * only looks inside the ingest company, so a git e-mail of another company's member stays unverified.
  */
 export async function resolveAttribution(
   tx: Tx,
@@ -52,10 +53,10 @@ export async function resolveAttribution(
   if (token.kind === 'user' && token.userId) {
     return { userId: token.userId, attribution: 'verified', primaryTeamId: token.userPrimaryTeamId };
   }
-  if (gitEmail) {
+  if (token.kind === 'company' && gitEmail) {
     const [m] = await rows<{ user_id: string; primary_team_id: string | null }>(
       tx,
-      sql`select * from ingest_match_user_by_email(${gitEmail}, ${token.teamId}::uuid)`,
+      sql`select * from ingest_match_user_by_email(${gitEmail}, ${token.companyId}::uuid)`,
     );
     if (m) return { userId: m.user_id, attribution: 'matched', primaryTeamId: m.primary_team_id };
   }
@@ -111,14 +112,10 @@ export async function projectTeam(tx: Tx, ctx: BatchContext, projectId: string |
   return ctx.projectTeams.get(projectId) ?? null;
 }
 
-/** Team for rows of this batch given an (optional) project. Falls back to the token's team. */
-export async function teamFor(tx: Tx, ctx: BatchContext, projectId: string | null): Promise<string> {
-  const team = resolveTeam({
-    projectTeamId: await projectTeam(tx, ctx, projectId),
-    tokenTeamId: ctx.token.teamId,
-    primaryTeamId: ctx.primaryTeamId,
-  });
-  // ingest_tokens.team_id is NOT NULL, so this only fires on a corrupt token row.
-  if (!team) throw new Error('no team to attribute to');
-  return team;
+/**
+ * Team for rows of this batch given an (optional) project: the project mapping, else the attributed
+ * user's primary team, else null.
+ */
+export async function teamFor(tx: Tx, ctx: BatchContext, projectId: string | null): Promise<string | null> {
+  return resolveTeam({ projectTeamId: await projectTeam(tx, ctx, projectId), primaryTeamId: ctx.primaryTeamId });
 }

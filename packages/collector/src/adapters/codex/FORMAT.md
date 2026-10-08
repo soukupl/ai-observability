@@ -67,6 +67,26 @@ so Codex records `task_complete` after they have run. On `Stop`, the adapter re-
 `last_assistant_message`, and ignores the late `task_complete`. A `token_count` written after that
 point counts toward the next turn.
 
+### Hook output (the SessionStart nudge)
+
+`ai-obs hook codex SessionStart` may print one text into the model's context (the token nudge, see
+`src/nudge.ts`). Every other hook stays silent on stdout.
+
+- **Format ai-obs uses for Codex: plain text on stdout** (`SESSION_START_OUTPUT.codex = 'text'`). Claude Code gets
+  `{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"..."}}` instead.
+- **Why not JSON:** the 0.154.0 binary embeds a schema `session-start.command.output` that lists
+  `hookSpecificOutput.additionalContext`, but the owner's check of codex-cli 0.154.0 found that the JSON form is
+  rejected there, so Codex gets plain text. The first design checked both forms as accepted; that is superseded.
+  If a later Codex accepts JSON, set `SESSION_START_OUTPUT.codex` to `'json'` (or `'none'` to turn the nudge off for Codex).
+  No other change is needed.
+- **Reproduce:** run `codex exec --skip-git-repo-check` (add `--dangerously-bypass-hook-trust` for a hook that is not
+  trusted yet) with a temporary `CODEX_HOME` whose `hooks.json` has a `SessionStart` command that prints the text, and
+  a model provider that cannot be reached (for example `127.0.0.1:9`), so no network is used. Then look at the rollout:
+  accepted output is recorded as a `developer` message with `content_item_kinds: ["hooks.additional_context"]` before
+  the model call. Do this with the plain text and with the JSON form and compare.
+- The installed Codex hook commands are unchanged (no re-trust is needed); the nudge ships with the runtime copy
+  in `<home>/app`.
+
 ## Rollout files
 
 **Path:** `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<local time>-<thread id>.jsonl`. Archived rollouts are

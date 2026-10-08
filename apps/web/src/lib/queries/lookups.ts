@@ -48,15 +48,15 @@ export async function listProjects(ctx: QueryCtx): Promise<ProjectRef[]> {
  */
 export async function listUsers(ctx: QueryCtx): Promise<UserRef[] | null> {
   if (!canSeeUsers(ctx.viewer)) return null;
-  const company = sql`u.company_id = ${ctx.viewer.companyId}::uuid`;
+  const company = sql`cm.company_id = ${ctx.viewer.companyId}::uuid`;
   let scope = sql``;
   if (ctx.viewer.companyRole !== 'admin') {
     const led = ctx.viewer.teams.filter((t) => t.role === 'lead').map((t) => sql`${t.id}::uuid`);
     const ledList = sql.join(led, sql`, `);
-    scope = sql` and (u.id = ${ctx.viewer.id}::uuid or u.primary_team_id in (${ledList})
-      or u.id in (select m.user_id from team_memberships m where m.company_id = u.company_id and m.team_id in (${ledList})))`;
+    scope = sql` and (u.id = ${ctx.viewer.id}::uuid or cm.primary_team_id in (${ledList})
+      or u.id in (select m.user_id from team_memberships m where m.company_id = cm.company_id and m.team_id in (${ledList})))`;
   }
-  const out = await rows<{ id: string; name: string | null; email: string }>(ctx.tx, sql`select u.id, u.name, u.email from users u where ${company}${scope}`);
+  const out = await rows<{ id: string; name: string | null; email: string }>(ctx.tx, sql`select u.id, u.name, u.email from company_memberships cm join users u on u.id = cm.user_id where ${company}${scope}`);
   return out.map((u) => ({ id: u.id, name: u.name || u.email })).sort((a, b) => a.name.localeCompare(b.name));
 }
 

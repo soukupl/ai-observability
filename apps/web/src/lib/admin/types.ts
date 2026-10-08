@@ -15,10 +15,10 @@ export interface Actor {
 
 /** A freshly created ingest token, shown once in the browser and never stored in plain text. */
 export interface TokenReveal {
-  kind: 'user' | 'team';
+  kind: 'user' | 'company';
   plaintext: string;
   command: string;
-  /** Team tokens: collector settings JSON for MDM / dotfiles rollout. */
+  /** Company tokens: collector settings JSON for MDM / dotfiles rollout. */
   mdmJson?: string;
   mdmFilename?: string;
 }

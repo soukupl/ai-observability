@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { AuthGuard, TokenBucketLimiter, clientIp, rateLimitOptionsFromEnv } from '../../src/lib/ingest/rate-limit';
+import {
+  AuthGuard,
+  TokenBucketLimiter,
+  authGuardOptionsFromEnv,
+  clientIp,
+  rateLimitOptionsFromEnv,
+} from '../../src/lib/ingest/rate-limit';
 
 describe('TokenBucketLimiter', () => {
   it('allows a burst, then refills at the sustained rate', () => {
@@ -107,6 +113,40 @@ describe('AuthGuard', () => {
     for (let i = 0; i < 50; i++) g.failed(`ip${i}`, `h${i}`, 0);
     expect(g.admit('x', 'h0', 1)).toEqual({ action: 'lookup' }); // evicted
     expect(g.admit('x', 'h49', 1)).toEqual({ action: 'reject-401' });
+  });
+});
+
+describe('AuthGuard at the token cut-over (ADR-0022, accepted behaviour)', () => {
+  // After migration 0014 every old token gets 401. Old collectors behind one office IP drain that IP's
+  // failed-auth budget, so a newly registered token not yet known good waits for a refill (429 + Retry-After);
+  // once it has authenticated it is admitted regardless of the budget.
+  it('pins the defaults, the 429 for a fresh token from a drained IP, the refill and the good-set bypass', () => {
+    const opts = authGuardOptionsFromEnv({});
+    expect(opts.failures).toEqual({ burst: 20, perMinute: 10 });
+    const g = new AuthGuard(opts);
+    const t0 = 5_000_000;
+    // 21 distinct old tokens from one IP: 20 are looked up and fail, the 21st is refused before the lookup.
+    for (let i = 0; i < 20; i++) {
+      expect(g.admit('office', `old-${i}`, t0)).toEqual({ action: 'lookup' });
+      g.failed('office', `old-${i}`, t0);
+    }
+    expect(g.admit('office', 'old-20', t0)).toMatchObject({ action: 'reject-429' });
+    // A retried old token is answered from the negative cache (401) and still spends the IP budget.
+    expect(g.admit('office', 'old-0', t0)).toEqual({ action: 'reject-401' });
+
+    // The freshly registered token from the same IP: 429 with Retry-After, until one failure refills (6 s).
+    const fresh = g.admit('office', 'new-token', t0);
+    expect(fresh).toEqual({ action: 'reject-429', retryAfterSec: 6 });
+    expect(g.admit('office', 'new-token', t0 + 5_000)).toMatchObject({ action: 'reject-429' });
+    expect(g.admit('office', 'new-token', t0 + 6_000)).toEqual({ action: 'lookup' });
+    g.succeeded('new-token', t0 + 6_000);
+
+    // Old collectors drain the budget again: the known-good token is still admitted, unseen ones are not.
+    g.failed('office', 'old-21', t0 + 6_000);
+    expect(g.admit('office', 'other-new', t0 + 6_000)).toMatchObject({ action: 'reject-429' });
+    expect(g.admit('office', 'new-token', t0 + 6_000)).toEqual({ action: 'lookup' });
+    // Other IPs are unaffected.
+    expect(g.admit('home', 'other-new', t0 + 6_000)).toEqual({ action: 'lookup' });
   });
 });
 

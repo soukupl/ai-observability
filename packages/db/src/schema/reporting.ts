@@ -3,7 +3,7 @@ import { bigint, boolean, check, date, foreignKey, index, jsonb, numeric, pgTabl
 import { count, createdAt, pk, tokenColumns, tstz, updatedAt, type PhasesMs } from './columns.js';
 import { budgetKindEnum } from './enums.js';
 import { projects } from './ingest.js';
-import { companies, teams, users } from './tenancy.js';
+import { companies, companyMemberships, teams, users } from './tenancy.js';
 
 const big = (name: string) => bigint(name, { mode: 'number' }).notNull().default(0);
 
@@ -163,6 +163,10 @@ export const budgets = pgTable(
     check('budgets_period', sql`${t.period} = 'month'`),
     check('budgets_limit_positive', sql`${t.limitValue} > 0`),
     foreignKey({ columns: [t.companyId, t.teamId], foreignColumns: [teams.companyId, teams.id] }).onDelete('cascade'),
-    foreignKey({ columns: [t.companyId, t.userId], foreignColumns: [users.companyId, users.id] }).onDelete('cascade'),
+    foreignKey({
+      name: 'budgets_membership_fk',
+      columns: [t.companyId, t.userId],
+      foreignColumns: [companyMemberships.companyId, companyMemberships.userId],
+    }).onDelete('cascade'),
   ],
 );

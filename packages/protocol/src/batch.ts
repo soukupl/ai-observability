@@ -30,4 +30,11 @@ export const collectorConfigResponse = z.object({
    * older servers do not send it and the collector falls back to plain SHA-256.
    */
   project_salt: z.string().min(16).max(256).optional(),
+  /**
+   * The company the token reports to (ADR-0022); the collector stores the token under `slug` by default.
+   * Optional so a collector tolerates older servers; this server always sends it.
+   */
+  company: z.object({ name: z.string().min(1), slug: z.string().min(1) }).optional(),
+  /** The member a user token identifies; null for a company token. Optional like `company`. */
+  user: z.object({ email: z.string().min(3) }).nullable().optional(),
 });

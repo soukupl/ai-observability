@@ -11,39 +11,38 @@ import {
   type Database,
 } from '@ai-obs/db';
 import type { ExistingUser } from './provisioning';
+import type { CompanyRole, Plan } from './session';
 
 /**
  * DB access for login. Identity tables (auth_*, magic_links) have no RLS and are only reachable by
- * app_web; users/companies are read and created through the auth_* SECURITY DEFINER functions
- * because no RLS context exists before login (packages/db/README.md).
+ * app_web; users, memberships and companies are read and created through the auth_* SECURITY DEFINER
+ * functions because no RLS context exists before login (packages/db/README.md).
  */
 
-export interface UserRow extends ExistingUser {
+/** An identity (users row) plus how many companies it belongs to (ADR-0022). */
+export interface IdentityRow extends ExistingUser {
   email: string;
   name: string | null;
-  companyRole: 'admin' | 'member';
 }
 
-type RawUser = {
+type RawIdentity = {
   user_id: string;
-  company_id: string | null;
   email: string;
   name: string | null;
-  company_role: 'admin' | 'member';
   is_super_admin: boolean;
-  company_status: 'active' | 'suspended' | null;
+  memberships: string | number;
+  active_memberships: string | number;
 };
 
-const toUser = (r: RawUser | undefined): UserRow | null =>
+const toIdentity = (r: RawIdentity | undefined): IdentityRow | null =>
   r
     ? {
         userId: r.user_id,
-        companyId: r.company_id,
         email: r.email,
         name: r.name,
-        companyRole: r.company_role,
         isSuperAdmin: r.is_super_admin,
-        companyStatus: r.company_status,
+        memberships: Number(r.memberships),
+        activeMemberships: Number(r.active_memberships),
       }
     : null;
 
@@ -52,14 +51,67 @@ async function scalarUuid(db: Database, query: ReturnType<typeof sql>): Promise<
   return rows[0]?.id ?? null;
 }
 
-export async function findUserByEmail(db: Database, email: string): Promise<UserRow | null> {
-  const rows = (await db.execute(sql`select * from auth_find_user_by_email(${email})`)) as unknown as RawUser[];
-  return toUser(rows[0]);
+export async function findUserByEmail(db: Database, email: string): Promise<IdentityRow | null> {
+  const rows = (await db.execute(sql`select * from auth_find_user_by_email(${email})`)) as unknown as RawIdentity[];
+  return toIdentity(rows[0]);
 }
 
-export async function getUser(db: Database, userId: string): Promise<UserRow | null> {
-  const rows = (await db.execute(sql`select * from auth_get_user(${userId}::uuid)`)) as unknown as RawUser[];
-  return toUser(rows[0]);
+export async function getUser(db: Database, userId: string): Promise<IdentityRow | null> {
+  const rows = (await db.execute(sql`select * from auth_get_user(${userId}::uuid)`)) as unknown as RawIdentity[];
+  return toIdentity(rows[0]);
+}
+
+/** One company the user belongs to (auth_user_memberships). */
+export interface MembershipRow {
+  companyId: string;
+  companyName: string;
+  companySlug: string;
+  companyStatus: 'active' | 'suspended';
+  plan: Plan;
+  companyRole: CompanyRole;
+  primaryTeamId: string | null;
+  /** Last time a session started in, or switched to, this company (D4). */
+  lastActiveAt: Date | null;
+  joinedAt: Date;
+}
+
+type RawMembership = {
+  company_id: string;
+  company_name: string;
+  company_slug: string;
+  company_status: 'active' | 'suspended';
+  plan: Plan;
+  company_role: CompanyRole;
+  primary_team_id: string | null;
+  last_active_at: Date | string | null;
+  joined_at: Date | string;
+};
+
+/** Every membership of the user, suspended companies included: last active first, then the oldest. */
+export async function listMemberships(db: Database, userId: string): Promise<MembershipRow[]> {
+  const rows = (await db.execute(sql`select * from auth_user_memberships(${userId}::uuid)`)) as unknown as RawMembership[];
+  return rows.map((r) => ({
+    companyId: r.company_id,
+    companyName: r.company_name,
+    companySlug: r.company_slug,
+    companyStatus: r.company_status,
+    plan: r.plan,
+    companyRole: r.company_role,
+    primaryTeamId: r.primary_team_id,
+    lastActiveAt: r.last_active_at === null ? null : new Date(r.last_active_at),
+    joinedAt: new Date(r.joined_at),
+  }));
+}
+
+/**
+ * Points a live session at a company (null clears it). The SQL only allows an active company the
+ * session's user is a member of, so a forged form value cannot switch into a foreign tenant. true = updated.
+ */
+export async function setSessionCompany(db: Database, tokenHash: string, companyId: string | null): Promise<boolean> {
+  const rows = (await db.execute(
+    sql`select auth_set_session_company(${tokenHash}, ${companyId}::uuid) as ok`,
+  )) as unknown as Array<{ ok: boolean }>;
+  return rows[0]?.ok === true;
 }
 
 /** A pending invitation shown on the sign-up step ("Join <company>, invited by <inviter>?"). */
@@ -85,7 +137,10 @@ type RawInvitation = {
   created_at: Date | string;
 };
 
-/** Pending, unexpired invitations of active companies for an e-mail that has no user yet, newest first. */
+/**
+ * Pending, unexpired invitations of active companies for an e-mail, newest first. Companies the e-mail
+ * already belongs to, and super admins, get none.
+ */
 export async function pendingInvitations(db: Database, email: string): Promise<PendingInvitation[]> {
   const rows = (await db.execute(sql`select * from auth_pending_invitations(${email})`)) as unknown as RawInvitation[];
   return rows.map((r) => ({
@@ -101,11 +156,22 @@ export async function pendingInvitations(db: Database, email: string): Promise<P
 }
 
 /**
- * Accepts exactly the invitation the user picked (it must be pending, unexpired and for this e-mail).
- * Null when it is not, or when the user already exists. Never picks an invitation by itself (SEC-1).
+ * Accepts exactly the invitation the user picked (it must be pending, unexpired and for this e-mail):
+ * finds or creates the identity and adds the membership (and team membership). Null when the invitation
+ * is not acceptable, the e-mail is already a member of that company or a super admin, or the company is
+ * full. Never picks an invitation by itself (SEC-1).
  */
-export const acceptInvitation = (db: Database, email: string, name: string | null, invitationId: string) =>
-  scalarUuid(db, sql`select auth_accept_invitation(${email}, ${name}, ${invitationId}::uuid) as id`);
+export async function acceptInvitation(
+  db: Database,
+  email: string,
+  name: string | null,
+  invitationId: string,
+): Promise<{ userId: string; companyId: string } | null> {
+  const rows = (await db.execute(
+    sql`select user_id, company_id from auth_accept_invitation(${email}, ${name}, ${invitationId}::uuid)`,
+  )) as unknown as Array<{ user_id: string; company_id: string }>;
+  return rows[0] ? { userId: rows[0].user_id, companyId: rows[0].company_id } : null;
+}
 
 export const createSoloCompany = (db: Database, email: string, name: string, company: string) =>
   scalarUuid(db, sql`select auth_create_solo_company(${email}, ${name}, ${company}) as id`);
@@ -139,37 +205,54 @@ export async function consumeMagicLink(db: Database, tokenHash: string): Promise
 
 // ---- sessions ---------------------------------------------------------------------------------
 
-export async function insertSession(db: Database, userId: string, tokenHash: string, ttlMs: number): Promise<void> {
+/** A new session working in `activeCompanyId` (null for super admins); a trigger stamps the membership's last_active_at. */
+export async function insertSession(
+  db: Database,
+  userId: string,
+  tokenHash: string,
+  ttlMs: number,
+  activeCompanyId: string | null,
+): Promise<void> {
   await db.insert(authSessions).values({
     userId,
     tokenHash,
+    activeCompanyId,
     lastSeenAt: sql`now()`,
     expiresAt: sql`now() + ${`${Math.floor(ttlMs / 1000)} seconds`}::interval`,
   });
 }
 
+/** The user and the stored active company of a session. */
+export interface SessionRef {
+  userId: string;
+  activeCompanyId: string | null;
+}
+
 /**
- * The user id of a live session. Slides the expiry to now + ttl at most once per `slideEveryMs`
- * (30-day sliding expiry without a write on every request).
+ * The user and active company of a live session. Slides the expiry to now + ttl at most once per
+ * `slideEveryMs` (30-day sliding expiry without a write on every request).
  */
-export async function touchSession(db: Database, tokenHash: string, ttlMs: number, slideEveryMs: number): Promise<string | null> {
+export async function touchSession(db: Database, tokenHash: string, ttlMs: number, slideEveryMs: number): Promise<SessionRef | null> {
   const ttl = `${Math.floor(ttlMs / 1000)} seconds`;
   const every = `${Math.floor(slideEveryMs / 1000)} seconds`;
   const rows = (await db.execute(sql`
     with s as (
-      select id, user_id, last_seen_at from auth_sessions where token_hash = ${tokenHash} and expires_at > now()
+      select id, user_id, active_company_id, last_seen_at from auth_sessions where token_hash = ${tokenHash} and expires_at > now()
     ), slid as (
       update auth_sessions a set last_seen_at = now(), expires_at = now() + ${ttl}::interval
       from s where a.id = s.id and (s.last_seen_at is null or s.last_seen_at < now() - ${every}::interval)
     )
-    select user_id from s`)) as unknown as Array<{ user_id: string }>;
-  return rows[0]?.user_id ?? null;
+    select user_id, active_company_id from s`)) as unknown as Array<{ user_id: string; active_company_id: string | null }>;
+  return rows[0] ? { userId: rows[0].user_id, activeCompanyId: rows[0].active_company_id } : null;
 }
 
-/** Deletes the session; returns its user id (for the audit entry) or null. */
-export async function deleteSession(db: Database, tokenHash: string): Promise<string | null> {
-  const rows = await db.delete(authSessions).where(eq(authSessions.tokenHash, tokenHash)).returning({ userId: authSessions.userId });
-  return rows[0]?.userId ?? null;
+/** Deletes the session; returns its user and active company (for the audit entry) or null. */
+export async function deleteSession(db: Database, tokenHash: string): Promise<SessionRef | null> {
+  const rows = await db
+    .delete(authSessions)
+    .where(eq(authSessions.tokenHash, tokenHash))
+    .returning({ userId: authSessions.userId, activeCompanyId: authSessions.activeCompanyId });
+  return rows[0] ?? null;
 }
 
 // ---- OAuth accounts ---------------------------------------------------------------------------
@@ -189,56 +272,61 @@ export async function linkAccount(db: Database, userId: string, provider: string
 // ---- company context + audit ------------------------------------------------------------------
 
 export interface CompanyContext {
-  company: { id: string; name: string; slug: string; plan: 'free' | 'team' | 'business'; settings: Record<string, unknown> };
+  company: { id: string; name: string; slug: string; plan: Plan; settings: Record<string, unknown> };
   teams: { id: string; name: string; role: 'member' | 'lead' }[];
   primaryTeamId: string | null;
 }
 
-/** Company + the user's teams, read under the user's own RLS context. */
-export async function loadCompanyContext(db: Database, user: UserRow): Promise<CompanyContext | null> {
-  if (!user.companyId) return null;
-  return withRlsContext(db, { companyId: user.companyId, userId: user.userId, role: user.companyRole }, async (tx) => {
+/** The membership a request works in: which company, which role there, which primary team. */
+export interface ActiveMembership {
+  userId: string;
+  companyId: string;
+  companyRole: CompanyRole;
+  primaryTeamId: string | null;
+}
+
+/** Company + the user's teams in it, read under the user's own RLS context. The primary team comes from the membership. */
+export async function loadCompanyContext(db: Database, m: ActiveMembership): Promise<CompanyContext | null> {
+  return withRlsContext(db, { companyId: m.companyId, userId: m.userId, role: m.companyRole }, async (tx) => {
     const [company] = await tx
       .select({ id: companies.id, name: companies.name, slug: companies.slug, plan: companies.plan, settings: companies.settings })
       .from(companies)
-      .where(eq(companies.id, user.companyId!));
+      .where(eq(companies.id, m.companyId));
     if (!company) return null;
     const memberTeams = await tx
       .select({ id: teams.id, name: teams.name, role: teamMemberships.role })
       .from(teamMemberships)
       .innerJoin(teams, eq(teams.id, teamMemberships.teamId))
-      .where(eq(teamMemberships.userId, user.userId))
+      .where(and(eq(teamMemberships.userId, m.userId), eq(teamMemberships.companyId, m.companyId)))
       .orderBy(asc(teams.name));
-    const [row] = (await tx.execute(sql`select primary_team_id from users where id = ${user.userId}`)) as unknown as Array<{
-      primary_team_id: string | null;
-    }>;
     return {
       company: { ...company, settings: company.settings as unknown as Record<string, unknown> },
       teams: memberTeams,
-      primaryTeamId: row?.primary_team_id ?? null,
+      primaryTeamId: m.primaryTeamId,
     };
   });
 }
 
-export type AuthAuditAction = 'auth.login' | 'auth.logout' | 'auth.signup' | 'auth.invitation_accepted';
+export type AuthAuditAction = 'auth.login' | 'auth.logout' | 'auth.signup' | 'auth.invitation_accepted' | 'auth.company_switch';
 
 /**
- * audit_log entry in the actor's own name. Company users write through app_web under their RLS
- * context; super admins (no company) write a platform-level row through app_platform.
- * Meta carries the login method only — no IPs, no e-mails.
+ * audit_log entry in the actor's own name, in the company it concerns. Company users write through
+ * app_web under their RLS context in that company; company-less users (super admins) write a
+ * platform-level row through app_platform. Meta carries the login method only — no IPs, no e-mails,
+ * no other company's id.
  */
 export async function writeAudit(
   dbs: { web: Database; platform: Database },
-  user: Pick<UserRow, 'userId' | 'companyId' | 'companyRole'>,
+  actor: { userId: string; companyId: string | null; companyRole: CompanyRole },
   action: AuthAuditAction,
   meta: Record<string, string> = {},
 ): Promise<void> {
-  const values = { companyId: user.companyId, actorUserId: user.userId, action, target: `user:${user.userId}`, meta };
-  if (!user.companyId) {
+  const values = { companyId: actor.companyId, actorUserId: actor.userId, action, target: `user:${actor.userId}`, meta };
+  if (!actor.companyId) {
     await dbs.platform.insert(auditLog).values(values);
     return;
   }
-  await withRlsContext(dbs.web, { companyId: user.companyId, userId: user.userId, role: user.companyRole }, (tx) =>
+  await withRlsContext(dbs.web, { companyId: actor.companyId, userId: actor.userId, role: actor.companyRole }, (tx) =>
     tx.insert(auditLog).values(values),
   );
 }

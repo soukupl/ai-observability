@@ -82,20 +82,28 @@ export function createCodexAdapter(deps: CodexAdapterDeps = {}): HarnessAdapter 
     state.offset = r.offset;
   }
 
-  function save(ctx: CollectorContext, state: CodexSessionState, out: IngestEvent[]): void {
-    if (out.length) ctx.queue.enqueue(out.splice(0));
+  /**
+   * Enqueues into the session's stream and saves the state with the pin. `pin` (a hook of the session
+   * itself) pins the stream even when nothing is enqueued yet, so the binding is the routing in force at
+   * the session's first hook (C12, C18), not at its first event: a SessionStart whose rollout is not
+   * written yet must not leave the session to be bound under a later `token add` / `use`.
+   */
+  async function save(ctx: CollectorContext, state: CodexSessionState, out: IngestEvent[], capturedAt: number, pin = false): Promise<void> {
+    if (out.length) ctx.queue.enqueue(out.splice(0), await ctx.streamFor(state, capturedAt));
+    else if (pin && !state.stream && state.pkCwd) await ctx.streamFor(state, capturedAt);
     ctx.state.set(state.sessionId, state);
   }
 
-  async function summarizeDigests(ctx: CollectorContext, state: CodexSessionState): Promise<void> {
+  async function summarizeDigests(ctx: CollectorContext, state: CodexSessionState, capturedAt: number): Promise<void> {
     if (!state.digests.length) return;
+    const key = await ctx.streamFor(state, capturedAt);
     const digests = state.digests;
     state.digests = [];
     ctx.state.set(state.sessionId, state);
-    await ctx.summarizeTurns(digests);
+    await ctx.summarizeTurns(digests, key);
   }
 
-  async function onSubagentStop(p: Obj, ctx: CollectorContext, home: string, receivedAt: number): Promise<void> {
+  async function onSubagentStop(p: Obj, ctx: CollectorContext, home: string, receivedAt: number, cwd: string): Promise<void> {
     const agentId = str(p.agent_id)?.toLowerCase();
     if (!agentId) return;
     const hint = str(p.agent_transcript_path);
@@ -139,7 +147,8 @@ export function createCodexAdapter(deps: CodexAdapterDeps = {}): HarnessAdapter 
       if (t) refreshEmittedTurn(state, env, t.input.turnId, [direct]);
     }
     state.lastActivityAt = Math.max(state.lastActivityAt, receivedAt);
-    save(ctx, state, out);
+    state.pkCwd ??= state.meta?.cwd ?? cwd;
+    await save(ctx, state, out, receivedAt);
   }
 
   /** Ends idle sessions (no SessionEnd: crash, kill, old Codex) and drops stale state. */
@@ -159,8 +168,9 @@ export function createCodexAdapter(deps: CodexAdapterDeps = {}): HarnessAdapter 
       const env = makeEnv(ctx, home, out);
       await sync(state, env, home, null, ctx);
       endSession(state, env, 'crashed', state.lastActivityAt);
-      save(ctx, state, out);
-      await summarizeDigests(ctx, state);
+      state.pkCwd ??= state.meta?.cwd ?? null; // a 0.1.x state without session_meta: its events are dropped (C16)
+      await save(ctx, state, out, now);
+      await summarizeDigests(ctx, state, now);
     }
     writeJsonAtomic(sweepMarker(ctx), { at: now });
   }
@@ -208,7 +218,7 @@ export function createCodexAdapter(deps: CodexAdapterDeps = {}): HarnessAdapter 
       const hook = hookKey(event.hook);
       const home = homeOf(event.env);
       const receivedAt = Date.parse(event.receivedAt) || ctx.now().getTime();
-      if (hook === 'subagentstop') return onSubagentStop(p, ctx, home, receivedAt);
+      if (hook === 'subagentstop') return onSubagentStop(p, ctx, home, receivedAt, event.cwd);
       const sessionId = str(p.session_id);
       if (!sessionId) {
         ctx.log.warn('codex: hook payload without session_id', { hook: event.hook });
@@ -244,9 +254,11 @@ export function createCodexAdapter(deps: CodexAdapterDeps = {}): HarnessAdapter 
         endSession(state, env, reason && reason !== 'other' ? reason : 'exit', receivedAt);
       }
       state.lastActivityAt = Math.max(state.lastActivityAt, receivedAt);
-      save(ctx, state, out);
+      // the session's first cwd (session_meta when already read, else this hook's) pins its project (C15)
+      state.pkCwd ??= state.meta?.cwd ?? event.cwd;
+      await save(ctx, state, out, receivedAt, true);
 
-      if (state.ended || state.digests.length >= SUMMARY_BATCH) await summarizeDigests(ctx, state);
+      if (state.ended || state.digests.length >= SUMMARY_BATCH) await summarizeDigests(ctx, state, receivedAt);
       if (!adapter.sessionStartHooks.includes(event.hook)) {
         const last = readJsonFile<{ at?: number }>(sweepMarker(ctx))?.at ?? 0;
         if (ctx.now().getTime() - last > IDLE_END_MS) await sweep(ctx);

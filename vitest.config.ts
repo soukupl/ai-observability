@@ -10,20 +10,27 @@ const alias = {
   '@ai-obs/db': src('db'),
 };
 
-const project = (name: string, root: string) => ({
+/**
+ * Projects with real-Postgres suites (each creates, migrates and drops its own database) get more headroom than
+ * vitest's 5 s / 10 s defaults: with every project's files running in parallel, a migration or a seed can take
+ * longer on a busy machine without anything being wrong.
+ */
+const pgTimeouts = { testTimeout: 30_000, hookTimeout: 60_000 };
+
+const project = (name: string, root: string, timeouts: { testTimeout?: number; hookTimeout?: number } = {}) => ({
   extends: false as const,
   resolve: { alias },
-  test: { name, root, environment: 'node' as const, include: ['test/**/*.test.ts', 'src/**/*.test.ts', 'src/**/*.test.tsx'] },
+  test: { name, root, environment: 'node' as const, include: ['test/**/*.test.ts', 'src/**/*.test.ts', 'src/**/*.test.tsx'], ...timeouts },
 });
 
 export default defineConfig({
   test: {
     projects: [
       project('protocol', './packages/protocol'),
-      project('db', './packages/db'),
+      project('db', './packages/db', pgTimeouts),
       project('collector', './packages/collector'),
-      project('worker', './apps/worker'),
-      project('web', './apps/web'),
+      project('worker', './apps/worker', pgTimeouts),
+      project('web', './apps/web', pgTimeouts),
     ],
   },
 });
