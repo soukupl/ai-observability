@@ -26,7 +26,8 @@ export interface ShellUser {
  * Dashboard frame: sidebar (a menu on phones), top bar with the company switcher, theme toggle and user
  * menu, and the visibility-mode footer line (the banner itself is rendered by the dashboard layout).
  * The company switcher is in the header from md up and in the user menu (the phone placement); both
- * render from companySwitcherModel. `pendingInvitations` adds an "Invitations (n)" link to the user menu.
+ * render from companySwitcherModel; the user menu is keyed by the active company so it closes after a
+ * switch. `pendingInvitations` adds an "Invitations (n)" link to the user menu.
  * Server component: only NavLinks / ThemeToggle are client code.
  */
 export function AppShell({ user, pendingInvitations = 0, children }: { user: ShellUser; pendingInvitations?: number; children: ReactNode }) {
@@ -62,7 +63,7 @@ export function AppShell({ user, pendingInvitations = 0, children }: { user: She
           <CompanySwitcher model={switcher} />
           <div className="ml-auto flex items-center gap-2">
             <ThemeToggle />
-            <details className="relative">
+            <details key={user.company?.id ?? 'platform'} className="relative">
               <summary className="flex h-9 cursor-pointer list-none items-center gap-2 rounded-md border border-zinc-200 px-3 text-sm dark:border-zinc-700 [&::-webkit-details-marker]:hidden">
                 <span className="max-w-32 truncate sm:max-w-48">{user.name || user.email}</span>
               </summary>

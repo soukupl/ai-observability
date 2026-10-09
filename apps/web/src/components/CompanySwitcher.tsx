@@ -46,6 +46,7 @@ export function CompanySwitchList({ items }: { items: Items }) {
 /**
  * The company in the header (md and up): "Platform" for super admins, the plain name for one company,
  * and a dropdown of every company for two or more (ADR-0022). Rendered only from companySwitcherModel.
+ * Keyed by the active company so the layout's re-render after a switch remounts it closed.
  */
 export function CompanySwitcher({ model }: { model: SwitcherModel }) {
   if (model.mode !== 'switcher') {
@@ -56,7 +57,7 @@ export function CompanySwitcher({ model }: { model: SwitcherModel }) {
     );
   }
   return (
-    <details className="relative hidden md:block">
+    <details key={model.active.companyId} className="relative hidden md:block">
       <summary className="flex h-9 cursor-pointer list-none items-center gap-1 rounded-md px-2 text-sm text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800 [&::-webkit-details-marker]:hidden">
         <span className="max-w-48 truncate">{model.active.name}</span>
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
