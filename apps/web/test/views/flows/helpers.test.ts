@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { groupColorIndex } from '../../../src/components/charts/agent-graph-layout';
 import {
+  barSegments,
   flowChart,
   flowChartDescription,
   flowFacts,
@@ -10,7 +11,9 @@ import {
   flowKpis,
   flowsListHref,
   mcpText,
+  parseFlowGroup,
   parseFlowKey,
+  reportHref,
   skillsText,
   stageBar,
   STEP_LABEL_CHARS,
@@ -18,6 +21,7 @@ import {
   toFlowTableRows,
   toStepRows,
   turnHref,
+  turnUsesSummary,
   usesSummary,
 } from '../../../src/app/(dashboard)/flows/_helpers';
 import type { Flow, FlowStep } from '../../../src/lib/queries/flows';
@@ -85,6 +89,22 @@ describe('flows list helpers', () => {
     expect(flowsListHref({ outcome: 'failed' }, { outcome: null })).toBe('/flows');
     expect(flowsListHref({ range: '7d', outcome: 'failed' }, { page: 2 })).toBe('/flows?range=7d&outcome=failed&page=2');
     expect(flowsListHref({ range: ['7d', '30d'] }, { page: 1 })).toBe('/flows?range=7d');
+  });
+
+  it('keeps the agent group filter across page / outcome changes, sets it, and clears it', () => {
+    expect(flowsListHref({ range: '7d', group: 'workflow:review' }, { page: 2 })).toBe('/flows?range=7d&group=workflow%3Areview&page=2');
+    expect(flowsListHref({ range: '7d', group: 'Explore', page: '4' }, { outcome: 'failed' })).toBe('/flows?range=7d&group=Explore&outcome=failed');
+    expect(flowsListHref({ range: '7d' }, { group: 'Explore' })).toBe('/flows?range=7d&group=Explore');
+    expect(flowsListHref({ range: '7d', group: 'Explore', page: '2' }, { group: null })).toBe('/flows?range=7d');
+  });
+
+  it('parses the group param: trimmed, at most 128 chars, else null', () => {
+    expect(parseFlowGroup({ group: ' Explore ' })).toBe('Explore');
+    expect(parseFlowGroup({ group: ['a', 'b'] })).toBe('a');
+    expect(parseFlowGroup({})).toBeNull();
+    expect(parseFlowGroup({ group: '   ' })).toBeNull();
+    expect(parseFlowGroup({ group: 'x'.repeat(129) })).toBeNull();
+    expect(parseFlowGroup({ group: 'x'.repeat(128) })).toBe('x'.repeat(128));
   });
 
   it('links a flow to its detail page and its turn', () => {
@@ -280,5 +300,40 @@ describe('flow detail helpers', () => {
     expect([c.fromMs, c.toMs]).toEqual([T0 - S, T0 + S]);
     expect(c.lanes[0]!.stages).toEqual([]);
     expect(c.nodes.every((n) => n.stageIndex === null)).toBe(true);
+  });
+});
+
+describe('flow report helpers', () => {
+  it('reportHref mirrors flowHref: /report/flows/<turn>/<key>?startedMs=, encoding an unsafe key', () => {
+    expect(reportHref({ turnId: 't1', key: 'wf_abc', turn: { startedMs: 123 } })).toBe('/report/flows/t1/wf_abc?startedMs=123');
+    expect(reportHref({ turnId: 't1', key: 'a b/c', turn: { startedMs: 5 } })).toBe('/report/flows/t1/a%20b%2Fc?startedMs=5');
+  });
+
+  it('turnUsesSummary: unavailable when the turn carries no uses (list path / limited), empty when it used nothing', () => {
+    expect(turnUsesSummary({})).toEqual({ skills: null, mcp: [], available: false });
+    expect(turnUsesSummary({ skills: null, mcp: null })).toEqual({ skills: null, mcp: [], available: false });
+    expect(turnUsesSummary({ skills: {}, mcp: {} })).toEqual({ skills: null, mcp: [], available: true });
+  });
+
+  it('turnUsesSummary formats the main agent uses like usesSummary (steps-only flows keep the turn line empty)', () => {
+    const t = turnUsesSummary({ skills: { adr: { model: 0, user: 2 }, tdd: { model: 1, user: 0 } }, mcp: { github: { search_code: 3, get_me: 1 }, empty: { x: 0 } } });
+    expect(t.available).toBe(true);
+    expect(t.skills).toBe('adr (typed ×2), tdd (by the model ×1)');
+    expect(t.mcp).toEqual([{ server: 'github', label: 'github', calls: 'search_code ×3, get_me ×1' }]);
+    // a flow whose steps used nothing still has usesSummary empty, independent of the turn line
+    expect(usesSummary({ skills: null, mcp: null })).toEqual({ skills: null, mcp: [] });
+  });
+
+  it('barSegments: shares sum to 1 in key order, zero / missing keys skipped, colours follow colorIndex, named keys, then position', () => {
+    const segs = barSegments({ thinking: 30, coding: 60, testing: 0 }, ['thinking', 'coding', 'testing', 'other']);
+    expect(segs.map((s) => s.key)).toEqual(['thinking', 'coding']);
+    expect(segs.map((s) => s.share)).toEqual([1 / 3, 2 / 3]);
+    expect(segs[0]!.color).toBe('#7c3aed'); // named phase colour (light)
+    expect(segs[1]!.color).toBe('#2563eb');
+    expect(barSegments({}, ['a'])).toEqual([]);
+    // colorIndex wins: index 1 of the palette, null = grey other; a key not in colorIndex falls back to its position
+    const c = barSegments({ impl: 1, verify: 1, unstaged: 2 }, ['impl', 'verify', 'unstaged'], { impl: 1, verify: null });
+    expect(c.map((s) => s.color)).toEqual(['#d97706', '#71717a', '#059669']);
+    expect(c.map((s) => s.share)).toEqual([0.25, 0.25, 0.5]);
   });
 });

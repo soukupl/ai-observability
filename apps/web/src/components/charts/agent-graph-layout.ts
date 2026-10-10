@@ -31,6 +31,8 @@ export interface GraphRun {
   endMs: number;
   outcome: string;
   model: string | null;
+  /** Link of the branch (the run's flow detail, else its turn); absent or null = not a link. */
+  href?: string | null;
 }
 
 export interface LayoutOptions {

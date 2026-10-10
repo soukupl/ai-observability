@@ -220,3 +220,26 @@ describe('codex adapter: incremental processing', () => {
     expect(ofType(early.events, 'turn_summary').length).toBe(2);
   });
 });
+
+describe('codex adapter: mid-session summaries (ADR-0023)', () => {
+  const lines = fixtureLines('main-rollout.jsonl');
+  const t1Complete = lines.findIndex((l) => l.includes('"task_complete"'));
+
+  it('summarizes a waiting turn once it has waited 10 minutes, not before', async () => {
+    const env = codexTestEnv();
+    env.writeChild(fixtureLines('child-rollout.jsonl'));
+    env.writeMain(lines.slice(0, t1Complete + 1));
+    await env.hook('Stop', { turn_id: T1, last_assistant_message: 'Added it.' }, '2026-10-05T10:00:53Z');
+    expect(ofType(env.events, 'turn').map((t) => t.turn_id)).toEqual([T1]);
+    expect(ofType(env.events, 'turn_summary')).toHaveLength(0);
+
+    await env.hook('Stop', { turn_id: T1 }, '2026-10-05T10:02:53Z'); // 2 minutes: still waiting
+    expect(ofType(env.events, 'turn_summary')).toHaveLength(0);
+
+    await env.hook('Stop', { turn_id: T1 }, '2026-10-05T10:11:53Z'); // 11 minutes after the wait began
+    expect(ofType(env.events, 'turn_summary').map((s) => s.turn_id)).toEqual([T1]);
+    const state = env.ctx.state.get<{ digests: unknown[]; digestsSince?: number }>(SESSION)!;
+    expect(state.digests).toEqual([]);
+    expect(state.digestsSince).toBeUndefined();
+  });
+});

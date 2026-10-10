@@ -11,6 +11,8 @@ import { formatInt, formatPercent, formatTokens } from './format';
  */
 
 type SortKey = 'group' | 'typeCount' | 'spawns' | 'tokens' | 'tokenShare' | 'successRate' | 'unknownShare' | 'avgDepth' | 'maxDepth';
+/** The unsortable "Flows" link column, shown when the page passes `flowsQuery`. */
+const FLOWS_COL = { header: 'Flows', hint: 'Multi-step agent flows with a step of this group, under the same filters.' };
 interface Col {
   key: SortKey;
   header: string;
@@ -46,15 +48,24 @@ function sortValue(g: AgentGroupRow, key: SortKey): number | string | null {
 const depth = (v: number | null): string => (v === null ? '—' : String(Math.round(v * 10) / 10));
 const domId = (s: string): string => s.replace(/[^A-Za-z0-9_-]/g, '_');
 
+/** `/flows?<query>&group=<group>`: the flows list filtered to flows with a step of `group` (query may be empty). */
+export function flowsLinkFor(flowsQuery: string, group: string): string {
+  const q = flowsQuery ? `${flowsQuery}&` : '';
+  return `/flows?${q}group=${encodeURIComponent(group)}`;
+}
+
 export function AgentGroupsTable({
   rows,
   exportHref,
+  flowsQuery,
   emptyMessage = 'No sub-agent runs for this selection.',
   caption = 'Sub-agent usage per agent group',
 }: {
   rows: AgentGroupRow[];
   /** Link to /api/export (see export-url.ts); shows the "Export CSV" button. */
   exportHref?: string;
+  /** Current filters as a query string (no `?`); when given, every row gets a "flows →" link to /flows for its group. */
+  flowsQuery?: string;
   emptyMessage?: string;
   caption?: string;
 }) {
@@ -134,6 +145,11 @@ export function AgentGroupsTable({
                     </th>
                   );
                 })}
+                {flowsQuery !== undefined && (
+                  <th scope="col" title={FLOWS_COL.hint} className="whitespace-nowrap px-2 py-2 text-left font-medium">
+                    {FLOWS_COL.header}
+                  </th>
+                )}
               </tr>
             </thead>
             <tbody>
@@ -166,6 +182,7 @@ export function AgentGroupsTable({
                       <Num>{formatPercent(g.unknownShare)}</Num>
                       <Num>{depth(g.avgDepth)}</Num>
                       <Num>{formatInt(g.maxDepth)}</Num>
+                      {flowsQuery !== undefined && <FlowsLink href={flowsLinkFor(flowsQuery, g.group)} label={`flows of ${g.group}`} />}
                     </tr>
                     {expanded &&
                       g.types.map((t, i) => (
@@ -185,6 +202,7 @@ export function AgentGroupsTable({
                           <Num small>{formatPercent(t.unknownShare)}</Num>
                           <Num small>{depth(t.avgDepth)}</Num>
                           <Num small>{formatInt(t.maxDepth)}</Num>
+                          {flowsQuery !== undefined && <FlowsLink small href={flowsLinkFor(flowsQuery, g.group)} label={`flows of ${t.agentType} (group ${g.group})`} />}
                         </tr>
                       ))}
                   </Fragment>
@@ -195,6 +213,16 @@ export function AgentGroupsTable({
         </div>
       )}
     </div>
+  );
+}
+
+function FlowsLink({ href, label, small = false }: { href: string; label: string; small?: boolean }) {
+  return (
+    <td className={`px-2 ${small ? 'py-1.5 text-xs' : 'py-2'} whitespace-nowrap text-left align-middle`}>
+      <a href={href} aria-label={label} className="font-medium text-blue-700 hover:underline dark:text-blue-400">
+        flows →
+      </a>
+    </td>
   );
 }
 

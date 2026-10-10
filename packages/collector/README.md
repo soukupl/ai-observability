@@ -241,7 +241,7 @@ Shared, harness-neutral helpers:
 | `src/analysis/outcome.ts` | `provisionalOutcome(signals)`, `finalOutcome(provisional, followUp)`, `isRevertCommand`, `editFingerprint` / `detectRevert` |
 | `src/analysis/corrections.ts` | `looksLikeCorrection(nextPrompt)`: EN and CZ heuristics |
 | `src/analysis/digest.ts` | `buildDigest()`. Truncates the prompt and the last message to 300 chars. Digests are used locally only |
-| `src/analysis/summaries.ts` | `summarizeWithCommand`, `runSummaryCommand` (sets `AI_OBS_SUMMARIZING=1`, 120 s timeout), `buildSummaryPrompt`, `parseSummaryResponse` |
+| `src/analysis/summaries.ts` | `summarizeWithCommand`, `runSummaryCommand` (sets `AI_OBS_SUMMARIZING=1`, 120 s timeout), `buildSummaryPrompt`, `parseSummaryResponse`, `summariesDue` (session end / `SUMMARY_BATCH` = 10 turns / `SUMMARY_MAX_WAIT_MS` = 10 min, ADR-0023) |
 | `src/project-key.ts` `resolveProjectKey(cwd)` | The plain project key: normalized git remote, else git top level, else the directory. Hashing happens at send time |
 | `src/analysis/usage.ts` | Skill / MCP usage (ADR-0016): `parseMcpTool`, `addSkill`, `addMcp`, `mcpFromTools`, `mergeSkills` / `mergeMcp`, wire normalisation, `skillReadBy` (Codex SKILL.md reads) and `applyUsageNaming` / `hashUsageName`. Adapters pass **plain** names to `turnEvent` / `runEvent` (`skills`, `mcp`); the sender hashes them in `hashed` mode when it sends |
 
@@ -276,7 +276,7 @@ The real hook and transcript format (field names, version 2.1.289) is documented
 | Module | Role |
 |---|---|
 | `index.ts` | The adapter (`createClaudeCodeAdapter()` for tests) and the summary command |
-| `handlers.ts` | Hook dispatch, `session_start` / `session_end`, crash sweep, summaries at session end |
+| `handlers.ts` | Hook dispatch, `session_start` / `session_end`, crash sweep, summaries (at session end, every 10 turns, or after 10 minutes) |
 | `session.ts` | Turn segmentation from the cursor, continuations, outcome patches, sub-agent runs |
 | `analyze.ts` | One stretch of activity: tokens, phases, tools, edits, checks, interrupts |
 | `transcript.ts` | Byte-cursor JSONL reader; slims each line to ids, numbers and phase decisions |
@@ -378,7 +378,9 @@ How the adapter works:
   - **What it sends:** the remaining turns, the outcome patches and `session_end` with reason
     `crashed`, followed by the summaries.
   - **Clean-up:** the state of ended sessions is deleted after 30 days.
-- **Summaries** run at `SessionEnd`: `claude -p --model haiku --output-format json
+- **Summaries** run at `SessionEnd`, and earlier once 10 turns are waiting or the first waiting turn
+  has waited 10 minutes (`summariesDue`, ADR-0023; the wait starts at the hook that first saw the turn
+  waiting, `digestsSince` in the session state): `claude -p --model haiku --output-format json
   --no-session-persistence --tools ""`, with the batched prompt on stdin and `AI_OBS_SUMMARIZING=1`.
   The command runs in the OS temp dir, and the reply's `result` field is parsed.
 
@@ -413,7 +415,9 @@ How the adapter works:
 - **Tokens** come from the differences between cumulative `total_token_usage` snapshots. Repeated
   snapshots are skipped, and cached input is subtracted from input.
 - **Session state** is stored in `state/codex/<session>.json`. It holds the byte cursor, the open turn,
-  the previous turn's outcome and the pending digests.
+  the previous turn's outcome and the pending digests. Summaries run at `SessionEnd`, once 10 turns are
+  waiting, or once the first waiting turn has waited 10 minutes (same `summariesDue` rule as Claude Code,
+  ADR-0023).
 - **Idle sessions:** a session whose rollout has been idle for more than 1 h without a `SessionEnd`
   (crash or kill) is ended by the sweep with reason `crashed`.
 - **Resumed sessions:** a session that started before `init` and is resumed afterwards is back-filled

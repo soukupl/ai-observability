@@ -1,6 +1,7 @@
 import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import { looksLikeCorrection } from '../../analysis/corrections.js';
+import { summariesDue } from '../../analysis/summaries.js';
 import { sessionEndEvent, sessionStartEvent } from '../../events.js';
 import type { CollectorContext, HookInvocation } from '../types.js';
 import { cachedVersion, type VersionProbe } from './detect.js';
@@ -137,20 +138,23 @@ function endSession(em: Emitter, reason: string, at: number): void {
 
 /**
  * Enqueue into the session's stream (pinned at its first hook, which always carries `session_start`;
- * `capturedAt` = that job's received_at; C12, C15), save the cursor and the pin, then (session over)
- * summarize its turns.
+ * `capturedAt` = that job's received_at; C12, C15), save the cursor and the pin, then summarize the waiting
+ * turns when they are due (session over, 10 waiting, or the first has waited 10 minutes; ADR-0023).
  */
 async function finish(em: Emitter, ctx: CollectorContext, capturedAt: number): Promise<void> {
+  const st = em.state;
   // Turns about to fall out of the state file never see a follow-up: settle them now.
-  settleTurns(em, evictedUnsettledTurns(em.state), em.state.lastSeen);
-  const summarize = em.state.ended && em.state.digests.length > 0;
-  const key = em.events.length || summarize ? await ctx.streamFor(em.state, capturedAt) : null;
+  settleTurns(em, evictedUnsettledTurns(st), st.lastSeen);
+  if (st.digests.length > 0 && st.digestsSince === undefined) st.digestsSince = capturedAt;
+  const summarize = summariesDue({ ended: st.ended, pending: st.digests.length, since: st.digestsSince, now: capturedAt });
+  const key = em.events.length || summarize ? await ctx.streamFor(st, capturedAt) : null;
   if (em.events.length) ctx.queue.enqueue(em.events, key);
-  saveSession(ctx.state, em.state);
+  saveSession(ctx.state, st);
   if (summarize) {
-    const digests = em.state.digests;
-    em.state.digests = [];
-    saveSession(ctx.state, em.state);
+    const digests = st.digests;
+    st.digests = [];
+    delete st.digestsSince;
+    saveSession(ctx.state, st);
     await ctx.summarizeTurns(digests, key); // retries failures itself
   }
 }

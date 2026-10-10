@@ -215,9 +215,11 @@ provisional outcome and later sends a `turn_outcome` patch event.
 
 ### 5.6 Summaries (always on, local)
 
-- At `SessionEnd` (or when the queue flushes), the collector builds a condensed local digest per turn
-  (truncated prompt, tool names, last assistant message) and makes **one batched headless call** to
-  the harness's cheapest model: `claude -p --model haiku …` / `codex exec -m <mini model> …`.
+- The collector builds a condensed local digest per finished turn (truncated prompt, tool names, last
+  assistant message) and makes **one batched headless call** to the harness's cheapest model
+  (`claude -p --model haiku …` / `codex exec -m <mini model> …`) at `SessionEnd`, or earlier once
+  10 turns are waiting or the first waiting turn is 10 minutes old (ADR-0023), so a long session does
+  not leave its turns without summaries for hours.
 - Output: ≤ 140-char summary per turn, sent as `turn_summary` patch events. Only the summary leaves
   the machine.
 - Recursion guard: the child process gets `AI_OBS_SUMMARIZING=1`; all hook handlers exit immediately

@@ -1,7 +1,10 @@
 import type { AgentGraphProps } from '@/components/charts/AgentGraph';
 import { formatClock, type GraphLane, type GraphRun, type GraphTurn } from '../../../components/charts/agent-graph-layout';
 import { agentRunLabel } from '../../../lib/queries/agent-groups';
-import { TIMELINE_PARAMS, type AgentTimelineResult } from '../../../lib/queries/agent-timeline';
+import { TIMELINE_PARAMS, type AgentTimelineResult, type TimelineRun, type TimelineTurn } from '../../../lib/queries/agent-timeline';
+import type { Flow, FlowRunInput, FlowTurn } from '../../../lib/queries/flows';
+import { emptyTokens } from '../../../lib/queries/sqlutil';
+import { flowHref } from '../flows/_helpers';
 
 /**
  * Server-side mapping of the agent timeline (ADR-0019) to the git-graph props: one lane per session, lanes ordered by
@@ -41,11 +44,73 @@ export function laneSublabel(harness: string, firstMs: number, dayStartMs: numbe
   return `${harness} · ${firstMs < dayStartMs ? `${day} ` : ''}${formatClock(firstMs)}`;
 }
 
+/** Turn detail link of a timeline turn (the default target of its runs). */
+export const turnHref = (t: Pick<TimelineTurn, 'id' | 'startedMs'>): string => `/turns/${t.id}?startedMs=${t.startedMs}`;
+
+/**
+ * The window's runs and turns in the shape `buildFlows` (lib/queries/flows) reads, so the Agents page can find which
+ * flow each drawn run belongs to. The timeline carries one token total per run (no split) and no effort; neither matters
+ * for membership.
+ */
+export function timelineFlowInput(r: Pick<AgentTimelineResult, 'turns' | 'runs'>): { runs: FlowRunInput[]; turns: Map<string, FlowTurn> } {
+  const turns = new Map<string, FlowTurn>(
+    r.turns.map((t) => [
+      t.id,
+      { id: t.id, startedMs: t.startedMs, projectId: t.projectId, projectName: t.projectName, harness: t.harness, summary: t.summary, isMine: t.isMine },
+    ]),
+  );
+  const runs: FlowRunInput[] = r.runs.map((x: TimelineRun) => ({
+    id: x.id,
+    turnId: x.turnId,
+    parentRunId: x.parentRunId,
+    agentType: x.agentType,
+    agentGroup: x.agentGroup,
+    orchestrationId: x.orchestrationId,
+    stageIndex: x.stageIndex,
+    depth: x.depth,
+    model: x.model,
+    effort: null,
+    startedMs: x.startedMs,
+    endedMs: x.endedMs,
+    durationMs: x.durationMs,
+    tokens: { ...emptyTokens(), total: x.tokens },
+    outcome: x.outcome,
+  }));
+  return { runs, turns };
+}
+
+/**
+ * Link target per run id: a run that is a step of a flow opens that flow's detail page; every other run of a listed
+ * turn opens its turn. Runs of unknown turns get no entry.
+ */
+export function runHrefs(
+  flows: Pick<Flow, 'turnId' | 'key' | 'steps' | 'turn'>[],
+  turns: Pick<TimelineTurn, 'id' | 'startedMs'>[],
+  runs: Pick<TimelineRun, 'id' | 'turnId'>[],
+): Map<string, string> {
+  const byTurn = new Map(turns.map((t) => [t.id, turnHref(t)]));
+  const out = new Map<string, string>();
+  for (const x of runs) {
+    const h = byTurn.get(x.turnId);
+    if (h) out.set(x.id, h);
+  }
+  for (const f of flows) {
+    const h = flowHref(f);
+    for (const s of f.steps) if (byTurn.has(f.turnId)) out.set(s.runId, h);
+  }
+  return out;
+}
+
 /**
  * Lanes, turns, runs and the project legend of the window. `groupOrder` ranks the agent groups for their colours (the
  * Agents page passes its groups by spawns in the filter range, so colours stay put when the window changes).
+ * `runHrefById` (runHrefs) makes each run a link; without it a run opens its turn.
  */
-export function timelineGraph(r: Pick<AgentTimelineResult, 'window' | 'turns' | 'runs'>, groupOrder?: string[]): TimelineGraph {
+export function timelineGraph(
+  r: Pick<AgentTimelineResult, 'window' | 'turns' | 'runs'>,
+  groupOrder?: string[],
+  runHrefById?: ReadonlyMap<string, string>,
+): TimelineGraph {
   // Project legend: the projects present, sorted by name; the index is the colour.
   const projects = new Map<string, ProjectKey>();
   for (const t of r.turns) {
@@ -82,11 +147,12 @@ export function timelineGraph(r: Pick<AgentTimelineResult, 'window' | 'turns' | 
     colorIndex: colorOf.get(l.project.key) ?? 0,
   }));
 
+  const turnById = new Map(r.turns.map((t) => [t.id, t]));
   const turns: GraphTurn[] = r.turns.map((t) => ({
     id: t.id,
     laneId: laneOfTurn.get(t.id)!,
     label: t.summary ?? 'turn',
-    href: `/turns/${t.id}?startedMs=${t.startedMs}`,
+    href: turnHref(t),
     startMs: t.startedMs,
     endMs: t.endedMs,
     outcome: t.outcome,
@@ -105,6 +171,7 @@ export function timelineGraph(r: Pick<AgentTimelineResult, 'window' | 'turns' | 
       endMs: x.endedMs,
       outcome: x.outcome,
       model: x.model,
+      href: runHrefById?.get(x.id) ?? turnHref(turnById.get(x.turnId)!),
     }));
 
   return {

@@ -182,3 +182,23 @@ describe('summarizeAndQueue', () => {
     expect(JSON.parse(readFileSync(pendingSummariesPath(paths.state, 'claude-code'), 'utf8'))).toEqual([]);
   });
 });
+
+describe('summariesDue (ADR-0023)', async () => {
+  const { summariesDue, SUMMARY_BATCH, SUMMARY_MAX_WAIT_MS } = await import('../src/analysis/summaries.js');
+  const t0 = 1_700_000_000_000;
+  it('nothing pending → never', () => {
+    expect(summariesDue({ ended: true, pending: 0, since: t0, now: t0 + SUMMARY_MAX_WAIT_MS * 2 })).toBe(false);
+  });
+  it('session ended → due', () => {
+    expect(summariesDue({ ended: true, pending: 1, since: t0, now: t0 })).toBe(true);
+  });
+  it('a full batch → due', () => {
+    expect(summariesDue({ ended: false, pending: SUMMARY_BATCH, since: t0, now: t0 })).toBe(true);
+    expect(summariesDue({ ended: false, pending: SUMMARY_BATCH - 1, since: t0, now: t0 })).toBe(false);
+  });
+  it('the oldest has waited 10 minutes → due; an unknown wait start is not', () => {
+    expect(summariesDue({ ended: false, pending: 1, since: t0, now: t0 + SUMMARY_MAX_WAIT_MS })).toBe(true);
+    expect(summariesDue({ ended: false, pending: 1, since: t0, now: t0 + SUMMARY_MAX_WAIT_MS - 1 })).toBe(false);
+    expect(summariesDue({ ended: false, pending: 1, since: undefined, now: t0 + SUMMARY_MAX_WAIT_MS * 2 })).toBe(false);
+  });
+});

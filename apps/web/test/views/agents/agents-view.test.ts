@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { agentTableRows, depthBars, groupAgentRows, spawnsPerTurn, tokenBars } from '../../../src/app/(dashboard)/agents/agents-view';
+import { agentTableRows, depthBars, flowsQueryString, groupAgentRows, spawnsPerTurn, tokenBars } from '../../../src/app/(dashboard)/agents/agents-view';
 import type { AgentRow, AgentsResult } from '../../../src/lib/queries/agents';
 
 const tok = (total: number) => ({ input: total, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, total });
@@ -86,5 +86,13 @@ describe('groupAgentRows', () => {
   it('is plain serializable data', () => {
     const g = groupAgentRows(result(rows));
     expect(JSON.parse(JSON.stringify(g))).toEqual(g);
+  });
+});
+
+describe('flowsQueryString', () => {
+  it('keeps the filters and drops the timeline window, paging and any group', () => {
+    expect(flowsQueryString({ range: '7d', projectId: 'p1', day: '2026-10-05', fromH: '10:00', toH: '12:00', page: '3', group: 'x' })).toBe('range=7d&projectId=p1');
+    expect(flowsQueryString({})).toBe('');
+    expect(flowsQueryString({ model: ['a', 'b'], harness: undefined })).toBe('model=a&model=b');
   });
 });

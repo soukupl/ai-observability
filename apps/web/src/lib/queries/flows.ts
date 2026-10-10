@@ -71,6 +71,13 @@ export interface FlowTurn {
   harness: string;
   summary: string | null;
   isMine: boolean;
+  /**
+   * Skill uses / MCP calls of the turn's MAIN agent alone (the turn row, not its runs), for the detail page's
+   * "Turn" line. Only the detail path fills them (null when the viewer sees the turn in limited form); undefined on
+   * the list path, which never reads the turn's own uses.
+   */
+  skills?: Skills | null;
+  mcp?: Mcp | null;
 }
 
 export interface Flow {
@@ -405,15 +412,23 @@ export function flowTotals(flows: Flow[], prices: PriceBook): FlowTotals {
   return { flows: flows.length, steps, tokens, cost: steps > 0 ? cs.value() : ZERO_COST };
 }
 
+/** true when at least one step of the flow belongs to the agent group (the `group` list filter). */
+export const flowHasGroup = (f: Pick<Flow, 'steps'>, group: string): boolean => f.steps.some((s) => s.group === group);
+
 /**
  * Every flow of the turns that started in the filter range (raw rows, any range length), newest first, paged in TS.
  * Direct path: runs and run_links under RLS (effort = the turn's primary effort, as on the turns list); aggregate path:
  * agg_flow_runs / agg_flow_links (no user ids; effort cannot be applied and is reported in ignoredFilters).
+ * `group` keeps only flows with a step of that agent group (the Agents page's "flows →" links).
  */
-export async function getFlows(ctx: QueryCtx, f: Filters, opts: { page: number; outcome: Outcome | null; pageSize?: number }): Promise<FlowListResult> {
+export async function getFlows(
+  ctx: QueryCtx,
+  f: Filters,
+  opts: { page: number; outcome: Outcome | null; group?: string | null; pageSize?: number },
+): Promise<FlowListResult> {
   const pageSize = Math.min(Math.max(1, Math.floor(opts.pageSize ?? FLOW_PAGE_SIZE)), FLOW_MAX_PAGE_SIZE);
   const page = Math.max(1, Math.floor(Number.isFinite(opts.page) ? opts.page : 1));
-  const { range, flows: matching, truncated, ignoredFilters } = await listFlows(ctx, f, opts.outcome);
+  const { range, flows: matching, truncated, ignoredFilters } = await listFlows(ctx, f, opts.outcome, opts.group ?? null);
   const offset = (page - 1) * pageSize;
   return {
     range,
@@ -427,11 +442,12 @@ export async function getFlows(ctx: QueryCtx, f: Filters, opts: { page: number; 
   };
 }
 
-/** Every flow matching the filters and the outcome, newest first (the list unpaged; CSV export). */
+/** Every flow matching the filters, the outcome and the agent group, newest first (the list unpaged; CSV export). */
 export async function listFlows(
   ctx: QueryCtx,
   f: Filters,
   outcome: Outcome | null = null,
+  group: string | null = null,
 ): Promise<{ range: ResolvedRange; flows: Flow[]; truncated: boolean; ignoredFilters: string[] }> {
   const range = rawRange(rangeFor(ctx, f));
   const d = dims(ctx, f, range);
@@ -505,7 +521,7 @@ export async function listFlows(
   const all = buildFlows({ runs, turns, links, prices: ctx.prices });
   return {
     range,
-    flows: outcome ? all.filter((x) => x.outcome === outcome) : all,
+    flows: all.filter((x) => (!outcome || x.outcome === outcome) && (!group || flowHasGroup(x, group))),
     truncated,
     ignoredFilters: ctx.agg && d.effort ? ['effort'] : [],
   };
@@ -528,6 +544,8 @@ export async function getFlowDetail(ctx: QueryCtx, turnId: string, key: string, 
     harness: d.turn.harness,
     summary: d.turn.summary,
     isMine: d.turn.isMine,
+    skills: d.turn.ownSkills,
+    mcp: d.turn.ownMcp,
   };
   const runs: FlowRunInput[] = d.runs.map((r) => ({ ...r, turnId: turn.id }));
   const flows = buildFlows({ runs, turns: new Map([[turn.id, turn]]), links: d.links, prices: ctx.prices });

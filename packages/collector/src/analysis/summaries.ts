@@ -14,6 +14,22 @@ const MAX_ATTEMPTS = 5;
 const MAX_PENDING_AGE_MS = 7 * 24 * 3600_000;
 const MAX_PENDING = 200;
 
+/** Summarize mid-session once this many turns are waiting (long sessions). */
+export const SUMMARY_BATCH = 10;
+/** … or once the oldest waiting turn has waited this long (ADR-0023: a dashboard turn should not stay without a summary for hours). */
+export const SUMMARY_MAX_WAIT_MS = 10 * 60_000;
+
+/**
+ * Whether an adapter should hand its pending digests to the summarizer now (ADR-0023): at session end, with
+ * SUMMARY_BATCH or more turns waiting, or when the first of them has waited SUMMARY_MAX_WAIT_MS (`since` = the hook
+ * time at which the adapter first saw digests pending; undefined = none pending yet). Pure.
+ */
+export function summariesDue(s: { ended: boolean; pending: number; since: number | undefined; now: number }): boolean {
+  if (s.pending <= 0) return false;
+  if (s.ended || s.pending >= SUMMARY_BATCH) return true;
+  return s.since !== undefined && s.now - s.since >= SUMMARY_MAX_WAIT_MS;
+}
+
 // ---------------------------------------------------------------- prompt
 
 /**

@@ -1,4 +1,5 @@
 import type { AgentRow, AgentsResult } from '@/lib/queries/agents';
+import { TIMELINE_PARAMS } from '../../../lib/queries/agent-timeline';
 import { addTokens, emptyTokens, outcomeRates, type Outcomes, type TokenTotals } from '../../../lib/queries/sqlutil';
 
 /**
@@ -100,4 +101,20 @@ export function depthBars(r: AgentsResult): { label: string; value: number }[] |
 /** Sub-agent spawns per turn (the query layer has no distinct "turns with sub-agents" count). Null when no turns. */
 export function spawnsPerTurn(totalSpawns: number, turns: number): number | null {
   return turns > 0 ? totalSpawns / turns : null;
+}
+
+/** Params the Agents page drops when it links to /flows: the timeline window and the page number. */
+const NOT_FOR_FLOWS = new Set<string>([TIMELINE_PARAMS.day, TIMELINE_PARAMS.from, TIMELINE_PARAMS.to, 'page']);
+
+/**
+ * Query string (without `?`) for the "flows →" links of the agent groups table: the current search params minus the
+ * timeline window and paging, so the flows list opens under the same filters; the table appends `group=`.
+ */
+export function flowsQueryString(sp: Record<string, string | string[] | undefined>): string {
+  const p = new URLSearchParams();
+  for (const [k, v] of Object.entries(sp)) {
+    if (NOT_FOR_FLOWS.has(k) || k === 'group' || v === undefined) continue;
+    for (const one of Array.isArray(v) ? v : [v]) p.append(k, one);
+  }
+  return p.toString();
 }

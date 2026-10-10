@@ -39,8 +39,10 @@ export interface CodexSessionState {
   closed: string[];
   /** recently emitted turns, for re-sending with late sub-agent usage */
   emitted: EmittedTurn[];
-  /** local-only summary input, flushed at session end */
+  /** local-only summary input, flushed at session end, in batches of 10 or after 10 minutes (ADR-0023) */
   digests: TurnDigest[];
+  /** hook time (epoch ms) at which `digests` first became non-empty; absent while nothing waits (and in older state) */
+  digestsSince?: number;
   lastActivityAt: number;
   /**
    * The cwd the session's project key is resolved from: session_meta's cwd, else the first hook's

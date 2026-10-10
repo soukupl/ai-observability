@@ -5,21 +5,20 @@ import { KpiTile } from '@/components/KpiTile';
 import { PageHeader } from '@/components/PageHeader';
 import { exportUrl } from '@/components/export-url';
 import { formatInt, formatTokens } from '@/components/format';
-import { AgentFlow } from '@/components/charts/AgentFlow';
 import { HBarChart } from '@/components/charts/HBarChart';
 import { AgentGraphWithZoom, TimelineWindowControls } from '@/components/charts/TimelineWindowControls';
 import { requireUser } from '@/lib/auth/session';
 import { parseFilters } from '@/lib/filters';
 import { getAgentTimeline } from '@/lib/queries/agent-timeline';
 import { getAgents } from '@/lib/queries/agents';
+import { buildFlows } from '@/lib/queries/flows';
 import { getKpis } from '@/lib/queries/kpis';
 import { loadFilterOptions } from '@/lib/queries/lookups';
 import { withDashboardContext } from '@/lib/queries/page';
 import { addDays } from '@/lib/queries/range';
 import { canSeeUsers } from '@/lib/queries/scope';
-import { depthBars, groupAgentRows, spawnsPerTurn, tokenBars } from './agents-view';
-import { FLOW_MAX_LANES, flowGraph } from './flow-view';
-import { timelineGraph, timelineNav } from './timeline-view';
+import { depthBars, flowsQueryString, groupAgentRows, spawnsPerTurn, tokenBars } from './agents-view';
+import { runHrefs, timelineFlowInput, timelineGraph, timelineNav } from './timeline-view';
 
 export const metadata = { title: 'Agents' };
 
@@ -29,12 +28,17 @@ export default async function AgentsPage({ searchParams }: { searchParams: Searc
   const user = await requireUser();
   const sp = await searchParams;
   const filters = parseFilters(sp, { allowUser: canSeeUsers(user) });
-  const { options, agents, kpis, timeline } = await withDashboardContext(user, async (ctx) => ({
-    options: await loadFilterOptions(ctx),
-    agents: await getAgents(ctx, filters),
-    kpis: await getKpis(ctx, filters),
-    timeline: await getAgentTimeline(ctx, filters, sp),
-  }));
+  const { options, agents, kpis, timeline, flows } = await withDashboardContext(user, async (ctx) => {
+    const timeline = await getAgentTimeline(ctx, filters, sp);
+    return {
+      options: await loadFilterOptions(ctx),
+      agents: await getAgents(ctx, filters),
+      kpis: await getKpis(ctx, filters),
+      timeline,
+      // The window's flows, so every drawn run can link to its flow's detail page (brief dashboard-followups-2026-10-10).
+      flows: buildFlows({ ...timelineFlowInput(timeline), links: timeline.links, prices: ctx.prices }),
+    };
+  });
   const groups = groupAgentRows(agents);
   const bars = tokenBars(groups);
   const depth = depthBars(agents);
@@ -42,14 +46,14 @@ export default async function AgentsPage({ searchParams }: { searchParams: Searc
   const subTokens = agents.rows.reduce((s, r) => s + r.tokens.total, 0);
   const ignored = [...new Set([...agents.ignoredFilters, ...kpis.ignoredFilters, ...timeline.ignoredFilters])];
   const groupOrder = groups.map((g) => g.group);
-  const graph = timelineGraph(timeline, groupOrder);
-  const { hiddenLanes, ...flow } = flowGraph(timeline, groupOrder);
+  const graph = timelineGraph(timeline, groupOrder, runHrefs(flows, timeline.turns, timeline.runs));
+  const flowsQuery = flowsQueryString(sp);
   const nav = timelineNav('/agents', sp, timeline);
   const cut = timeline.truncated.turns || timeline.truncated.runs;
   const timelineCard = (
     <Card
       title="Agent timeline"
-      description="One lane per session (harness and first turn's start), coloured by project. Turns are the trunk; each sub-agent branches off where it starts and merges back where it ends. Workflow agents often keep running after their turn has ended (dashed trunk). Times are UTC."
+      description="One lane per session (harness and first turn's start), coloured by project. Turns are the trunk; each sub-agent branches off where it starts and merges back where it ends. Workflow agents often keep running after their turn has ended (dashed trunk). Click a sub-agent to open its flow (or its turn when it ran alone); click a turn to open the turn. Times are UTC."
     >
       <div className="space-y-3">
         <TimelineWindowControls day={timeline.window.day} fromMin={timeline.window.fromMin} toMin={timeline.window.toMin} {...nav} />
@@ -63,24 +67,6 @@ export default async function AgentsPage({ searchParams }: { searchParams: Searc
       </div>
     </Card>
   );
-  const flowCard = (
-    <Card
-      title="Agent flow"
-      description="How sub-agents hand work to each other. One lane per workflow run and one per turn for the agents it spawned directly; rows inside a workflow lane are its stages in launch order. Each pill is an agent from start to end, coloured by agent group. A solid arrow links the stages of one item (impl:x → verify:x); a dashed arrow links an agent to the sibling that finished before it started. Hover an agent to follow its chain. Same window and zoom as the timeline above; times are UTC."
-    >
-      <div className="space-y-3">
-        {(hiddenLanes > 0 || timeline.truncated.links) && (
-          <p className="text-xs text-amber-700 dark:text-amber-400" role="note">
-            {hiddenLanes > 0 && `+${formatInt(hiddenLanes)} more lane${hiddenLanes === 1 ? '' : 's'} not drawn (the first ${FLOW_MAX_LANES} by start are shown). `}
-            {timeline.truncated.links && 'This window has more than 10,000 links; only the earliest are drawn. '}
-            Zoom in on the timeline or narrow the filters to see all of them.
-          </p>
-        )}
-        <AgentFlow {...flow} ariaLabel={`Agent flow: ${formatInt(flow.nodes.length)} sub-agent runs in ${formatInt(flow.lanes.length)} lanes, ${formatInt(flow.edges.length)} links`} />
-      </div>
-    </Card>
-  );
-
   return (
     <div className="space-y-4">
       <PageHeader
@@ -101,7 +87,6 @@ export default async function AgentsPage({ searchParams }: { searchParams: Searc
             </p>
           </Card>
           {timelineCard}
-          {flowCard}
         </div>
       ) : (
         <div className="space-y-4">
@@ -116,7 +101,6 @@ export default async function AgentsPage({ searchParams }: { searchParams: Searc
             <KpiTile label="Sub-agent tokens" value={formatTokens(subTokens)} sub="tokens used by sub-agent runs" />
           </div>
           {timelineCard}
-          {flowCard}
           <Card title="Tokens by agent group" description="Tokens used by sub-agent runs of each group.">
             <HBarChart data={bars} valueFormat="tokens" ariaLabel="Tokens by agent group" />
           </Card>
@@ -129,8 +113,8 @@ export default async function AgentsPage({ searchParams }: { searchParams: Searc
               </p>
             )}
           </Card>
-          <Card title="Agent groups" description="One row per group; expand a group to see its agent types.">
-            <AgentGroupsTable key={JSON.stringify(filters)} rows={groups} exportHref={exportUrl('agents', filters)} />
+          <Card title="Agent groups" description="One row per group; expand a group to see its agent types. “flows →” lists the multi-step flows of that group under the same filters.">
+            <AgentGroupsTable key={JSON.stringify(filters)} rows={groups} exportHref={exportUrl('agents', filters)} flowsQuery={flowsQuery} />
           </Card>
         </div>
       )}

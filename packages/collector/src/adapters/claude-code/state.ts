@@ -77,8 +77,10 @@ export interface SessionState {
   emittedAgents: string[];
   /** sub-agents whose run ended with StopFailure (hook payload with `agent_id`) */
   failedAgents?: string[];
-  /** turns waiting for a summary (sent at SessionEnd) */
+  /** turns waiting for a summary (sent at session end, in batches of 10 or after 10 minutes, ADR-0023) */
   digests: TurnDigest[];
+  /** hook time (epoch ms) at which `digests` first became non-empty; absent while nothing waits (and in older state) */
+  digestsSince?: number;
 }
 
 const KEEP_TURNS = 3;

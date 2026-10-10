@@ -262,3 +262,35 @@ export const runawayAlerts = pgTable(
     foreignKey({ columns: [t.companyId, t.turnId], foreignColumns: [turns.companyId, turns.id] }).onDelete('cascade'),
   ],
 );
+
+/**
+ * A flow a user flagged "for later" (docs/briefs/dashboard-followups-2026-10-10.md, ADR-0024): a personal bookmark of
+ * one agent flow (`/flows/<turn>/<key>`), private to the user who set it (RLS: own rows only). `flow_name` is a
+ * snapshot of the flow's name at flag time (flows are computed on read, never stored). Deleted with its turn
+ * (retention) and with its user.
+ */
+export const flowFlags = pgTable(
+  'flow_flags',
+  {
+    id: pk(),
+    companyId: uuid('company_id')
+      .notNull()
+      .references(() => companies.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    turnId: uuid('turn_id').notNull(),
+    flowKey: text('flow_key').notNull(),
+    flowName: text('flow_name').notNull(),
+    note: text('note'),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    unique('flow_flags_user_flow_uq').on(t.companyId, t.userId, t.turnId, t.flowKey),
+    index('flow_flags_company_user_created_idx').on(t.companyId, t.userId, t.createdAt),
+    foreignKey({ columns: [t.companyId, t.turnId], foreignColumns: [turns.companyId, turns.id] }).onDelete('cascade'),
+    check('flow_flags_key_format', sql`${t.flowKey} ~ '^[A-Za-z0-9_.:-]{1,128}$'`),
+    check('flow_flags_name_len', sql`char_length(${t.flowName}) between 1 and 200`),
+    check('flow_flags_note_len', sql`${t.note} is null or char_length(${t.note}) <= 500`),
+  ],
+);

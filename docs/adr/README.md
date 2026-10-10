@@ -22,3 +22,5 @@
 - [ADR-0020: Agent flow — stage index, flow key and typed links between sub-agent runs](0020-agent-flow-links.md)
 - [ADR-0021: Friendly model names in the UI; raw ids on machine-facing surfaces](0021-friendly-model-names.md)
 - [ADR-0022: Company memberships, user and company tokens, per-project token choice](0022-company-memberships-and-token-kinds.md)
+- [ADR-0023: Turn summaries are generated during the session, not only at its end](0023-mid-session-summaries.md)
+- [ADR-0024: Personal flow flags, print-to-PDF flow reports, ingest statistics and client-side chart zoom](0024-flow-flags-report-ingest-stats-zoom.md)

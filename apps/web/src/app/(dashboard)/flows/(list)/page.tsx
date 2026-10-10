@@ -7,12 +7,14 @@ import { KpiTile } from '@/components/KpiTile';
 import { PageHeader } from '@/components/PageHeader';
 import { requireUser } from '@/lib/auth/session';
 import { parseFilters } from '@/lib/filters';
+import { listFlaggedFlows } from '@/lib/queries/flow-flags';
 import { getFlows } from '@/lib/queries/flows';
 import { loadFilterOptions } from '@/lib/queries/lookups';
 import { withDashboardContext } from '@/lib/queries/page';
 import { canSeeUsers } from '@/lib/queries/scope';
 import { OUTCOME_VALUES, parseTurnParams } from '../../turns/_helpers';
-import { flowKpis, flowsListHref, flowsPaging, toFlowTableRows } from '../_helpers';
+import { flowKpis, flowsListHref, flowsPaging, parseFlowGroup, toFlowTableRows } from '../_helpers';
+import { FlaggedFlows } from './FlaggedFlows';
 
 export const metadata = { title: 'Agent flows' };
 
@@ -37,9 +39,11 @@ export default async function FlowsPage({ searchParams }: { searchParams: Search
   const sp = await searchParams;
   const filters = parseFilters(sp, { allowUser: canSeeUsers(user) });
   const { page, outcome } = parseTurnParams(sp);
-  const { options, list } = await withDashboardContext(user, async (ctx) => ({
+  const group = parseFlowGroup(sp);
+  const { options, list, flagged } = await withDashboardContext(user, async (ctx) => ({
     options: await loadFilterOptions(ctx),
-    list: await getFlows(ctx, filters, { page, outcome }),
+    list: await getFlows(ctx, filters, { page, outcome, group }),
+    flagged: await listFlaggedFlows(ctx),
   }));
 
   const rows = toFlowTableRows(list.flows);
@@ -60,6 +64,7 @@ export default async function FlowsPage({ searchParams }: { searchParams: Search
         description="Multi-step sub-agent flows of one turn: a Workflow-tool run, or Agent-tool agents that hand work to each other. Only flows with 2 or more steps, newest first. Costs are ≈ at API list prices."
       />
       <FilterBar filters={filters} options={options} />
+      <FlaggedFlows rows={flagged} companyId={user.companyId} />
       {list.ignoredFilters.length > 0 && (
         <p className="text-xs text-amber-700 dark:text-amber-400">Not applied in aggregates-only mode: {list.ignoredFilters.join(', ')}.</p>
       )}
@@ -83,6 +88,16 @@ export default async function FlowsPage({ searchParams }: { searchParams: Search
               {o}
             </Link>
           ))}
+          {group && (
+            <Link
+              href={flowsListHref(sp, { group: null })}
+              className={pill(true)}
+              title="Flows with at least one step of this agent group (from the Agents page). Click to clear."
+              aria-label={`Clear the agent group filter ${group}`}
+            >
+              agent group: {group} ✕
+            </Link>
+          )}
         </nav>
         <DataTable
           columns={columns}

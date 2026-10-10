@@ -517,7 +517,11 @@ describe.skipIf(skipReason !== null)(skipReason ? `dashboard queries - SKIPPED: 
 
         // Detail on both paths, by key.
         const dWf = await run(B, 'admin', (ctx) => getFlowDetail(ctx, own.id, 'wf_f'));
-        expect(canon(dWf)).toEqual(canon(wf));
+        // The detail also carries the turn's own skills / MCP (ADR-0024); the list path leaves them undefined.
+        expect(dWf!.turn.skills).toEqual({ 'code-review': { model: 1, user: 0 } });
+        expect(dWf!.turn.mcp).toEqual({});
+        const { skills: _ds, mcp: _dm, ...dTurn } = dWf!.turn;
+        expect(canon({ ...dWf, turn: dTurn })).toEqual(canon(wf));
         const dSeq = await run(B, 'admin', (ctx) => getFlowDetail(ctx, own.id, seq.key));
         expect(dSeq!.steps.map((x) => x.runId)).toEqual(seq.steps.map((x) => x.runId));
         const aWf = await run(A, 'admin', (ctx) => getFlowDetail(ctx, other.id, 'wf_f', other.startedMs));

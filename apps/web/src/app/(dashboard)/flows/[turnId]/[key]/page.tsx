@@ -7,11 +7,13 @@ import { StackedBar100 } from '@/components/charts/StackedBar100';
 import { DataTable, type Column } from '@/components/DataTable';
 import { PageHeader } from '@/components/PageHeader';
 import { requireUser } from '@/lib/auth/session';
+import { getFlowFlag } from '@/lib/queries/flow-flags';
 import { getFlowDetail } from '@/lib/queries/flows';
 import { withDashboardContext } from '@/lib/queries/page';
 import { usesAggregateFunctions } from '@/lib/queries/scope';
 import { parseStartedMs } from '../../../turns/_helpers';
-import { flowChart, flowChartDescription, flowFacts, parseFlowKey, stageBar, STEP_LABEL_WIDTH, stepPhaseBars, toStepRows, usesSummary } from '../../_helpers';
+import { flowChart, flowChartDescription, flowFacts, formatClockDate, parseFlowKey, reportHref, stageBar, STEP_LABEL_WIDTH, stepPhaseBars, toStepRows, turnUsesSummary, usesSummary } from '../../_helpers';
+import { FlagButton } from '../../FlagButton';
 
 export const metadata = { title: 'Agent flow' };
 
@@ -48,7 +50,10 @@ export default async function FlowDetailPage({ params, searchParams }: Props) {
   const [{ turnId, key: rawKey }, sp] = await Promise.all([params, searchParams]);
   const key = parseFlowKey(rawKey);
   if (!key) notFound();
-  const flow = await withDashboardContext(user, (ctx) => getFlowDetail(ctx, turnId, key, parseStartedMs(sp.startedMs)));
+  const { flow, flag } = await withDashboardContext(user, async (ctx) => {
+    const flow = await getFlowDetail(ctx, turnId, key, parseStartedMs(sp.startedMs));
+    return { flow, flag: flow ? await getFlowFlag(ctx, flow.turnId, flow.key) : null };
+  });
   if (!flow) notFound();
 
   const limited = usesAggregateFunctions(user) && !flow.turn.isMine;
@@ -56,6 +61,7 @@ export default async function FlowDetailPage({ params, searchParams }: Props) {
   const chart = flowChart(flow);
   const steps = toStepRows(flow);
   const uses = usesSummary(flow);
+  const turnUses = turnUsesSummary(flow.turn);
   const stages = stageBar(flow);
   const phases = stepPhaseBars(flow);
 
@@ -65,11 +71,29 @@ export default async function FlowDetailPage({ params, searchParams }: Props) {
         title="Agent flow"
         description={flow.name}
         actions={
-          <Link href="/flows" className="text-sm font-medium text-blue-700 hover:underline dark:text-blue-400">
-            All agent flows
-          </Link>
+          <>
+            <Link href="/flows" className="text-sm font-medium text-blue-700 hover:underline dark:text-blue-400">
+              All agent flows
+            </Link>
+            <a
+              href={reportHref(flow)}
+              target="_blank"
+              rel="noopener"
+              className="inline-flex h-9 items-center rounded-md border border-zinc-300 px-3 text-sm font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              title="Opens a print-ready report in a new tab; use your browser's Save as PDF"
+            >
+              Download PDF
+            </a>
+            <FlagButton companyId={user.companyId} turnId={flow.turnId} flowKey={flow.key} startedMs={flow.turn.startedMs} flag={flag} />
+          </>
         }
       />
+      {flag && (
+        <p className="mb-3 text-xs text-amber-700 dark:text-amber-400">
+          Flagged for later on {formatClockDate(flag.createdAtMs)}
+          {flag.note && <> · “{flag.note}”</>}
+        </p>
+      )}
       {limited && (
         <p role="note" className="mb-3 text-xs text-amber-700 dark:text-amber-400">
           Aggregates-only mode: this flow belongs to someone else&apos;s turn, so it is shown without who ran it and its turn opens in limited form.
@@ -105,26 +129,39 @@ export default async function FlowDetailPage({ params, searchParams }: Props) {
           <DataTable columns={stepColumns} rows={steps} rowKey="id" caption="Steps of the flow" emptyMessage="No steps." />
         </Card>
 
-        {(uses.skills || uses.mcp.length > 0) && (
-          <Card title="Skills & MCP" description="Skills used and MCP calls made by the flow's steps, summed.">
-            <dl className="space-y-2 text-sm">
-              {uses.skills && (
-                <div>
-                  <dt className="text-xs text-zinc-500 dark:text-zinc-400">Skills</dt>
-                  <dd className="text-zinc-900 dark:text-zinc-100">{uses.skills}</dd>
-                </div>
-              )}
-              {uses.mcp.map((m) => (
+        <Card title="Skills & MCP" description="Skills used and MCP calls made by the flow's steps (summed), and by the turn's main agent that launched the flow.">
+          <dl className="space-y-2 text-sm">
+            <div>
+              <dt className="text-xs text-zinc-500 dark:text-zinc-400">Skills (steps)</dt>
+              <dd className="text-zinc-900 dark:text-zinc-100">{uses.skills ?? 'none recorded'}</dd>
+            </div>
+            {uses.mcp.length > 0 ? (
+              uses.mcp.map((m) => (
                 <div key={m.server}>
                   <dt className="text-xs text-zinc-500 dark:text-zinc-400" title={m.server}>
-                    MCP {m.label}
+                    MCP {m.label} (steps)
                   </dt>
                   <dd className="text-zinc-900 dark:text-zinc-100">{m.calls}</dd>
                 </div>
-              ))}
-            </dl>
-          </Card>
-        )}
+              ))
+            ) : (
+              <div>
+                <dt className="text-xs text-zinc-500 dark:text-zinc-400">MCP calls (steps)</dt>
+                <dd className="text-zinc-900 dark:text-zinc-100">none recorded</dd>
+              </div>
+            )}
+            <div>
+              <dt className="text-xs text-zinc-500 dark:text-zinc-400" title="The turn row alone: what the main agent used, without its sub-agents">
+                Turn (main agent)
+              </dt>
+              <dd className="text-zinc-900 dark:text-zinc-100">
+                {!turnUses.available
+                  ? 'not available in limited form'
+                  : [turnUses.skills && `skills: ${turnUses.skills}`, ...turnUses.mcp.map((m) => `MCP ${m.label}: ${m.calls}`)].filter(Boolean).join(' · ') || 'none recorded'}
+              </dd>
+            </div>
+          </dl>
+        </Card>
 
         {stages && (
           <Card title="Time by stage" description="Summed step durations per stage (parallel steps all count), coloured as in the Flow card.">

@@ -362,6 +362,10 @@ export interface TurnDetail {
     skills: Record<string, { model: number; user: number }> | null;
     /** MCP server → tool → calls of the turn and its runs (null when limited) */
     mcp: Record<string, Record<string, number>> | null;
+    /** skills of the main agent alone (the turn row, without its runs; null when limited) */
+    ownSkills: Record<string, { model: number; user: number }> | null;
+    /** MCP calls of the main agent alone (null when limited) */
+    ownMcp: Record<string, Record<string, number>> | null;
     filesTouched: number | null;
     linesAdded: number | null;
     linesRemoved: number | null;
@@ -436,6 +440,8 @@ export async function getTurnDetail(ctx: QueryCtx, turnId: string, atMs?: number
       phasesMs: (own.phases_ms as Record<string, number>) ?? {},
       tools: (own.tools as Record<string, number>) ?? {},
       ...mergeUses([{ skills: own.skills, mcp: own.mcp }, ...((own.run_uses as Array<{ skills: unknown; mcp: unknown }>) ?? [])]),
+      ownSkills: (own.skills as Record<string, { model: number; user: number }> | null) ?? {},
+      ownMcp: (own.mcp as Record<string, Record<string, number>> | null) ?? {},
       filesTouched: num(own.files_touched),
       linesAdded: num(own.lines_added),
       linesRemoved: num(own.lines_removed),
@@ -446,7 +452,7 @@ export async function getTurnDetail(ctx: QueryCtx, turnId: string, atMs?: number
     const found = await findViaAgg(ctx, turnId, atMs);
     if (!found) return null;
     base = mapRow(found, lk, false, (await aggTurnCosts(ctx, [found])).get(String(found.id)) ?? ZERO_COST);
-    extra = { endedMs: base.startedMs + base.durationMs, phasesMs: null, tools: null, skills: null, mcp: null, filesTouched: null, linesAdded: null, linesRemoved: null, outcomeSignals: null, outcomeProvisional: null };
+    extra = { endedMs: base.startedMs + base.durationMs, phasesMs: null, tools: null, skills: null, mcp: null, ownSkills: null, ownMcp: null, filesTouched: null, linesAdded: null, linesRemoved: null, outcomeSignals: null, outcomeProvisional: null };
     limited = true;
   } else {
     return null;

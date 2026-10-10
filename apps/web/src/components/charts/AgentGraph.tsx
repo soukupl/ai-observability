@@ -263,8 +263,8 @@ export function AgentGraph({ lanes, turns, runs, fromMs, toMs, projectLegend, gr
                     {turn && run.endMs > turn.endMs && <Row k="note" v="still running after its turn ended" />}
                   </>
                 );
-                return (
-                  <g key={`run-${run.id}`} onMouseMove={(e) => showTip(e, tipContent)} onMouseLeave={hideTip} opacity={overflowRow ? 0.65 : 1}>
+                const branch = (
+                  <>
                     <path
                       d={d}
                       fill="none"
@@ -275,6 +275,17 @@ export function AgentGraph({ lanes, turns, runs, fromMs, toMs, projectLegend, gr
                     />
                     {/* Wider invisible stroke so a thin branch is easy to hover. */}
                     <path d={d} fill="none" stroke="transparent" strokeWidth={10} pointerEvents="stroke" />
+                  </>
+                );
+                return (
+                  <g key={`run-${run.id}`} onMouseMove={(e) => showTip(e, tipContent)} onMouseLeave={hideTip} opacity={overflowRow ? 0.65 : 1}>
+                    {run.href ? (
+                      <a href={run.href} aria-label={`${run.label} (${run.group})`}>
+                        {branch}
+                      </a>
+                    ) : (
+                      branch
+                    )}
                   </g>
                 );
               })}

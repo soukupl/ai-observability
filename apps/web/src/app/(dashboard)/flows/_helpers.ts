@@ -3,6 +3,7 @@ import type { FlowEdge, FlowLane, FlowNode } from '@/components/charts/agent-flo
 import { groupColorIndex } from '../../../components/charts/agent-graph-layout';
 import type { CostValue } from '../../../lib/cost';
 import type { TokenTotals } from '../../../lib/queries/sqlutil';
+import { paletteColor } from '../../../components/chart-palette';
 import { formatCost, formatDuration, formatInt, formatTokens, formatUsageName } from '../../../components/format';
 import { modelLabels } from '../../../lib/model-name';
 
@@ -24,14 +25,27 @@ export const FLOW_KIND_LABEL: Record<FlowKind, string> = {
   sequence: 'agent sequence',
 };
 
-/** URL for the flows list: keeps the current search params, sets/clears page and outcome (as turns' listHref). */
-export function flowsListHref(sp: Params, change: { page?: number | null; outcome?: string | null }): string {
+/** Longest agent group the `group` list filter accepts (agent types are capped at 128 by the protocol). */
+export const FLOW_GROUP_MAX = 128;
+
+/** The `group` list filter from the search params: trimmed, 1..128 chars; null when absent or out of range. */
+export function parseFlowGroup(sp: Params): string | null {
+  const g = first(sp.group)?.trim() ?? '';
+  return g.length > 0 && g.length <= FLOW_GROUP_MAX ? g : null;
+}
+
+/**
+ * URL for the flows list: keeps the current search params (the agent `group` filter included), sets/clears page,
+ * outcome and group (as turns' listHref). Changing outcome or group resets the page.
+ */
+export function flowsListHref(sp: Params, change: { page?: number | null; outcome?: string | null; group?: string | null }): string {
   const p = new URLSearchParams();
   for (const [k, v] of Object.entries(sp)) {
     const val = first(v);
-    if (val !== undefined && k !== 'page' && !(k === 'outcome' && 'outcome' in change)) p.set(k, val);
+    if (val !== undefined && k !== 'page' && !(k === 'outcome' && 'outcome' in change) && !(k === 'group' && 'group' in change)) p.set(k, val);
   }
   if (change.outcome) p.set('outcome', change.outcome);
+  if (change.group) p.set('group', change.group);
   if (change.page && change.page > 1) p.set('page', String(change.page));
   const s = p.toString();
   return s ? `/flows?${s}` : '/flows';
@@ -78,9 +92,20 @@ export function flowHref(f: Pick<Flow, 'turnId' | 'key'> & { turn: Pick<FlowTurn
   return `/flows/${f.turnId}/${key}?startedMs=${f.turn.startedMs}`;
 }
 
+/** Detail page of a flagged flow (ADR-0024); the flag stores the turn id and key, the turn's start comes from the join. */
+export function flaggedFlowHref(r: { turnId: string; key: string; turn: { startedMs: number } }): string {
+  return flowHref({ turnId: r.turnId, key: r.key, turn: { startedMs: r.turn.startedMs } });
+}
+
 /** Turn detail page of the flow's turn. */
 export function turnHref(t: Pick<FlowTurn, 'id' | 'startedMs'>): string {
   return `/turns/${t.id}?startedMs=${t.startedMs}`;
+}
+
+/** Printable report of the flow (`/report/flows/…`, "Download PDF"); same key encoding and `startedMs` as flowHref. */
+export function reportHref(f: Pick<Flow, 'turnId' | 'key'> & { turn: Pick<FlowTurn, 'startedMs'> }): string {
+  const key = FLOW_KEY_RE.test(f.key) ? f.key : encodeURIComponent(f.key);
+  return `/report/flows/${f.turnId}/${key}?startedMs=${f.turn.startedMs}`;
 }
 
 export const projectLabel = (t: Pick<FlowTurn, 'projectId' | 'projectName'>): string =>
@@ -190,12 +215,18 @@ export function mcpText(mcp: FlowStep['mcp']): string | null {
   return list.length > 0 ? list.map(([k, n]) => `${k} ×${n}`).join(', ') : null;
 }
 
-/** Skills & MCP card of the flow (like turn detail's): skills with typed / model split, and MCP calls per server. */
-export function usesSummary(f: Pick<Flow, 'skills' | 'mcp'>): { skills: string | null; mcp: { server: string; label: string; calls: string }[] } {
-  const skills = Object.entries(f.skills ?? {})
+/** One "Skills & MCP" summary: skills with typed / model split, and MCP calls per server (sorted, formatted). */
+export interface UsesSummary {
+  skills: string | null;
+  mcp: { server: string; label: string; calls: string }[];
+}
+
+/** Summary of one set of skill uses / MCP calls (the flow's steps, or the turn's main agent). */
+function summarizeUses(skillsIn: Flow['skills'] | undefined, mcpIn: Flow['mcp'] | undefined): UsesSummary {
+  const skills = Object.entries(skillsIn ?? {})
     .filter(([, c]) => (c?.model ?? 0) + (c?.user ?? 0) > 0)
     .sort((a, b) => b[1].model + b[1].user - (a[1].model + a[1].user) || a[0].localeCompare(b[0]));
-  const mcp = Object.entries(f.mcp ?? {})
+  const mcp = Object.entries(mcpIn ?? {})
     .map(([server, tools]) => {
       const calls = Object.entries(tools ?? {})
         .filter(([, n]) => n > 0)
@@ -214,6 +245,46 @@ export function usesSummary(f: Pick<Flow, 'skills' | 'mcp'>): { skills: string |
         : null,
     mcp,
   };
+}
+
+/** Skills & MCP card of the flow (like turn detail's): the steps' skill uses and MCP calls, summed. */
+export function usesSummary(f: Pick<Flow, 'skills' | 'mcp'>): UsesSummary {
+  return summarizeUses(f.skills, f.mcp);
+}
+
+/**
+ * The same summary for the turn's MAIN agent alone (FlowTurn.skills / mcp: the turn row without its runs), so the
+ * reader sees what the turn used even when its sub-agents used nothing. Both null on the list path or in limited
+ * form: then `available` is false and nothing is known (not "none").
+ */
+export function turnUsesSummary(t: Pick<FlowTurn, 'skills' | 'mcp'>): UsesSummary & { available: boolean } {
+  const available = t.skills !== null && t.skills !== undefined && t.mcp !== null && t.mcp !== undefined;
+  return { ...summarizeUses(t.skills, t.mcp), available };
+}
+
+/** One segment of a server-rendered 100 % bar (the printable report): its share of the row and its colour. */
+export interface BarSegment {
+  key: string;
+  value: number;
+  /** 0..1 of the row's total; segments of a row sum to 1 (0 when the row is empty). */
+  share: number;
+  /** Light-theme colour, as StackedBar100 picks it: `colorIndex` first, else the named colour or the key's position. */
+  color: string;
+}
+
+/**
+ * Segments of one 100 % bar row for `keys` in order, skipping zero / missing values: the same colour rule as
+ * StackedBar100 (a `colorIndex` entry wins, null = grey "other"; otherwise a named colour such as a phase, else the
+ * palette colour of the key's position). Pure, so the report's bars print without Recharts.
+ */
+export function barSegments(values: Record<string, number>, keys: string[], colorIndex?: Record<string, number | null>): BarSegment[] {
+  const present = keys.map((key, i) => ({ key, i, value: values[key] ?? 0 })).filter((s) => Number.isFinite(s.value) && s.value > 0);
+  const total = present.reduce((a, s) => a + s.value, 0);
+  return present.map(({ key, i, value }) => {
+    const ci = colorIndex && key in colorIndex ? colorIndex[key] : undefined;
+    const color = ci === undefined ? paletteColor(false, i, key) : paletteColor(false, ci, ci === null ? 'other' : undefined);
+    return { key, value, share: total > 0 ? value / total : 0, color };
+  });
 }
 
 /** Serializable DataTable rows of the steps table, in the flow's step order. */

@@ -302,6 +302,11 @@ Costs are USD with 6 decimals and empty when unknown.
 - Success rate = success / (turns - unknown); the unknown share is always shown next to it (ADR-0003).
 - Budget progress is month to date (UTC): token budgets count `total` tokens, cost budgets the ≈ cost.
 - Days are UTC calendar days; chart days are zero-filled.
+- Time zoom: every stacked-area time-series chart (`components/charts/TokensAreaChart.tsx`: Overview, project detail,
+  Skills & MCP) zooms by dragging across the days to keep; dragging again narrows further, "Reset zoom" or a
+  double-click shows the whole range. The zoom is client state over the rows already loaded (pure index helpers in
+  `charts/zoom-range.ts`, tested in `test/views/charts-zoom.test.ts`) and is tied to the data array it was made for,
+  so a filter change or navigation starts un-zoomed. The agent timeline has its own URL-backed zoom (`fromH` / `toH`).
 
 ## Dashboard views
 
@@ -316,6 +321,20 @@ Pure page helpers live next to each page and are tested in `test/views/<view>`.
 budget progress bars for the current UTC month (`BudgetBars.tsx`: green, amber from 80 %, red from 100 %; own budget first),
 the stacked tokens-by-model area chart (straight segments; every day carries a key for every series, 0 for idle models, `zeroFilledChartRows`, so a model that is idle on a day does not draw a ribbon across it) with a CSV link (`exportUrl('overview')`), and the outcome mix strip
 (`OutcomeMix.tsx`; `unknown` is always shown). Pure helpers are in `helpers.ts` (tests: `test/views/overview`). `loading.tsx` is the skeleton.
+
+Two more cards (brief `docs/briefs/dashboard-followups-2026-10-10.md`):
+
+- **Ingest** (`IngestCard.tsx`, right after the KPI tiles): what the collectors delivered, company-wide and not filtered:
+  the last event received (relative, UTC in the sub line), events in the last 24 h (by type: turns, runs, patches =
+  `turn_outcome` + `turn_summary`, sessions, other) and in the last 7 days. `getIngestStats` (`lib/queries/ingest-stats.ts`)
+  reads `agg_ingest_stats()` (migration 0015, SECURITY DEFINER over `ingest_events`, which keeps 30 days) inside a
+  savepoint, so a deployment without the migration shows "Ingest stats unavailable" instead of failing the page;
+  `ingestSummary` / `relativeAgo` in `helpers.ts` shape the card.
+- **Long or complex agent flows** (`ComplexFlows.tsx`, after "Runaway turns", only when there are rows): the flows of the
+  range (`listFlows`, same read as `/flows`) with **≥ 5 steps, ≥ 20 minutes or ≥ 1M tokens** (`COMPLEX_MIN_STEPS`,
+  `COMPLEX_MIN_DURATION_MS`, `COMPLEX_MIN_TOKENS` in `helpers.ts`; constants, not settings), longest first, at most 8
+  (`COMPLEX_MAX_ROWS`), each linking to its detail page with the reasons it qualified; "All agent flows" keeps the filters
+  (`allFlowsHref`). A note appears when the flow read hit its 20,000-run cap.
 
 ### Projects (`/projects`, `/projects/[id]`)
 
@@ -344,10 +363,13 @@ Page helpers (`parseGroup`, hour/share formatting, chart rows) live in `src/app/
 ### Agents (`/agents`)
 
 KPI tiles (sub-agent spawns with the number of agent groups and types, spawns per turn, sub-agent tokens), the **agent
-timeline**, the **agent flow**, an `HBarChart` of tokens by agent group, the depth histogram (a note when the aggregate path only has avg / max
+timeline**, an `HBarChart` of tokens by agent group, the depth histogram (a note when the aggregate path only has avg / max
 depth) and `AgentGroupsTable`: one row per agent group (spawns, tokens, token share, success, unknown share, depth) that
-expands to its agent types. "Spawns per turn" is spawns / turns, not the share of turns that used a sub-agent (no such
-query exists). The CSV has one row per agent type with its `agent_group`.
+expands to its agent types, each row with a "flows →" link to `/flows?…&group=<group>` under the current filters
+(`flowsQueryString` in `agents/agents-view.ts` drops the timeline window and paging). "Spawns per turn" is spawns / turns,
+not the share of turns that used a sub-agent (no such query exists). The CSV has one row per agent type with its
+`agent_group`. The former "Agent flow" card was removed (brief `docs/briefs/dashboard-followups-2026-10-10.md`): the
+flows live at `/flows`, and every run drawn on the timeline links there.
 
 - **Agent groups (ADR-0019):** `agentGroupOf(agent_type, agent_group)` in `src/lib/queries/agent-groups.ts` is the only
   grouping rule: the collector's stored group wins, else `workflow:<label>` becomes `workflow:<verb>` (first token of the
@@ -359,7 +381,9 @@ query exists). The CSV has one row per agent type with its `agent_group`.
   `HH:MM` (`toH` may be `24:00`; `from` / `to` stay the filter bar's custom range). `agents/timeline-view.ts` maps it to
   `AgentGraph` props: one lane per session, ordered by project name then first turn, labelled with the project and
   harness and coloured by the project's index in the legend, so every sub-agent is drawn on its project's lane; a turn
-  links to its detail page; a run is labelled with its type (`workflow:` prefix dropped) and coloured by its group.
+  links to its detail page; a run is labelled with its type (`workflow:` prefix dropped) and coloured by its group, and
+  links to its flow's detail page when it is a step of a flow (the page runs `buildFlows` over the window's runs and
+  links, `timelineFlowInput` / `runHrefs` in `timeline-view.ts`), else to its turn (`GraphRun.href`).
   `TimelineWindowControls` steps to the previous / next day with turns; dragging on the time axis
   (`AgentGraphWithZoom`) zooms to whole minutes. The graph (`components/charts/AgentGraph.tsx`, pure layout in
   `agent-graph-layout.ts`) is a git graph over time: turns are the trunk, each run branches off its parent and merges back.
@@ -371,21 +395,21 @@ query exists). The CSV has one row per agent type with its `agent_group`.
   Lane sublabels are `harness · HH:MM` (start of the first turn in the window) so two sessions of one project differ. In
   aggregates-only mode `sessionId` is a per-window pseudonym from `agg_timeline_turns`. The lane gutter is sticky
   (narrower below 560 px).
-- **Agent flow (ADR-0020):** a second card under the timeline, same window and zoom. `getAgentTimeline` also returns the
-  window's `links` (stored `run_links` under RLS, or `agg_timeline_links` in aggregates-only mode; at most 10,000,
-  flagged in `truncated.links`), passed through `deriveSequenceLinks` (`src/lib/queries/run-links.ts`), which adds
-  `sequence` links on read for Agent-tool runs without a stored incoming link (each run follows the sibling of the same
-  parent and turn that ended last before it started; overlapping siblings are not chained; of two siblings starting at
-  the same instant only the lower id leads). `agents/flow-view.ts` (`flowGraph`) maps it to `AgentFlow` props
-  (`components/charts/AgentFlow.tsx`, pure layout in `agent-flow-layout.ts`): one lane per orchestration (workflow run;
-  old workflow rows without an orchestration, told by type `workflow:*` / `workflow-subagent` or a `workflow` group,
-  share one pseudo lane per turn, `flowOrchestrationId`) and one per turn for
-  its Agent-tool runs, ordered by first start and capped at 40 ("+N more lanes" note). Rows inside a workflow lane are
-  its stages (`stage_index`, compacted, named by the most common phase; no ordinal → by agent group, else one row; an
-  "unstaged" row for the rest). Pills are agents coloured by group (same `groupOrder` as the timeline); arrows run from
-  the source's end to the target's start (`item` solid, `sequence` dashed). Hover highlights the whole chain, a node
-  links to its turn. Turn detail has the same card ("Flow", `turnFlow` in `turns/_helpers.ts`, hidden when the turn has
-  no runs; `agg_turn_runs` returns the orchestration, so the aggregate turn path draws the same lanes as the raw one).
+- **Links and the flow card (ADR-0020):** `getAgentTimeline` also returns the window's `links` (stored `run_links`
+  under RLS, or `agg_timeline_links` in aggregates-only mode; at most 10,000, flagged in `truncated.links`), passed
+  through `deriveSequenceLinks` (`src/lib/queries/run-links.ts`), which adds `sequence` links on read for Agent-tool
+  runs without a stored incoming link (each run follows the sibling of the same parent and turn that ended last before
+  it started; overlapping siblings are not chained; of two siblings starting at the same instant only the lower id
+  leads). The Agents page uses the links only to find each run's flow (above). The flow card itself is drawn on turn
+  detail ("Flow", `turnFlow` in `turns/_helpers.ts` over `turnFlowParts` in `agents/flow-view.ts`, hidden when the turn
+  has no runs; `agg_turn_runs` returns the orchestration, so the aggregate turn path draws the same lanes as the raw
+  one) with `AgentFlow` (`components/charts/AgentFlow.tsx`, pure layout in `agent-flow-layout.ts`): one lane per
+  orchestration (workflow run; old workflow rows without an orchestration, told by type `workflow:*` /
+  `workflow-subagent` or a `workflow` group, share one pseudo lane, `flowOrchestrationId`) and one for the main agent's
+  Agent-tool runs, capped at 40 lanes. Rows inside a workflow lane are its stages (`stage_index`, compacted, named by
+  the most common phase; no ordinal → by agent group, else one row; an "unstaged" row for the rest). Pills are agents
+  coloured by group (same `groupOrder` as the timeline); arrows run from the source's end to the target's start (`item`
+  solid, `sequence` dashed). Hover highlights the whole chain.
 
 ### Agent flows (`/flows`, `/flows/[turnId]/[key]`, ADR-0020 amendment)
 
@@ -402,13 +426,33 @@ at its model's price on its UTC day; skills and MCP calls are summed over the st
 - **List** (`getFlows`): runs of the turns that started in the range, joined to turns (`turnConds`) with `run_links`
   under RLS, or `agg_flow_runs` / `agg_flow_links` in aggregates-only mode (migration 0013; no user ids, effort filter
   ignored, no phases / skills / MCP per step). At most 20,000 runs are read (`truncated` and a note when cut). Outcome
-  chips, 50 flows per page and the KPI tiles (`totals`: flows, steps, tokens, ≈ cost over every matching flow) are
-  computed in TS. CSV: `view=flows`.
+  chips, the optional `group=<agent group>` filter (flows with at least one step of that group, `flowHasGroup`; the
+  Agents page links here with it, shown as a clearable chip; not carried into the CSV, whose `group` parameter belongs to
+  the phases view), 50 flows per page and the KPI tiles (`totals`: flows, steps, tokens, ≈ cost over every matching
+  flow) are computed in TS. CSV: `view=flows`.
 - **Detail** (`getFlowDetail`): reuses `getTurnDetail` (so `agg_turn_runs`, which now also returns `skills` / `mcp`, in
   aggregates-only mode) and picks the flow by key (`/^[A-Za-z0-9_.:-]{1,128}$/`, URL-encoded). Facts, a one-lane
   `AgentFlow` of the flow's steps and links, a steps table (stage, model, effort, offset, duration, tokens, ≈ cost,
   skills, MCP calls, outcome), Skills & MCP, time by stage and phases per step (`StackedBar100`). Pure shaping lives in
   `src/app/(dashboard)/flows/_helpers.ts`.
+- **Skills & MCP card**: always shown. "Steps" lines sum the sub-agent runs' uses (`usesSummary`); the "Turn (main
+  agent)" line is the turn row alone (`FlowTurn.skills` / `mcp` from `TurnDetail.turn.ownSkills` / `ownMcp`, the
+  main agent without its runs; `turnUsesSummary`), "none recorded" when empty and "not available in limited form" in
+  aggregates-only mode.
+- **Report / "Download PDF"** (`/report/flows/[turnId]/[key]?startedMs=…`, `reportHref`): the same lookup rendered as a
+  printable page outside the app shell (`src/app/report/layout.tsx`, forced light theme, landscape `@page`, print rules
+  at the end of `globals.css`): facts, the `AgentFlow` chart, a plain steps table, Skills & MCP, time by stage and
+  phases per step as server-rendered 100 % bars (`barSegments`, the StackedBar100 colour rule via
+  `components/chart-palette.ts`). "Download PDF" (`PrintButton`) opens the browser's print dialog (Save as PDF); `?print=1`
+  opens it once after load. No PDF library.
+- **Flag for later** (ADR-0024, migration 0015): a private bookmark of one flow, stored in `flow_flags` (company, user,
+  turn id, flow key, a snapshot of the flow's name, optional note ≤ 500 chars; RLS = own rows only, so flags are never
+  shared). The detail page's `FlagButton` posts to the server actions in `src/lib/flows/actions.ts` (`flagFlowAction`
+  checks the flow is visible with `getFlowDetail` before inserting, `unflagFlowAction` deletes by id; both are bound to
+  the company the page was rendered for via `_companyId`, like the admin forms, and revalidate `/flows`). The list page
+  shows the viewer's flags in a "Flagged for later" card above the table (`listFlaggedFlows`, newest first, at most 100,
+  regardless of the date range and filters; a flag whose turn is no longer visible is listed without links and can be
+  removed). Queries: `src/lib/queries/flow-flags.ts`.
 
 ### Insights on existing views (ADR-0017, ADR-0018)
 

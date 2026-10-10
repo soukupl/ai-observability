@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { PriceBook } from '../../src/lib/cost';
-import { buildFlows, flowOutcome, flowTotals, FLOW_KEY_RE, orchestrationKey, type FlowRunInput, type FlowTurn } from '../../src/lib/queries/flows';
+import { buildFlows, flowHasGroup, flowOutcome, flowTotals, FLOW_KEY_RE, orchestrationKey, type FlowRunInput, type FlowTurn } from '../../src/lib/queries/flows';
 import type { RunLink } from '../../src/lib/queries/run-links';
 
 const T0 = Date.parse('2026-10-05T10:00:00Z');
@@ -238,5 +238,16 @@ describe('flowTotals and keys', () => {
     expect(orchestrationKey('wf_1', [{ id: 'z' }])).toBe('wf_1');
     expect(orchestrationKey('workflow', [{ id: 'z' }, { id: 'a' }])).toBe('orch-a');
     expect(orchestrationKey('run#3', [{ id: 'b' }, { id: 'a' }])).toBe('orch-a');
+  });
+});
+
+describe('flowHasGroup (the `group` list filter)', () => {
+  it('matches a flow with at least one step of the group, by exact group name', () => {
+    const [f] = build([run('a', 'Explore', 0, 5, { agentGroup: 'Explore' }), run('b', 'Plan', 6, 9, { agentGroup: 'Plan' })], [{ fromRunId: 'a', toRunId: 'b', kind: 'sequence' }]);
+    expect(f).toBeDefined();
+    expect(flowHasGroup(f!, 'Plan')).toBe(true);
+    expect(flowHasGroup(f!, 'Explore')).toBe(true);
+    expect(flowHasGroup(f!, 'plan')).toBe(false);
+    expect(flowHasGroup(f!, 'workflow:review')).toBe(false);
   });
 });

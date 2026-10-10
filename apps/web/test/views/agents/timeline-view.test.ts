@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { NO_PROJECT, timelineGraph, timelineHref, timelineNav } from '../../../src/app/(dashboard)/agents/timeline-view';
+import { NO_PROJECT, runHrefs, timelineFlowInput, timelineGraph, timelineHref, timelineNav, turnHref } from '../../../src/app/(dashboard)/agents/timeline-view';
+import { buildFlows } from '../../../src/lib/queries/flows';
+import { PriceBook } from '../../../src/lib/cost';
 import type { AgentTimelineResult, TimelineRun, TimelineTurn, TimelineWindow } from '../../../src/lib/queries/agent-timeline';
 
 const DAY = Date.parse('2026-10-05T00:00:00Z');
@@ -151,5 +153,40 @@ describe('timeline links', () => {
     });
     expect(timelineNav('/agents', {}, { days, window: { ...window, day: '2026-10-05' } }).nextHref).toBeNull();
     expect(timelineNav('/agents', {}, { days: [], window }).prevHref).toBeNull();
+  });
+});
+
+describe('run links to flows', () => {
+  const t1 = turn('t1', 's', ZOO, 0);
+  const t2 = turn('t2', 's', ZOO, 30);
+  const wf = (id: string, label: string, stage: number, startMin: number) =>
+    run(id, 't1', `workflow:${label}`, `workflow:${label.split(':')[0]}`, { orchestrationId: 'wf_1', stageIndex: stage, flowKey: label.split(':')[1] ?? null, startedMs: DAY + startMin * M, endedMs: DAY + (startMin + 1) * M });
+  const runs = [wf('w1', 'impl:x', 0, 1), wf('w2', 'verify:x', 1, 3), run('solo', 't2', 'Explore', 'Explore', { startedMs: DAY + 31 * M, endedMs: DAY + 32 * M })];
+  const flows = buildFlows({ ...timelineFlowInput({ turns: [t1, t2], runs }), links: [], prices: new PriceBook([]) });
+
+  it('maps the window to buildFlows input (one token total, no effort) and finds the workflow flow', () => {
+    const input = timelineFlowInput({ turns: [t1], runs: [runs[0]!] });
+    expect([...input.turns.keys()]).toEqual(['t1']);
+    expect(input.turns.get('t1')).toMatchObject({ id: 't1', startedMs: t1.startedMs, projectId: 'p-zoo', projectName: 'zoo', harness: 'claude-code', isMine: true });
+    expect(input.runs[0]).toMatchObject({ id: 'w1', turnId: 't1', agentGroup: 'workflow:impl', orchestrationId: 'wf_1', effort: null, tokens: { total: 1, input: 0 } });
+    expect(flows.map((f) => [f.key, f.steps.map((s) => s.runId)])).toEqual([['wf_1', ['w1', 'w2']]]);
+  });
+
+  it('links flow steps to the flow detail and every other run to its turn; runs of unknown turns get nothing', () => {
+    const hrefs = runHrefs(flows, [t1, t2], [...runs, run('ghost', 'missing', 'Plan', 'Plan')]);
+    expect(hrefs.get('w1')).toBe(`/flows/t1/wf_1?startedMs=${t1.startedMs}`);
+    expect(hrefs.get('w2')).toBe(hrefs.get('w1'));
+    expect(hrefs.get('solo')).toBe(`/turns/t2?startedMs=${t2.startedMs}`);
+    expect(hrefs.has('ghost')).toBe(false);
+  });
+
+  it('timelineGraph puts the href on each run, falling back to the turn', () => {
+    const g = timelineGraph({ window, turns: [t1, t2], runs }, undefined, runHrefs(flows, [t1, t2], runs));
+    expect(g.runs.map((x) => [x.id, x.href])).toEqual([
+      ['w1', `/flows/t1/wf_1?startedMs=${t1.startedMs}`],
+      ['w2', `/flows/t1/wf_1?startedMs=${t1.startedMs}`],
+      ['solo', turnHref(t2)],
+    ]);
+    expect(timelineGraph({ window, turns: [t1], runs: [runs[0]!] }).runs[0]!.href).toBe(turnHref(t1));
   });
 });

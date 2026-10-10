@@ -20,13 +20,12 @@ import {
 } from './session.js';
 import { resolveChildren } from './subagents.js';
 import { summarizeWithCodex } from './summarize.js';
+import { summariesDue } from '../../analysis/summaries.js';
 
 /** A session whose rollout has not changed for this long is ended by the sweep (reason `crashed`). */
 export const IDLE_END_MS = 60 * 60_000;
 /** Ended / sub-agent session state is kept this long for late hooks, then deleted. */
 const KEEP_ENDED_MS = 7 * 24 * 3600_000;
-/** Summarize mid-session once this many turns are waiting (long sessions). */
-const SUMMARY_BATCH = 10;
 
 type Obj = Record<string, unknown>;
 const obj = (v: unknown): Obj => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Obj) : {});
@@ -99,6 +98,7 @@ export function createCodexAdapter(deps: CodexAdapterDeps = {}): HarnessAdapter 
     const key = await ctx.streamFor(state, capturedAt);
     const digests = state.digests;
     state.digests = [];
+    delete state.digestsSince;
     ctx.state.set(state.sessionId, state);
     await ctx.summarizeTurns(digests, key);
   }
@@ -256,9 +256,13 @@ export function createCodexAdapter(deps: CodexAdapterDeps = {}): HarnessAdapter 
       state.lastActivityAt = Math.max(state.lastActivityAt, receivedAt);
       // the session's first cwd (session_meta when already read, else this hook's) pins its project (C15)
       state.pkCwd ??= state.meta?.cwd ?? event.cwd;
+      if (state.digests.length > 0 && state.digestsSince === undefined) state.digestsSince = receivedAt;
       await save(ctx, state, out, receivedAt, true);
 
-      if (state.ended || state.digests.length >= SUMMARY_BATCH) await summarizeDigests(ctx, state, receivedAt);
+      // session over, 10 turns waiting, or the first has waited 10 minutes (ADR-0023)
+      if (summariesDue({ ended: state.ended, pending: state.digests.length, since: state.digestsSince, now: receivedAt })) {
+        await summarizeDigests(ctx, state, receivedAt);
+      }
       if (!adapter.sessionStartHooks.includes(event.hook)) {
         const last = readJsonFile<{ at?: number }>(sweepMarker(ctx))?.at ?? 0;
         if (ctx.now().getTime() - last > IDLE_END_MS) await sweep(ctx);

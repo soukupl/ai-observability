@@ -2,14 +2,14 @@ import type { FlowEdge, FlowLane, FlowNode } from '@/components/charts/agent-flo
 import { formatClock } from '../../../components/charts/agent-graph-layout';
 import { agentRunLabel } from '../../../lib/queries/agent-groups';
 import { orchestrationStages } from '../../../lib/queries/flow-stages';
-import type { AgentTimelineResult } from '../../../lib/queries/agent-timeline';
 import { flowOrchestrationId, type RunLink } from '../../../lib/queries/run-links';
 
 /**
  * Server-side mapping of runs + links to the Agent flow props (ADR-0020). One lane per orchestration (workflow run),
  * whose rows are its stages (phase ordinal, labelled with the phase name), and one lane per turn for its Agent-tool
- * spawns (no stages). x is time; edges are the stored + derived links between nodes that are drawn. Shared by the
- * Agents page (flowGraph) and turn detail (turnFlow in turns/_helpers).
+ * spawns (no stages). x is time; edges are the stored + derived links between nodes that are drawn. Used by turn detail
+ * (turnFlow in turns/_helpers); the Agents page draws no flow card any more (brief dashboard-followups-2026-10-10), its
+ * runs link to /flows instead.
  */
 
 /** Most lanes one flow draws; the rest are counted in `hiddenLanes` ("+N more"). */
@@ -45,11 +45,8 @@ export { orchestrationStages, stageName } from '../../../lib/queries/flow-stages
 
 const byStart = (a: FlowRun, b: FlowRun) => a.startedMs - b.startedMs || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 
-/** "HH:MM" (UTC), prefixed with "MM-DD " when before `dayStartMs` (a turn that started on an earlier day). */
-function clock(ms: number, dayStartMs?: number): string {
-  const day = dayStartMs !== undefined && ms < dayStartMs ? `${new Date(ms).toISOString().slice(5, 10)} ` : '';
-  return `${day}${formatClock(ms)}`;
-}
+/** "HH:MM" (UTC). */
+const clock = (ms: number): string => formatClock(ms);
 
 interface LaneSpec {
   /** Lane id prefix: `o:` orchestration, `t:` a turn's Agent-tool spawns. */
@@ -130,28 +127,6 @@ function buildFlow(runs: FlowRun[], links: RunLink[], o: BuildOptions): Pick<Flo
 
 const projectLabel = (t: { projectId: string | null; projectName: string | null }): string =>
   t.projectName ?? (t.projectId ? 'unknown project' : 'no project');
-
-/**
- * The Agent flow of a timeline window: one lane per orchestration among the window's runs and one per turn that has
- * Agent-tool runs, ordered by first run start, capped at FLOW_MAX_LANES. Nodes link to their turn's detail page.
- * `groupOrder` ranks agent groups for their colours, as for the timeline graph.
- */
-export function flowGraph(r: Pick<AgentTimelineResult, 'window' | 'turns' | 'runs' | 'links'>, groupOrder?: string[]): FlowGraph {
-  const turns = new Map(r.turns.map((t) => [t.id, t]));
-  const dayStartMs = Date.parse(`${r.window.day}T00:00:00Z`);
-  const runs = r.runs.filter((x) => turns.has(x.turnId));
-  const projectOfRun = (x: FlowRun) => projectLabel(turns.get(x.turnId)!);
-  const built = buildFlow(runs, r.links, {
-    orchestrationOf: (x) => flowOrchestrationId(x),
-    turnLane: (turnId) => {
-      const t = turns.get(turnId)!;
-      return { label: t.summary ?? 'turn', sublabel: `${projectLabel(t)} · ${clock(t.startedMs, dayStartMs)}` };
-    },
-    orchestrationSublabel: (rs) => `${projectOfRun(rs[0]!)} · ${clock(rs[0]!.startedMs, dayStartMs)}`,
-    hrefOf: (x) => `/turns/${x.turnId}?startedMs=${turns.get(x.turnId)!.startedMs}`,
-  });
-  return { ...built, fromMs: r.window.fromMs, toMs: r.window.toMs, ...(groupOrder ? { groupOrder } : {}) };
-}
 
 /** Lane builder for one turn (turn detail): exported for turns/_helpers' turnFlow. */
 export function turnFlowParts(
