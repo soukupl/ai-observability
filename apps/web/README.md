@@ -400,18 +400,15 @@ flows live at `/flows`, and every run drawn on the timeline links there.
   through `deriveSequenceLinks` (`src/lib/queries/run-links.ts`), which adds `sequence` links on read for Agent-tool
   runs without a stored incoming link (each run follows the sibling of the same parent and turn that ended last before
   it started; overlapping siblings are not chained; of two siblings starting at the same instant only the lower id
-  leads). The Agents page uses the links only to find each run's flow (above). The flow card itself is drawn on turn
-  detail ("Flow", `turnFlow` in `turns/_helpers.ts` over `turnFlowParts` in `agents/flow-view.ts`, hidden when the turn
-  has no runs; `agg_turn_runs` returns the orchestration, so the aggregate turn path draws the same lanes as the raw
-  one) with `AgentFlow` (`components/charts/AgentFlow.tsx`, pure layout in `agent-flow-layout.ts`): one lane per
-  orchestration (workflow run; old workflow rows without an orchestration, told by type `workflow:*` /
-  `workflow-subagent` or a `workflow` group, share one pseudo lane, `flowOrchestrationId`) and one for the main agent's
-  Agent-tool runs, capped at 40 lanes. Rows inside a workflow lane are its stages (`stage_index`, compacted, named by
-  the most common phase; no ordinal → by agent group, else one row; an "unstaged" row for the rest). Pills are agents
-  coloured by group (same `groupOrder` as the timeline); arrows run from the source's end to the target's start (`item`
-  solid, `sequence` dashed). Hover highlights the whole chain.
+  leads). The Agents page uses the links only to find each run's flow (above). Flow charts are drawn per flow in the
+  flow sections of the turn page (`flowChart` in `flows/_helpers.ts`, ADR-0025; the turn-wide "Flow" card with one
+  lane per orchestration went with the merge) with `AgentFlow` (`components/charts/AgentFlow.tsx`, pure layout in
+  `agent-flow-layout.ts`): one lane per flow whose rows are its stages (`stage_index`, compacted, named by the most
+  common phase; no ordinal → by agent group, else one row; an "unstaged" row for the rest; `src/lib/queries/flow-stages.ts`).
+  Pills are agents coloured by group (same `groupOrder` as the timeline); arrows run from the source's end to the
+  target's start (`item` solid, `sequence` dashed). Hover highlights the whole chain.
 
-### Agent flows (`/flows`, `/flows/[turnId]/[key]`, ADR-0020 amendment)
+### Agent flows (`/flows`; detail on the turn page, ADR-0020 amendment, ADR-0025)
 
 A **flow** is a set of at least two sub-agent runs of one turn, computed on read by `buildFlows`
 (`src/lib/queries/flows.ts`, brief `docs/briefs/agent-flows-view.md`), never stored: one flow per Workflow-tool run
@@ -430,15 +427,18 @@ at its model's price on its UTC day; skills and MCP calls are summed over the st
   Agents page links here with it, shown as a clearable chip; not carried into the CSV, whose `group` parameter belongs to
   the phases view), 50 flows per page and the KPI tiles (`totals`: flows, steps, tokens, ≈ cost over every matching
   flow) are computed in TS. CSV: `view=flows`.
-- **Detail** (`getFlowDetail`): reuses `getTurnDetail` (so `agg_turn_runs`, which now also returns `skills` / `mcp`, in
-  aggregates-only mode) and picks the flow by key (`/^[A-Za-z0-9_.:-]{1,128}$/`, URL-encoded). Facts, a one-lane
-  `AgentFlow` of the flow's steps and links, a steps table (stage, model, effort, offset, duration, tokens, ≈ cost,
-  skills, MCP calls, outcome), Skills & MCP, time by stage and phases per step (`StackedBar100`). Pure shaping lives in
+- **Detail = the turn page** (ADR-0025): `/turns/[id]?startedMs=…#flow-<key>` (`flowHref`, `flowAnchor`). The turn
+  page builds every flow of the turn with `turnFlows(detail, prices)` (`buildFlows` over the turn detail's runs and
+  links, so `agg_turn_runs` / `agg_turn_links` in aggregates-only mode) and renders one `FlowSection`
+  (`turns/[id]/FlowSection.tsx`) per flow after the timeline: a facts card (`flowSectionFacts`: the flow's facts without
+  project / turn / harness, which the turn's own card shows, plus the steps' skills and MCP calls, `usesSummary`) with
+  "All agent flows", "Download PDF" and the flag button, a one-lane `AgentFlow` of the flow's steps and links, a steps
+  table (stage, model, effort, offset, duration, tokens, ≈ cost, skills, MCP calls, outcome), time by stage and phases
+  per step (`StackedBar100`). The turn's Facts card links to each section ("Agent flows"). The old route
+  `/flows/[turnId]/[key]` looks the flow up with `getFlowDetail` (the flow by key, `/^[A-Za-z0-9_.:-]{1,128}$/`) and
+  permanently redirects to that anchor (a missing or malformed flow is a 404, as before); `getFlowDetail` also serves
+  the report and the flag action. Pure shaping lives in
   `src/app/(dashboard)/flows/_helpers.ts`.
-- **Skills & MCP card**: always shown. "Steps" lines sum the sub-agent runs' uses (`usesSummary`); the "Turn (main
-  agent)" line is the turn row alone (`FlowTurn.skills` / `mcp` from `TurnDetail.turn.ownSkills` / `ownMcp`, the
-  main agent without its runs; `turnUsesSummary`), "none recorded" when empty and "not available in limited form" in
-  aggregates-only mode.
 - **Report / "Download PDF"** (`/report/flows/[turnId]/[key]?startedMs=…`, `reportHref`): the same lookup rendered as a
   printable page outside the app shell (`src/app/report/layout.tsx`, forced light theme, landscape `@page`, print rules
   at the end of `globals.css`): facts, the `AgentFlow` chart, a plain steps table, Skills & MCP, time by stage and
@@ -447,9 +447,10 @@ at its model's price on its UTC day; skills and MCP calls are summed over the st
   opens it once after load. No PDF library.
 - **Flag for later** (ADR-0024, migration 0015): a private bookmark of one flow, stored in `flow_flags` (company, user,
   turn id, flow key, a snapshot of the flow's name, optional note ≤ 500 chars; RLS = own rows only, so flags are never
-  shared). The detail page's `FlagButton` posts to the server actions in `src/lib/flows/actions.ts` (`flagFlowAction`
+  shared). The flow section's `FlagButton` posts to the server actions in `src/lib/flows/actions.ts` (`flagFlowAction`
   checks the flow is visible with `getFlowDetail` before inserting, `unflagFlowAction` deletes by id; both are bound to
-  the company the page was rendered for via `_companyId`, like the admin forms, and revalidate `/flows`). The list page
+  the company the page was rendered for via `_companyId`, like the admin forms, and revalidate `/flows` and `/turns`).
+  The turn page reads the viewer's flags of all its flows at once (`getFlowFlags`). The list page
   shows the viewer's flags in a "Flagged for later" card above the table (`listFlaggedFlows`, newest first, at most 100,
   regardless of the date range and filters; a flag whose turn is no longer visible is listed without links and can be
   removed). Queries: `src/lib/queries/flow-flags.ts`.
@@ -481,10 +482,12 @@ over ≥ 20 calls); the CSV adds `errors`, `denied`, `latency_ms` and the five b
 
 `/turns` is a paged, filterable table (`?outcome=all|success|failed|abandoned|unknown&page=`; started, user (only when
 `canSeeUsers`), project, harness, model, effort, duration, tokens, ≈ cost, outcome, attribution, summary). `/turns/[id]?startedMs=…`
-shows facts (with a "provisional" badge), token breakdown, per-model usage, phases, tools, skills & MCP calls, outcome signals, summary, the turn as
-a one-lane `AgentGraph` (`turnGraph` in `turns/_helpers.ts`: main agent as the trunk, runs as branches, no zoom) and the
-`RunTree`. In aggregates-only mode someone else's turn shows only the facts that carry no person
-information (`limited`). An unknown id returns a real 404: the detail pages have no `loading.tsx` (a Suspense boundary above `notFound()` would send the 200 status line first), so the list pages and their skeletons live in the `(list)` route groups of `projects/` and `turns/`.
+is the single detail page of a turn and its agent flows (ADR-0025): facts (with a "provisional" badge, the number of
+sub-agent runs and links to the turn's flow sections), token breakdown, per-model usage, phases, tools, skills & MCP
+calls (turn and sub-agents, plus the main agent alone; always shown), outcome signals, summary, the turn as a one-lane
+`AgentGraph` (`turnGraph` in `turns/_helpers.ts`: main agent as the trunk, runs as branches, no zoom), one flow section
+per flow (see Agent flows) and the `RunTree`. In aggregates-only mode someone else's turn shows only the facts that
+carry no person information (`limited`). An unknown id returns a real 404: the detail pages have no `loading.tsx` (a Suspense boundary above `notFound()` would send the 200 status line first), so the list pages and their skeletons live in the `(list)` route groups of `projects/` and `turns/`.
 
 ## Admin console
 

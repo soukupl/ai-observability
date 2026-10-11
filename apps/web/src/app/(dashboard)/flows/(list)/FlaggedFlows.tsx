@@ -2,7 +2,7 @@ import Link from 'next/link';
 import { Card } from '@/components/Card';
 import { formatDateTime } from '@/components/format';
 import type { FlaggedFlowRow } from '@/lib/queries/flow-flags';
-import { flaggedFlowHref, turnHref } from '../_helpers';
+import { flaggedFlowHref } from '../_helpers';
 import { UnflagButton } from './UnflagButton';
 
 /**
@@ -13,7 +13,7 @@ import { UnflagButton } from './UnflagButton';
 export function FlaggedFlows({ rows, companyId }: { rows: FlaggedFlowRow[]; companyId: string }) {
   if (rows.length === 0) return null;
   return (
-    <Card title="Flagged for later" description="Flows you flagged on their detail page. Only you see your flags; the date range and filters do not apply here.">
+    <Card title="Flagged for later" description="Flows you flagged on their turn page. Only you see your flags; the date range and filters do not apply here.">
       <ul className="divide-y divide-zinc-100 text-sm dark:divide-zinc-800">
         {rows.map((r) => (
           <li key={r.id} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 py-2">
@@ -28,11 +28,7 @@ export function FlaggedFlows({ rows, companyId }: { rows: FlaggedFlowRow[]; comp
             )}
             {r.turn && (
               <span className="text-zinc-700 dark:text-zinc-300">
-                {[r.turn.projectName, formatDateTime(r.turn.startedMs)].filter(Boolean).join(' · ')}
-                {' · '}
-                <Link href={turnHref({ id: r.turnId, startedMs: r.turn.startedMs })} className="text-blue-700 hover:underline dark:text-blue-400">
-                  {r.turn.summary ?? 'turn'}
-                </Link>
+                {[r.turn.projectName, formatDateTime(r.turn.startedMs), r.turn.summary].filter(Boolean).join(' · ')}
               </span>
             )}
             {r.note && <span className="text-zinc-600 italic dark:text-zinc-400">“{r.note}”</span>}

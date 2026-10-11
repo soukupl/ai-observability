@@ -4,7 +4,9 @@ import {
   barSegments,
   flowChart,
   flowChartDescription,
+  flowAnchor,
   flowFacts,
+  flowSectionFacts,
   flowGroupOrder,
   flowsPaging,
   flowHref,
@@ -107,10 +109,11 @@ describe('flows list helpers', () => {
     expect(parseFlowGroup({ group: 'x'.repeat(128) })).toBe('x'.repeat(128));
   });
 
-  it('links a flow to its detail page and its turn', () => {
+  it('links a flow to its section on the turn page (ADR-0025) and the turn to its page', () => {
     const f = flow();
-    expect(flowHref(f)).toBe(`/flows/${f.turnId}/wf-1?startedMs=${T0 - 5 * S}`);
-    expect(flowHref({ ...f, key: 'a b' })).toBe(`/flows/${f.turnId}/a%20b?startedMs=${T0 - 5 * S}`);
+    expect(flowHref(f)).toBe(`/turns/${f.turnId}?startedMs=${T0 - 5 * S}#flow-wf-1`);
+    expect(flowHref({ ...f, key: 'a b' })).toBe(`/turns/${f.turnId}?startedMs=${T0 - 5 * S}#flow-a%20b`);
+    expect(flowAnchor('wf-1')).toBe('flow-wf-1');
     expect(turnHref(f.turn)).toBe(`/turns/${f.turnId}?startedMs=${T0 - 5 * S}`);
   });
 
@@ -176,6 +179,14 @@ describe('flow detail helpers', () => {
     expect(by.Stages!.value).toBe('impl → verify');
     expect(by['Models · efforts']!.value).toBe('Opus · —');
     expect(by.Kind!.value).toBe('workflow');
+  });
+
+  it('flowSectionFacts leaves out what the turn page already shows (project, turn, harness)', () => {
+    const labels = flowSectionFacts(flow()).map((f) => f.label);
+    expect(labels).not.toContain('Project');
+    expect(labels).not.toContain('Turn');
+    expect(labels).not.toContain('Harness');
+    expect(labels).toEqual(flowFacts(flow()).map((f) => f.label).filter((l) => !['Project', 'Turn', 'Harness'].includes(l)));
   });
 
   it('maps steps to rows with skills and MCP calls', () => {

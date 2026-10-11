@@ -1,6 +1,6 @@
 /**
- * Stages of one workflow run (ADR-0020), shared by the Agent flow card (agents/flow-view) and the Agent flows view
- * (queries/flows). Pure: no database, no React.
+ * Stages of one workflow run (ADR-0020), used by the Agent flows query (queries/flows) and the flow sections of the
+ * turn page. Pure: no database, no React.
  */
 
 /** The fields of a run the stage rule needs. */

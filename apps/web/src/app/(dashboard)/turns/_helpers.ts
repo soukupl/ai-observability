@@ -3,7 +3,6 @@ import type { RunTreeNode } from '@/components/RunTree';
 import type { RunNode } from '@/lib/queries/runs-tree';
 import type { AgentGraphProps } from '@/components/charts/AgentGraph';
 import { agentRunLabel } from '../../../lib/queries/agent-groups';
-import { turnFlowParts, type FlowGraph } from '../agents/flow-view';
 
 export const OUTCOME_VALUES = ['success', 'failed', 'abandoned', 'unknown'] as const;
 export type OutcomeFilter = (typeof OUTCOME_VALUES)[number];
@@ -135,26 +134,4 @@ export function turnGraph(d: Pick<TurnDetail, 'turn' | 'runs'>): Omit<AgentGraph
     projectLegend: [{ label: project, colorIndex: 0 }],
     ariaLabel: `Turn timeline: main agent and ${d.runs.length} sub-agent run${d.runs.length === 1 ? '' : 's'}`,
   };
-}
-
-/**
- * The turn's Agent flow (ADR-0020): one lane per orchestration (workflow run) of the turn, rows = its stages, and one
- * "main agent spawns" lane for the Agent-tool runs; edges = the turn's links. Same axis as turnGraph. Nodes do not
- * link anywhere (the page is already the turn).
- */
-export function turnFlow(d: Pick<TurnDetail, 'turn' | 'runs' | 'links'>): FlowGraph {
-  const { fromMs, toMs } = turnAxis(d);
-  const runs = d.runs.map((r) => ({
-    id: r.id,
-    turnId: d.turn.id,
-    agentType: r.agentType,
-    agentGroup: r.agentGroup,
-    orchestrationId: r.orchestrationId ?? null,
-    stageIndex: r.stageIndex ?? null,
-    startedMs: r.startedMs,
-    endedMs: r.endedMs,
-    outcome: r.outcome,
-    model: r.model,
-  }));
-  return { ...turnFlowParts(d.turn, runs, d.links), fromMs, toMs };
 }

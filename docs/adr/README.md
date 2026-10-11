@@ -24,3 +24,4 @@
 - [ADR-0022: Company memberships, user and company tokens, per-project token choice](0022-company-memberships-and-token-kinds.md)
 - [ADR-0023: Turn summaries are generated during the session, not only at its end](0023-mid-session-summaries.md)
 - [ADR-0024: Personal flow flags, print-to-PDF flow reports, ingest statistics and client-side chart zoom](0024-flow-flags-report-ingest-stats-zoom.md)
+- [ADR-0025: One detail page for a turn and its agent flows](0025-turn-page-holds-its-flows.md)

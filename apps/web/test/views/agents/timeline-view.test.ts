@@ -174,7 +174,7 @@ describe('run links to flows', () => {
 
   it('links flow steps to the flow detail and every other run to its turn; runs of unknown turns get nothing', () => {
     const hrefs = runHrefs(flows, [t1, t2], [...runs, run('ghost', 'missing', 'Plan', 'Plan')]);
-    expect(hrefs.get('w1')).toBe(`/flows/t1/wf_1?startedMs=${t1.startedMs}`);
+    expect(hrefs.get('w1')).toBe(`/turns/t1?startedMs=${t1.startedMs}#flow-wf_1`);
     expect(hrefs.get('w2')).toBe(hrefs.get('w1'));
     expect(hrefs.get('solo')).toBe(`/turns/t2?startedMs=${t2.startedMs}`);
     expect(hrefs.has('ghost')).toBe(false);
@@ -183,8 +183,8 @@ describe('run links to flows', () => {
   it('timelineGraph puts the href on each run, falling back to the turn', () => {
     const g = timelineGraph({ window, turns: [t1, t2], runs }, undefined, runHrefs(flows, [t1, t2], runs));
     expect(g.runs.map((x) => [x.id, x.href])).toEqual([
-      ['w1', `/flows/t1/wf_1?startedMs=${t1.startedMs}`],
-      ['w2', `/flows/t1/wf_1?startedMs=${t1.startedMs}`],
+      ['w1', `/turns/t1?startedMs=${t1.startedMs}#flow-wf_1`],
+      ['w2', `/turns/t1?startedMs=${t1.startedMs}#flow-wf_1`],
       ['solo', turnHref(t2)],
     ]);
     expect(timelineGraph({ window, turns: [t1], runs: [runs[0]!] }).runs[0]!.href).toBe(turnHref(t1));

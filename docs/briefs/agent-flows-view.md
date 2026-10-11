@@ -50,3 +50,9 @@ shows the steps in time, what each cost, which model and effort ran it, the flow
 
 - Should single-step workflows (one agent) be listed too, for completeness? Not listed now ("more than one step").
 - Flow name: stage names joined with arrows for workflows, step labels for sequences. Fine, or prefer the turn summary?
+
+## Amendment 2026-10-11: one page for a turn and its flows (ADR-0025)
+
+Owner: "we have two detail pages - Agent flow and turn detail. There are mostly the same data, can we merge those
+pages to single one page with all the data combined". The flow detail page is gone; the turn page carries one flow
+section per flow of the turn (`/turns/<id>?startedMs=…#flow-<key>`), and `/flows/<turnId>/<key>` redirects there.

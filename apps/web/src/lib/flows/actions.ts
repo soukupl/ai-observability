@@ -45,6 +45,7 @@ async function run(fd: FormData, fn: (ctx: QueryCtx) => Promise<string>): Promis
   try {
     const message = await withDashboardContext(user, fn);
     revalidatePath('/flows', 'layout');
+    revalidatePath('/turns', 'layout');
     return { status: 'ok', message };
   } catch (err) {
     if (!(err instanceof AdminError)) console.error('[flows] action failed', err);

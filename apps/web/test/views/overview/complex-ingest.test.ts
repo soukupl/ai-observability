@@ -73,7 +73,7 @@ describe('complexReasons / complexFlows', () => {
     const [r] = complexFlows([flow({ id: 'seq-r0', steps: 5, startedMs: 1_700_000_000_000 })]);
     expect(r).toMatchObject({
       id: 'seq-r0',
-      href: '/flows/t1/seq-r0?startedMs=1700000000000',
+      href: '/turns/t1?startedMs=1700000000000#flow-seq-r0',
       name: 'flow seq-r0',
       kind: 'agent sequence',
       projectName: 'proj',

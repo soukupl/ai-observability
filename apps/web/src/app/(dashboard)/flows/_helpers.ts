@@ -86,10 +86,16 @@ export function flowsPaging(page: number, pageSize: number, total: number, rowCo
   };
 }
 
-/** Detail page of a flow; `startedMs` helps the aggregates-only lookup of the turn, as on turn detail. */
+/** Element id of a flow's section on the turn page (`#flow-<key>`); keys are URL-safe (FLOW_KEY_RE), so no escaping. */
+export const flowAnchor = (key: string): string => `flow-${key}`;
+
+/**
+ * Detail of a flow: its section on the turn page (ADR-0025: one page for a turn and its flows), `startedMs` helping
+ * the aggregates-only lookup of the turn. The old `/flows/<turnId>/<key>` route redirects here.
+ */
 export function flowHref(f: Pick<Flow, 'turnId' | 'key'> & { turn: Pick<FlowTurn, 'startedMs'> }): string {
   const key = FLOW_KEY_RE.test(f.key) ? f.key : encodeURIComponent(f.key);
-  return `/flows/${f.turnId}/${key}?startedMs=${f.turn.startedMs}`;
+  return `/turns/${f.turnId}?startedMs=${f.turn.startedMs}#${flowAnchor(key)}`;
 }
 
 /** Detail page of a flagged flow (ADR-0024); the flag stores the turn id and key, the turn's start comes from the join. */
@@ -172,7 +178,15 @@ function friendlyModels(ids: string[]): string {
   return ids.map((id) => names[id] ?? id).join(', ');
 }
 
-/** Facts of a flow, in display order. */
+/** Facts the flow shares with its turn (project, harness, the turn itself): left out of the flow section on the turn page. */
+const TURN_FACTS = new Set(['Project', 'Turn', 'Harness']);
+
+/** Facts of a flow section on the turn page: flowFacts without the ones the turn's own Facts card already shows. */
+export function flowSectionFacts(f: Flow): Fact[] {
+  return flowFacts(f).filter((x) => !TURN_FACTS.has(x.label));
+}
+
+/** Facts of a flow, in display order (the report; the turn page uses flowSectionFacts). */
 export function flowFacts(f: Flow): Fact[] {
   const models = f.models.length > 0 ? friendlyModels(f.models) : '—';
   const efforts = f.efforts.length > 0 ? f.efforts.join(', ') : '—';
@@ -412,10 +426,10 @@ export interface FlowChart {
 }
 
 /**
- * The flow as an Agent flow chart (turnFlow-style, ADR-0020): one lane named after the flow whose rows are its
+ * The flow as an Agent flow chart (ADR-0020): one lane named after the flow whose rows are its
  * stages, nodes = steps (a step without a stage goes to the "unstaged" row), edges = the
  * flow's links between its steps, deduplicated. The axis is the flow padded by 2% on each side (at least a second).
- * Nodes do not link anywhere (the page is already the flow).
+ * Nodes do not link anywhere (the page is already the flow's turn).
  */
 export function flowChart(f: Pick<Flow, 'name' | 'stages' | 'steps' | 'links' | 'startedMs' | 'endedMs'> & { turn: Pick<FlowTurn, 'projectId' | 'projectName' | 'harness'> }): FlowChart {
   const laneId = 'flow';

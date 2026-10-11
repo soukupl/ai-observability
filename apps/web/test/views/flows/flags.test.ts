@@ -11,9 +11,9 @@ describe('flow flags and report hrefs', () => {
     expect(reportHref({ turnId, key: 'a b', turn: { startedMs: 5 } })).toBe(`/report/flows/${turnId}/a%20b?startedMs=5`);
   });
 
-  it('flaggedFlowHref is the flow detail href of the flag’s turn and key', () => {
+  it('flaggedFlowHref is the turn-page flow href of the flag’s turn and key', () => {
     const r = { turnId, key: 'seq-0f2c3a1e-aaaa-4bbb-8ccc-ddddeeeeffff', turn: { startedMs: 42 } };
     expect(flaggedFlowHref(r)).toBe(flowHref({ turnId, key: r.key, turn: { startedMs: 42 } }));
-    expect(flaggedFlowHref(r)).toBe(`/flows/${turnId}/${r.key}?startedMs=42`);
+    expect(flaggedFlowHref(r)).toBe(`/turns/${turnId}?startedMs=42#flow-${r.key}`);
   });
 });

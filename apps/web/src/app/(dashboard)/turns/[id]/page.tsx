@@ -3,51 +3,38 @@ import { notFound } from 'next/navigation';
 import { AttributionBadge, Badge, OutcomeBadge } from '@/components/Badge';
 import { Card } from '@/components/Card';
 import { StackedBar100 } from '@/components/charts/StackedBar100';
-import { AgentFlow } from '@/components/charts/AgentFlow';
 import { AgentGraph } from '@/components/charts/AgentGraph';
 import { formatCost, formatDateTime, formatDuration, formatInt, formatTokens, formatUsageName } from '@/components/format';
 import { ModelName } from '@/components/ModelName';
 import { PageHeader } from '@/components/PageHeader';
 import { RunTree } from '@/components/RunTree';
 import { requireUser } from '@/lib/auth/session';
+import { getFlowFlags } from '@/lib/queries/flow-flags';
+import { turnFlows } from '@/lib/queries/flows';
 import { withDashboardContext } from '@/lib/queries/page';
 import { getTurnDetail } from '@/lib/queries/turns';
-import { parseStartedMs, phaseRow, toRunTree, turnFlow, turnGraph } from '../_helpers';
+import { flowAnchor, turnUsesSummary } from '../../flows/_helpers';
+import { parseStartedMs, phaseRow, toRunTree, turnGraph } from '../_helpers';
+import { Fact } from './Fact';
+import { FlowSection } from './FlowSection';
 
 export const metadata = { title: 'Turn' };
 
 type Props = { params: Promise<{ id: string }>; searchParams: Promise<Record<string, string | string[] | undefined>> };
 
-function Fact({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="min-w-0">
-      <dt className="text-xs text-zinc-500 dark:text-zinc-400">{label}</dt>
-      <dd className="mt-0.5 break-words text-sm text-zinc-900 dark:text-zinc-100">{children}</dd>
-    </div>
-  );
-}
-
-function FlowCard({ detail }: { detail: Parameters<typeof turnFlow>[0] }) {
-  const { hiddenLanes, ...flow } = turnFlow(detail);
-  return (
-    <div className="space-y-3">
-      {hiddenLanes > 0 && (
-        <p className="text-xs text-amber-700 dark:text-amber-400" role="note">
-          +{hiddenLanes} more lane{hiddenLanes === 1 ? '' : 's'} not drawn; the earliest are shown.
-        </p>
-      )}
-      <AgentFlow
-        {...flow}
-        ariaLabel={`Turn flow: ${flow.nodes.length} sub-agent run${flow.nodes.length === 1 ? '' : 's'} in ${flow.lanes.length} lane${flow.lanes.length === 1 ? '' : 's'}, ${flow.edges.length} link${flow.edges.length === 1 ? '' : 's'}`}
-      />
-    </div>
-  );
-}
-
+/**
+ * The single detail page of a turn and its agent flows (ADR-0025): the turn's facts, tokens, phases, skills & MCP,
+ * outcome signals and timeline, then one FlowSection per flow of the turn (`#flow-<key>`), then the run tree.
+ */
 export default async function TurnDetailPage({ params, searchParams }: Props) {
   const user = await requireUser();
   const [{ id }, sp] = await Promise.all([params, searchParams]);
-  const detail = await withDashboardContext(user, (ctx) => getTurnDetail(ctx, id, parseStartedMs(sp.startedMs)));
+  const { detail, flows, flags } = await withDashboardContext(user, async (ctx) => {
+    const detail = await getTurnDetail(ctx, id, parseStartedMs(sp.startedMs));
+    if (!detail) return { detail, flows: [], flags: new Map() };
+    const flows = turnFlows(detail, ctx.prices);
+    return { detail, flows, flags: flows.length > 0 ? await getFlowFlags(ctx, detail.turn.id) : new Map() };
+  });
   if (!detail) notFound();
   const { turn, runs, usage, limited } = detail;
   const phases = phaseRow(turn.phasesMs);
@@ -55,6 +42,8 @@ export default async function TurnDetailPage({ params, searchParams }: Props) {
   const tools = Object.entries(turn.tools ?? {}).sort((a, b) => b[1] - a[1]);
   const skills = Object.entries(turn.skills ?? {}).sort((a, b) => b[1].model + b[1].user - (a[1].model + a[1].user));
   const mcp = Object.entries(turn.mcp ?? {}).map(([server, t]) => [server, Object.entries(t).sort((a, b) => b[1] - a[1])] as const);
+  const own = turnUsesSummary({ skills: turn.ownSkills, mcp: turn.ownMcp });
+  const ownLine = [own.skills && `skills: ${own.skills}`, ...own.mcp.map((m) => `MCP ${m.label}: ${m.calls}`)].filter(Boolean).join(' · ');
   const tk = turn.tokens;
 
   return (
@@ -63,14 +52,21 @@ export default async function TurnDetailPage({ params, searchParams }: Props) {
         title="Turn detail"
         description={formatDateTime(turn.startedMs)}
         actions={
-          <Link href="/turns" className="text-sm font-medium text-blue-700 hover:underline dark:text-blue-400">
-            All turns
-          </Link>
+          <>
+            <Link href="/turns" className="text-sm font-medium text-blue-700 hover:underline dark:text-blue-400">
+              All turns
+            </Link>
+            {flows.length > 0 && (
+              <Link href="/flows" className="text-sm font-medium text-blue-700 hover:underline dark:text-blue-400">
+                All agent flows
+              </Link>
+            )}
+          </>
         }
       />
       {limited && (
         <p role="note" className="mb-3 text-xs text-amber-700 dark:text-amber-400">
-          Aggregates-only mode: this is someone else&apos;s turn, so phases, tools and outcome signals are not shown.
+          Aggregates-only mode: this is someone else&apos;s turn, so phases, tools, outcome signals and who ran it are not shown.
         </p>
       )}
       <div className="space-y-4">
@@ -101,6 +97,20 @@ export default async function TurnDetailPage({ params, searchParams }: Props) {
                 +{formatInt(turn.linesAdded)} / −{formatInt(turn.linesRemoved)}
               </Fact>
             )}
+            <Fact label="Sub-agent runs">{formatInt(runs.length)}</Fact>
+            <Fact label="Agent flows" title="Sets of two or more sub-agent runs that belong together; each has a section below">
+              {flows.length === 0 ? (
+                'none'
+              ) : (
+                <span className="flex flex-col gap-0.5">
+                  {flows.map((f) => (
+                    <a key={f.key} href={`#${flowAnchor(f.key)}`} className="font-medium text-blue-700 hover:underline dark:text-blue-400">
+                      {f.name}
+                    </a>
+                  ))}
+                </span>
+              )}
+            </Fact>
           </dl>
           {turn.summary && <p className="mt-3 border-t border-zinc-100 pt-3 text-sm text-zinc-700 dark:border-zinc-800 dark:text-zinc-300">{turn.summary}</p>}
         </Card>
@@ -154,30 +164,50 @@ export default async function TurnDetailPage({ params, searchParams }: Props) {
           </Card>
         )}
 
-        {!limited && (skills.length > 0 || mcp.length > 0) && (
-          <Card title="Skills & MCP" description="Skills used and MCP calls made in this turn, sub-agents included.">
-            <dl className="space-y-2 text-sm">
-              {skills.length > 0 && (
+        <Card title="Skills & MCP" description="Skills used and MCP calls made in this turn, sub-agents included; the last line is the main agent alone. Each flow section lists its steps' uses.">
+          <dl className="space-y-2 text-sm">
+            {limited ? (
+              <div>
+                <dt className="text-xs text-zinc-500 dark:text-zinc-400">Turn</dt>
+                <dd className="text-zinc-900 dark:text-zinc-100">not available in limited form</dd>
+              </div>
+            ) : (
+              <>
                 <div>
                   <dt className="text-xs text-zinc-500 dark:text-zinc-400">Skills</dt>
                   <dd className="text-zinc-900 dark:text-zinc-100">
-                    {skills
-                      .map(([name, c]) => `${formatUsageName(name)}${c.user > 0 ? ` (typed ×${c.user})` : ''}${c.model > 0 ? ` (by the model ×${c.model})` : ''}`)
-                      .join(', ')}
+                    {skills.length > 0
+                      ? skills
+                          .map(([name, c]) => `${formatUsageName(name)}${c.user > 0 ? ` (typed ×${c.user})` : ''}${c.model > 0 ? ` (by the model ×${c.model})` : ''}`)
+                          .join(', ')
+                      : 'none recorded'}
                   </dd>
                 </div>
-              )}
-              {mcp.map(([server, calls]) => (
-                <div key={server}>
-                  <dt className="text-xs text-zinc-500 dark:text-zinc-400" title={server}>
-                    MCP {formatUsageName(server)}
+                {mcp.length > 0 ? (
+                  mcp.map(([server, calls]) => (
+                    <div key={server}>
+                      <dt className="text-xs text-zinc-500 dark:text-zinc-400" title={server}>
+                        MCP {formatUsageName(server)}
+                      </dt>
+                      <dd className="text-zinc-900 dark:text-zinc-100">{calls.map(([tool, n]) => `${formatUsageName(tool)} ×${n}`).join(', ')}</dd>
+                    </div>
+                  ))
+                ) : (
+                  <div>
+                    <dt className="text-xs text-zinc-500 dark:text-zinc-400">MCP calls</dt>
+                    <dd className="text-zinc-900 dark:text-zinc-100">none recorded</dd>
+                  </div>
+                )}
+                <div>
+                  <dt className="text-xs text-zinc-500 dark:text-zinc-400" title="The turn row alone: what the main agent used, without its sub-agents">
+                    Main agent alone
                   </dt>
-                  <dd className="text-zinc-900 dark:text-zinc-100">{calls.map(([tool, n]) => `${formatUsageName(tool)} ×${n}`).join(', ')}</dd>
+                  <dd className="text-zinc-900 dark:text-zinc-100">{!own.available ? 'not available in limited form' : ownLine || 'none recorded'}</dd>
                 </div>
-              ))}
-            </dl>
-          </Card>
-        )}
+              </>
+            )}
+          </dl>
+        </Card>
 
         {!limited && (
           <Card title="Outcome signals" description="Why the outcome was classified this way.">
@@ -202,14 +232,9 @@ export default async function TurnDetailPage({ params, searchParams }: Props) {
           <AgentGraph {...turnGraph(detail)} />
         </Card>
 
-        {runs.length > 0 && (
-          <Card
-            title="Flow"
-            description="How this turn's sub-agents hand work to each other: one lane per workflow run (rows are its stages in launch order) and one for the agents the main agent spawned. A solid arrow links the stages of one item; a dashed arrow links an agent to the sibling that finished before it started. Hover an agent to follow its chain. Times are UTC."
-          >
-            <FlowCard detail={detail} />
-          </Card>
-        )}
+        {flows.map((f, i) => (
+          <FlowSection key={f.key} flow={f} flag={flags.get(f.key) ?? null} companyId={user.companyId} index={i} count={flows.length} />
+        ))}
 
         <Card title="Runs" description="Parent to child.">
           <RunTree root={toRunTree(detail)} />

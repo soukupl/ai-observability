@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { orchestrationStages, stageName, type FlowRun } from '../../../src/app/(dashboard)/agents/flow-view';
+import { orchestrationStages, stageName, type StageRun } from '../src/lib/queries/flow-stages';
 
 describe('stageName', () => {
   it('strips the workflow prefix; a bare workflow group has no stage name', () => {
@@ -10,9 +10,7 @@ describe('stageName', () => {
 });
 
 describe('orchestrationStages', () => {
-  const fr = (id: string, group: string, stage: number | null, start: number): FlowRun => ({
-    id, turnId: 't', agentType: `workflow:${id}`, agentGroup: group, orchestrationId: 'wf', stageIndex: stage, startedMs: start, endedMs: start + 1, outcome: 'success', model: null,
-  });
+  const fr = (id: string, group: string, stage: number | null, start: number): StageRun => ({ id, agentGroup: group, stageIndex: stage, startedMs: start });
 
   it('compacts stage ordinals and names them by the most common phase; unstaged runs get null', () => {
     const s = orchestrationStages([fr('a', 'workflow:review', 0, 1), fr('b', 'workflow:fix', 3, 5), fr('c', 'workflow:fix', 3, 6), fr('d', 'workflow:x', 3, 4), fr('e', 'workflow:verify', null, 2)]);

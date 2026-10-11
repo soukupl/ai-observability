@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { listHref, parseStartedMs, parseTurnParams, phaseRow, toRunTree, turnFlow, turnGraph } from '../../../src/app/(dashboard)/turns/_helpers';
+import { listHref, parseStartedMs, parseTurnParams, phaseRow, toRunTree, turnGraph } from '../../../src/app/(dashboard)/turns/_helpers';
 
 describe('turns helpers', () => {
   it('parses page and outcome defensively', () => {
@@ -58,51 +58,5 @@ describe('turns helpers', () => {
     expect([g.fromMs, g.toMs]).toEqual([4_000, 6_000]);
     expect(g.lanes[0]!.label).toBe('no project');
     expect(g.turns[0]!.label).toBe('fix');
-  });
-  it('turnFlow: one lane per orchestration, one "main agent spawns" lane, the turn\'s links, the turn axis', () => {
-    const run = (id: string, agentType: string, agentGroup: string, orchestrationId: string | null, stageIndex: number | null, startedMs: number, endedMs: number) =>
-      ({ id, parentRunId: null, agentType, agentGroup, orchestrationId, stageIndex, flowKey: null, depth: 1, model: 'm', startedMs, endedMs, outcome: 'success' });
-    const turn = { id: 't1', startedMs: Date.parse('2026-10-05T10:00:00Z'), durationMs: 100_000, projectId: 'p1', projectName: 'shop', harness: 'claude-code', summary: null, outcome: 'success' };
-    const T = turn.startedMs;
-    const f = turnFlow({
-      turn: { ...turn, endedMs: T + 100_000 },
-      runs: [
-        run('p', 'Plan', 'Plan', null, null, T + 1_000, T + 5_000),
-        run('w1', 'workflow:review:bugs', 'workflow:review', 'wf_1', 0, T + 10_000, T + 20_000),
-        run('w2', 'workflow:verify:bugs', 'workflow:verify', 'wf_1', 1, T + 21_000, T + 30_000),
-        run('g', 'general-purpose', 'general-purpose', null, null, T + 40_000, T + 120_000),
-      ],
-      links: [
-        { fromRunId: 'w1', toRunId: 'w2', kind: 'item' },
-        { fromRunId: 'p', toRunId: 'g', kind: 'sequence' },
-        { fromRunId: 'zz', toRunId: 'g', kind: 'sequence' },
-      ],
-    } as never);
-    expect(f.lanes).toEqual([
-      { id: 't:t1', label: 'main agent spawns', sublabel: 'shop · 10:00', stages: [] },
-      { id: 'o:wf_1', label: 'review → verify', sublabel: 'shop · 10:00', stages: ['review', 'verify'] },
-    ]);
-    expect(f.nodes.map((n) => [n.id, n.laneId, n.label, n.stageIndex, n.href])).toEqual([
-      ['p', 't:t1', 'Plan', null, null],
-      ['g', 't:t1', 'general-purpose', null, null],
-      ['w1', 'o:wf_1', 'review:bugs', 0, null],
-      ['w2', 'o:wf_1', 'verify:bugs', 1, null],
-    ]);
-    expect(f.edges).toEqual([{ fromId: 'w1', toId: 'w2', kind: 'item' }, { fromId: 'p', toId: 'g', kind: 'sequence' }]);
-    expect(f.hiddenLanes).toBe(0);
-    // extended to the last run end (T + 120 s), padded by 2% of 120 s = 2.4 s
-    expect([f.fromMs, f.toMs]).toEqual([T - 2_400, T + 122_400]);
-  });
-  it('turnFlow: workflow agents without an orchestration (aggregate path) share one lane', () => {
-    const T = 1_000_000;
-    const f = turnFlow({
-      turn: { id: 't1', startedMs: T, endedMs: T + 10_000, durationMs: 10_000, projectId: null, projectName: null, harness: 'codex', summary: null, outcome: 'success' },
-      runs: [
-        { id: 'a', parentRunId: null, agentType: 'workflow:impl-1', agentGroup: 'workflow:impl', orchestrationId: null, stageIndex: 0, flowKey: null, depth: 1, model: null, startedMs: T, endedMs: T + 1, outcome: 'failed' },
-      ],
-      links: [],
-    } as never);
-    expect(f.lanes.map((l) => [l.id, l.label, l.stages])).toEqual([['o:workflow', 'impl', ['impl']]]);
-    expect(f.lanes[0]!.sublabel).toMatch(/^no project · /);
   });
 });

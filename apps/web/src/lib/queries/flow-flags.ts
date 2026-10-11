@@ -35,15 +35,14 @@ export const FLAGGED_FLOWS_LIMIT = 100;
 
 const ms = (v: unknown): number => new Date(v as string).getTime();
 
-/** The viewer's flag of one flow, or null. */
-export async function getFlowFlag(ctx: QueryCtx, turnId: string, key: string): Promise<FlowFlag | null> {
-  const r = await rows<{ id: string; note: string | null; created_at: string }>(
+/** The viewer's flags of one turn's flows, by flow key (the turn page shows every flow of the turn, ADR-0025). */
+export async function getFlowFlags(ctx: QueryCtx, turnId: string): Promise<Map<string, FlowFlag>> {
+  const r = await rows<{ id: string; flow_key: string; note: string | null; created_at: string }>(
     ctx.tx,
-    sql`select id, note, created_at from flow_flags
-        where company_id = ${ctx.viewer.companyId}::uuid and turn_id = ${turnId}::uuid and flow_key = ${key} limit 1`,
+    sql`select id, flow_key, note, created_at from flow_flags
+        where company_id = ${ctx.viewer.companyId}::uuid and turn_id = ${turnId}::uuid`,
   );
-  const f = r[0];
-  return f ? { id: f.id, note: f.note, createdAtMs: ms(f.created_at) } : null;
+  return new Map(r.map((f) => [f.flow_key, { id: f.id, note: f.note, createdAtMs: ms(f.created_at) }]));
 }
 
 /** Every flag of the viewer in the active company, newest flag first, with the turn's start / project / summary when visible. */

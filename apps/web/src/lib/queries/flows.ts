@@ -11,7 +11,7 @@ import { dayString, rawRange, rangeFor, type ResolvedRange } from './range';
 import { deriveSequenceLinks, flowOrchestrationId, isWorkflowRun, mapRunLink, type LinkKind, type RunLink } from './run-links';
 import type { QueryCtx } from './scope';
 import { addTokens, costTokens, emptyTokens, num, numOrNull, rows, tokensOf, where, type TokenTotals } from './sqlutil';
-import { getTurnDetail, mergeUses } from './turns';
+import { getTurnDetail, mergeUses, type TurnDetail } from './turns';
 
 /**
  * Agent flows (ADR-0020 amendment, docs/briefs/agent-flows-view.md): sets of ≥ 2 sub-agent runs of one turn that belong
@@ -535,7 +535,14 @@ export async function listFlows(
 export async function getFlowDetail(ctx: QueryCtx, turnId: string, key: string, atMs?: number): Promise<Flow | null> {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(turnId) || !FLOW_KEY_RE.test(key)) return null;
   const d = await getTurnDetail(ctx, turnId, atMs);
-  if (!d) return null;
+  return d ? (turnFlows(d, ctx.prices).find((x) => x.key === key) ?? null) : null;
+}
+
+/**
+ * Every flow of one turn detail, in buildFlows order (workflows by start, then sequences), for the turn page's flow
+ * sections (ADR-0025) and getFlowDetail. [] for a turn whose runs form no flow.
+ */
+export function turnFlows(d: TurnDetail, prices: PriceBook): Flow[] {
   const turn: FlowTurn = {
     id: d.turn.id,
     startedMs: d.turn.startedMs,
@@ -548,6 +555,5 @@ export async function getFlowDetail(ctx: QueryCtx, turnId: string, key: string, 
     mcp: d.turn.ownMcp,
   };
   const runs: FlowRunInput[] = d.runs.map((r) => ({ ...r, turnId: turn.id }));
-  const flows = buildFlows({ runs, turns: new Map([[turn.id, turn]]), links: d.links, prices: ctx.prices });
-  return flows.find((x) => x.key === key) ?? null;
+  return buildFlows({ runs, turns: new Map([[turn.id, turn]]), links: d.links, prices });
 }
