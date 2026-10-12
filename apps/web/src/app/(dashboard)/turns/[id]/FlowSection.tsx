@@ -4,6 +4,7 @@ import { Card } from '@/components/Card';
 import { AgentFlow } from '@/components/charts/AgentFlow';
 import { StackedBar100 } from '@/components/charts/StackedBar100';
 import { DataTable, type Column } from '@/components/DataTable';
+import { More, MoreBlock } from '@/components/More';
 import type { FlowFlag } from '@/lib/queries/flow-flags';
 import type { Flow } from '@/lib/queries/flows';
 import { flowAnchor, flowChart, flowChartDescription, flowSectionFacts, formatClockDate, reportHref, stageBar, STEP_LABEL_WIDTH, stepPhaseBars, toStepRows, usesSummary } from '../../flows/_helpers';
@@ -14,7 +15,8 @@ import { Fact } from './Fact';
  * One agent flow of the turn, as a section of the turn page (ADR-0025: the turn page is the single detail page of a
  * turn and its flows; the former `/flows/<turnId>/<key>` page redirects to `#flow-<key>`). Facts the turn's own card
  * already shows (project, harness, the turn) are left out; the main agent's skills and MCP calls sit in the turn's
- * Skills & MCP card.
+ * Skills & MCP card. One card: the key facts and the flow chart up front, everything else (other facts, the steps'
+ * skills / MCP, the steps table, time by stage, phases per step) behind a collapsed "More".
  */
 
 const stepColumns: Column[] = [
@@ -34,6 +36,25 @@ const stepColumns: Column[] = [
   { key: 'outcome', header: 'Outcome', kind: 'outcome' },
 ];
 
+/** Facts shown at a glance; the rest of `flowSectionFacts` sits behind the section's "More". */
+const KEY_FACTS = new Set(['Outcome', 'Duration', 'Steps', 'Tokens', '≈ Cost (API list prices)']);
+
+function FlowFact({ f }: { f: ReturnType<typeof flowSectionFacts>[number] }) {
+  return (
+    <Fact label={f.label} title={f.title}>
+      {f.kind === 'outcome' ? (
+        <OutcomeBadge outcome={f.value} />
+      ) : f.href ? (
+        <Link href={f.href} className="font-medium text-blue-700 hover:underline dark:text-blue-400">
+          {f.value}
+        </Link>
+      ) : (
+        f.value
+      )}
+    </Fact>
+  );
+}
+
 export function FlowSection({ flow, flag, companyId, index, count }: { flow: Flow; flag: FlowFlag | null; companyId: string; index: number; count: number }) {
   const facts = flowSectionFacts(flow);
   const chart = flowChart(flow);
@@ -42,9 +63,10 @@ export function FlowSection({ flow, flag, companyId, index, count }: { flow: Flo
   const stages = stageBar(flow);
   const phases = stepPhaseBars(flow);
   const ordinal = count > 1 ? ` ${index + 1} of ${count}` : '';
+  const hint = ['other facts', 'skills & MCP', `${steps.length} step${steps.length === 1 ? '' : 's'} table`, stages && 'time by stage', phases && 'phases per step'].filter(Boolean).join(', ');
 
   return (
-    <section id={flowAnchor(flow.key)} aria-label={`Agent flow${ordinal}: ${flow.name}`} className="scroll-mt-4 space-y-4 rounded-xl border border-dashed border-zinc-300 p-3 dark:border-zinc-700">
+    <section id={flowAnchor(flow.key)} aria-label={`Agent flow${ordinal}: ${flow.name}`} className="scroll-mt-4">
       <Card
         title={`Agent flow${ordinal}: ${flow.name}`}
         description={flag ? <>Flagged for later on {formatClockDate(flag.createdAtMs)}{flag.note && <> · “{flag.note}”</>}</> : undefined}
@@ -66,55 +88,56 @@ export function FlowSection({ flow, flag, companyId, index, count }: { flow: Flo
           </>
         }
       >
-        <dl className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-          {facts.map((f) => (
-            <Fact key={f.label} label={f.label} title={f.title}>
-              {f.kind === 'outcome' ? (
-                <OutcomeBadge outcome={f.value} />
-              ) : f.href ? (
-                <Link href={f.href} className="font-medium text-blue-700 hover:underline dark:text-blue-400">
-                  {f.value}
-                </Link>
-              ) : (
-                f.value
-              )}
-            </Fact>
+        <dl className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+          {facts.filter((f) => KEY_FACTS.has(f.label)).map((f) => (
+            <FlowFact key={f.label} f={f} />
           ))}
-          <Fact label="Skills (steps)">{uses.skills ?? 'none recorded'}</Fact>
-          {uses.mcp.length > 0 ? (
-            uses.mcp.map((m) => (
-              <Fact key={m.server} label={`MCP ${m.label} (steps)`} title={m.server}>
-                {m.calls}
-              </Fact>
-            ))
-          ) : (
-            <Fact label="MCP calls (steps)">none recorded</Fact>
-          )}
         </dl>
+
+        <div className="mt-4">
+          <p className="mb-2 text-xs text-zinc-500 dark:text-zinc-400">{flowChartDescription(flow)}</p>
+          <AgentFlow
+            {...chart}
+            ariaLabel={`Agent flow: ${chart.nodes.length} step${chart.nodes.length === 1 ? '' : 's'} in ${flow.stages.length} stage${flow.stages.length === 1 ? '' : 's'}, ${chart.edges.length} link${chart.edges.length === 1 ? '' : 's'}`}
+          />
+        </div>
+
+        <More hint={hint}>
+          <MoreBlock title="Other facts">
+            <dl className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+              {facts.filter((f) => !KEY_FACTS.has(f.label)).map((f) => (
+                <FlowFact key={f.label} f={f} />
+              ))}
+              <Fact label="Skills (steps)">{uses.skills ?? 'none recorded'}</Fact>
+              {uses.mcp.length > 0 ? (
+                uses.mcp.map((m) => (
+                  <Fact key={m.server} label={`MCP ${m.label} (steps)`} title={m.server}>
+                    {m.calls}
+                  </Fact>
+                ))
+              ) : (
+                <Fact label="MCP calls (steps)">none recorded</Fact>
+              )}
+            </dl>
+          </MoreBlock>
+
+          <MoreBlock title="Steps" description="One row per sub-agent run, in stage and start order. Offset is the time from the flow's first start.">
+            <DataTable columns={stepColumns} rows={steps} rowKey="id" caption={`Steps of the flow ${flow.name}`} emptyMessage="No steps." />
+          </MoreBlock>
+
+          {stages && (
+            <MoreBlock title="Time by stage" description="Summed step durations per stage (parallel steps all count), coloured as in the flow chart.">
+              <StackedBar100 rows={[{ label: 'this flow', values: stages.values }]} keys={stages.keys} colorIndex={stages.colorIndex} valueFormat="duration" labelWidth={70} ariaLabel={`Time split of the flow ${flow.name} by stage`} />
+            </MoreBlock>
+          )}
+
+          {phases && (
+            <MoreBlock title="Phases per step" description="Where each step's time went (# is the step's row in the Steps table).">
+              <StackedBar100 rows={phases.rows} keys={phases.keys} valueFormat="duration" labelWidth={STEP_LABEL_WIDTH} ariaLabel={`Phase split of each step of the flow ${flow.name}`} />
+            </MoreBlock>
+          )}
+        </More>
       </Card>
-
-      <Card title="Flow" description={flowChartDescription(flow)}>
-        <AgentFlow
-          {...chart}
-          ariaLabel={`Agent flow: ${chart.nodes.length} step${chart.nodes.length === 1 ? '' : 's'} in ${flow.stages.length} stage${flow.stages.length === 1 ? '' : 's'}, ${chart.edges.length} link${chart.edges.length === 1 ? '' : 's'}`}
-        />
-      </Card>
-
-      <Card title="Steps" description="One row per sub-agent run, in stage and start order. Offset is the time from the flow's first start.">
-        <DataTable columns={stepColumns} rows={steps} rowKey="id" caption={`Steps of the flow ${flow.name}`} emptyMessage="No steps." />
-      </Card>
-
-      {stages && (
-        <Card title="Time by stage" description="Summed step durations per stage (parallel steps all count), coloured as in the Flow card.">
-          <StackedBar100 rows={[{ label: 'this flow', values: stages.values }]} keys={stages.keys} colorIndex={stages.colorIndex} valueFormat="duration" labelWidth={70} ariaLabel={`Time split of the flow ${flow.name} by stage`} />
-        </Card>
-      )}
-
-      {phases && (
-        <Card title="Phases per step" description="Where each step's time went (# is the step's row in the Steps table).">
-          <StackedBar100 rows={phases.rows} keys={phases.keys} valueFormat="duration" labelWidth={STEP_LABEL_WIDTH} ariaLabel={`Phase split of each step of the flow ${flow.name}`} />
-        </Card>
-      )}
     </section>
   );
 }

@@ -430,11 +430,12 @@ at its model's price on its UTC day; skills and MCP calls are summed over the st
 - **Detail = the turn page** (ADR-0025): `/turns/[id]?startedMs=…#flow-<key>` (`flowHref`, `flowAnchor`). The turn
   page builds every flow of the turn with `turnFlows(detail, prices)` (`buildFlows` over the turn detail's runs and
   links, so `agg_turn_runs` / `agg_turn_links` in aggregates-only mode) and renders one `FlowSection`
-  (`turns/[id]/FlowSection.tsx`) per flow after the timeline: a facts card (`flowSectionFacts`: the flow's facts without
-  project / turn / harness, which the turn's own card shows, plus the steps' skills and MCP calls, `usesSummary`) with
-  "All agent flows", "Download PDF" and the flag button, a one-lane `AgentFlow` of the flow's steps and links, a steps
-  table (stage, model, effort, offset, duration, tokens, ≈ cost, skills, MCP calls, outcome), time by stage and phases
-  per step (`StackedBar100`). The turn's Facts card links to each section ("Agent flows"). The old route
+  (`turns/[id]/FlowSection.tsx`) per flow after the timeline: one card with "All agent flows", "Download PDF" and the
+  flag button, the key facts (outcome, duration, steps, tokens, ≈ cost) and a one-lane `AgentFlow` of the flow's steps
+  and links; behind a collapsed "More" (`components/More.tsx`): the other facts (`flowSectionFacts`: the flow's facts
+  without project / turn / harness, which the turn's own card shows, plus the steps' skills and MCP calls,
+  `usesSummary`), a steps table (stage, model, effort, offset, duration, tokens, ≈ cost, skills, MCP calls, outcome),
+  time by stage and phases per step (`StackedBar100`). The turn's Facts card links to each section ("Agent flows"). The old route
   `/flows/[turnId]/[key]` looks the flow up with `getFlowDetail` (the flow by key, `/^[A-Za-z0-9_.:-]{1,128}$/`) and
   permanently redirects to that anchor (a missing or malformed flow is a 404, as before); `getFlowDetail` also serves
   the report and the flag action. Pure shaping lives in
@@ -482,11 +483,13 @@ over ≥ 20 calls); the CSV adds `errors`, `denied`, `latency_ms` and the five b
 
 `/turns` is a paged, filterable table (`?outcome=all|success|failed|abandoned|unknown&page=`; started, user (only when
 `canSeeUsers`), project, harness, model, effort, duration, tokens, ≈ cost, outcome, attribution, summary). `/turns/[id]?startedMs=…`
-is the single detail page of a turn and its agent flows (ADR-0025): facts (with a "provisional" badge, the number of
-sub-agent runs and links to the turn's flow sections), token breakdown, per-model usage, phases, tools, skills & MCP
-calls (turn and sub-agents, plus the main agent alone; always shown), outcome signals, summary, the turn as a one-lane
-`AgentGraph` (`turnGraph` in `turns/_helpers.ts`: main agent as the trunk, runs as branches, no zoom), one flow section
-per flow (see Agent flows) and the `RunTree`. In aggregates-only mode someone else's turn shows only the facts that
+is the single detail page of a turn and its agent flows (ADR-0025), kept light to read: secondary detail sits behind
+collapsed "More" toggles (`components/More.tsx`, native `<details>`). The Turn card shows the summary and key facts
+(outcome with a "provisional" badge, project, model, duration, tokens, ≈ cost, sub-agent runs, links to the turn's flow
+sections); its "More" holds the other facts (user, attribution, team, harness, effort, files, lines), token breakdown,
+per-model usage, phases and tools, skills & MCP calls (turn and sub-agents, plus the main agent alone) and outcome
+signals. Then the turn as a one-lane `AgentGraph` (`turnGraph` in `turns/_helpers.ts`: main agent as the trunk, runs as
+branches, no zoom), one flow section per flow (see Agent flows) and the `RunTree` (collapsed). In aggregates-only mode someone else's turn shows only the facts that
 carry no person information (`limited`). An unknown id returns a real 404: the detail pages have no `loading.tsx` (a Suspense boundary above `notFound()` would send the 200 status line first), so the list pages and their skeletons live in the `(list)` route groups of `projects/` and `turns/`.
 
 ## Admin console

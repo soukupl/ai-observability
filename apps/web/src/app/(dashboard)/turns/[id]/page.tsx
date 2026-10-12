@@ -6,6 +6,7 @@ import { StackedBar100 } from '@/components/charts/StackedBar100';
 import { AgentGraph } from '@/components/charts/AgentGraph';
 import { formatCost, formatDateTime, formatDuration, formatInt, formatTokens, formatUsageName } from '@/components/format';
 import { ModelName } from '@/components/ModelName';
+import { More, MoreBlock } from '@/components/More';
 import { PageHeader } from '@/components/PageHeader';
 import { RunTree } from '@/components/RunTree';
 import { requireUser } from '@/lib/auth/session';
@@ -23,8 +24,9 @@ export const metadata = { title: 'Turn' };
 type Props = { params: Promise<{ id: string }>; searchParams: Promise<Record<string, string | string[] | undefined>> };
 
 /**
- * The single detail page of a turn and its agent flows (ADR-0025): the turn's facts, tokens, phases, skills & MCP,
- * outcome signals and timeline, then one FlowSection per flow of the turn (`#flow-<key>`), then the run tree.
+ * The single detail page of a turn and its agent flows (ADR-0025): the turn's key facts and timeline, then one
+ * FlowSection per flow of the turn (`#flow-<key>`), then the run tree. Secondary detail (other facts, tokens, phases,
+ * skills & MCP, outcome signals, the run tree itself) sits behind collapsed "More" toggles so the page reads at a glance.
  */
 export default async function TurnDetailPage({ params, searchParams }: Props) {
   const user = await requireUser();
@@ -70,7 +72,8 @@ export default async function TurnDetailPage({ params, searchParams }: Props) {
         </p>
       )}
       <div className="space-y-4">
-        <Card title="Facts">
+        <Card title="Turn">
+          {turn.summary && <p className="mb-3 text-sm text-zinc-700 dark:text-zinc-300">{turn.summary}</p>}
           <dl className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
             <Fact label="Outcome">
               <span className="inline-flex flex-wrap items-center gap-1">
@@ -78,25 +81,11 @@ export default async function TurnDetailPage({ params, searchParams }: Props) {
                 {turn.outcomeProvisional && <Badge tone="warn" title="Outcome may still change when the next prompt arrives">provisional</Badge>}
               </span>
             </Fact>
-            {turn.userName !== undefined && <Fact label="User">{turn.userName ?? (turn.userId ? 'former member' : '—')}</Fact>}
-            {turn.attribution && !limited && (
-              <Fact label="Attribution">
-                <AttributionBadge attribution={turn.attribution} />
-              </Fact>
-            )}
-            <Fact label="Team">{turn.teamName ?? '—'}</Fact>
             <Fact label="Project">{turn.projectName ?? '—'}</Fact>
-            <Fact label="Harness">{turn.harness}</Fact>
             <Fact label="Model"><ModelName id={turn.model} /></Fact>
-            <Fact label="Effort">{turn.effort ?? '—'}</Fact>
             <Fact label="Duration">{formatDuration(turn.durationMs)}</Fact>
-            <Fact label="≈ Cost (API list prices)">{formatCost(turn.cost)}</Fact>
-            {turn.filesTouched !== null && <Fact label="Files touched">{formatInt(turn.filesTouched)}</Fact>}
-            {turn.linesAdded !== null && (
-              <Fact label="Lines">
-                +{formatInt(turn.linesAdded)} / −{formatInt(turn.linesRemoved)}
-              </Fact>
-            )}
+            <Fact label="Tokens">{formatTokens(tk.total)}</Fact>
+            <Fact label="≈ Cost" title="At API list prices">{formatCost(turn.cost)}</Fact>
             <Fact label="Sub-agent runs">{formatInt(runs.length)}</Fact>
             <Fact label="Agent flows" title="Sets of two or more sub-agent runs that belong together; each has a section below">
               {flows.length === 0 ? (
@@ -112,123 +101,140 @@ export default async function TurnDetailPage({ params, searchParams }: Props) {
               )}
             </Fact>
           </dl>
-          {turn.summary && <p className="mt-3 border-t border-zinc-100 pt-3 text-sm text-zinc-700 dark:border-zinc-800 dark:text-zinc-300">{turn.summary}</p>}
-        </Card>
-
-        <Card title="Tokens" description="Input excludes cache reads and writes; thinking tokens are part of output.">
-          <dl className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-            <Fact label="Total">{formatTokens(tk.total)}</Fact>
-            <Fact label="Input">{formatTokens(tk.input)}</Fact>
-            <Fact label="Output">{formatTokens(tk.output)}</Fact>
-            <Fact label="Cache read">{formatTokens(tk.cacheRead)}</Fact>
-            <Fact label="Cache write">{formatTokens(tk.cacheWrite)}</Fact>
-            <Fact label="Thinking (in output)">{formatTokens(tk.reasoning)}</Fact>
-          </dl>
-          {usage && usage.length > 0 && (
-            <div className="mt-3 overflow-x-auto">
-              <table className="w-full text-sm">
-                <caption className="sr-only">Usage by model</caption>
-                <thead>
-                  <tr className="border-b border-zinc-200 text-xs text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
-                    <th className="px-2 py-2 text-left font-medium">Model</th>
-                    <th className="px-2 py-2 text-left font-medium">Effort</th>
-                    <th className="px-2 py-2 text-right font-medium">Tokens</th>
-                    <th className="px-2 py-2 text-right font-medium">≈ Cost</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {usage.map((u) => (
-                    <tr key={`${u.model}|${u.effort}`} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/60">
-                      <td className="px-2 py-2"><ModelName id={u.model} /></td>
-                      <td className="px-2 py-2">{u.effort ?? '—'}</td>
-                      <td className="px-2 py-2 text-right tabular-nums">{formatTokens(u.tokens.total)}</td>
-                      <td className="px-2 py-2 text-right tabular-nums">{formatCost(u.cost)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </Card>
-
-        {!limited && (
-          <Card title="Phases" description="Where the turn's time went.">
-            {phases ? (
-              <StackedBar100 rows={[{ label: 'this turn', values: phases.values }]} keys={phases.keys} valueFormat="duration" labelWidth={70} ariaLabel="Phase split of the turn" />
-            ) : (
-              <p className="text-sm text-zinc-500 dark:text-zinc-400">No phase data for this turn.</p>
-            )}
-            {tools.length > 0 && (
-              <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">Tools: {tools.map(([k, v]) => `${k} ×${v}`).join(', ')}</p>
-            )}
-          </Card>
-        )}
-
-        <Card title="Skills & MCP" description="Skills used and MCP calls made in this turn, sub-agents included; the last line is the main agent alone. Each flow section lists its steps' uses.">
-          <dl className="space-y-2 text-sm">
-            {limited ? (
-              <div>
-                <dt className="text-xs text-zinc-500 dark:text-zinc-400">Turn</dt>
-                <dd className="text-zinc-900 dark:text-zinc-100">not available in limited form</dd>
-              </div>
-            ) : (
-              <>
-                <div>
-                  <dt className="text-xs text-zinc-500 dark:text-zinc-400">Skills</dt>
-                  <dd className="text-zinc-900 dark:text-zinc-100">
-                    {skills.length > 0
-                      ? skills
-                          .map(([name, c]) => `${formatUsageName(name)}${c.user > 0 ? ` (typed ×${c.user})` : ''}${c.model > 0 ? ` (by the model ×${c.model})` : ''}`)
-                          .join(', ')
-                      : 'none recorded'}
-                  </dd>
-                </div>
-                {mcp.length > 0 ? (
-                  mcp.map(([server, calls]) => (
-                    <div key={server}>
-                      <dt className="text-xs text-zinc-500 dark:text-zinc-400" title={server}>
-                        MCP {formatUsageName(server)}
-                      </dt>
-                      <dd className="text-zinc-900 dark:text-zinc-100">{calls.map(([tool, n]) => `${formatUsageName(tool)} ×${n}`).join(', ')}</dd>
-                    </div>
-                  ))
-                ) : (
-                  <div>
-                    <dt className="text-xs text-zinc-500 dark:text-zinc-400">MCP calls</dt>
-                    <dd className="text-zinc-900 dark:text-zinc-100">none recorded</dd>
-                  </div>
+          <More hint={limited ? 'other facts, tokens, skills & MCP' : 'other facts, tokens, phases & tools, skills & MCP, outcome signals'}>
+            <MoreBlock title="Other facts">
+              <dl className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+                {turn.userName !== undefined && <Fact label="User">{turn.userName ?? (turn.userId ? 'former member' : '—')}</Fact>}
+                {turn.attribution && !limited && (
+                  <Fact label="Attribution">
+                    <AttributionBadge attribution={turn.attribution} />
+                  </Fact>
                 )}
-                <div>
-                  <dt className="text-xs text-zinc-500 dark:text-zinc-400" title="The turn row alone: what the main agent used, without its sub-agents">
-                    Main agent alone
-                  </dt>
-                  <dd className="text-zinc-900 dark:text-zinc-100">{!own.available ? 'not available in limited form' : ownLine || 'none recorded'}</dd>
+                <Fact label="Team">{turn.teamName ?? '—'}</Fact>
+                <Fact label="Harness">{turn.harness}</Fact>
+                <Fact label="Effort">{turn.effort ?? '—'}</Fact>
+                {turn.filesTouched !== null && <Fact label="Files touched">{formatInt(turn.filesTouched)}</Fact>}
+                {turn.linesAdded !== null && (
+                  <Fact label="Lines">
+                    +{formatInt(turn.linesAdded)} / −{formatInt(turn.linesRemoved)}
+                  </Fact>
+                )}
+              </dl>
+            </MoreBlock>
+
+            <MoreBlock title="Tokens" description="Input excludes cache reads and writes; thinking tokens are part of output.">
+              <dl className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+                <Fact label="Total">{formatTokens(tk.total)}</Fact>
+                <Fact label="Input">{formatTokens(tk.input)}</Fact>
+                <Fact label="Output">{formatTokens(tk.output)}</Fact>
+                <Fact label="Cache read">{formatTokens(tk.cacheRead)}</Fact>
+                <Fact label="Cache write">{formatTokens(tk.cacheWrite)}</Fact>
+                <Fact label="Thinking (in output)">{formatTokens(tk.reasoning)}</Fact>
+              </dl>
+              {usage && usage.length > 0 && (
+                <div className="mt-3 overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <caption className="sr-only">Usage by model</caption>
+                    <thead>
+                      <tr className="border-b border-zinc-200 text-xs text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
+                        <th className="px-2 py-2 text-left font-medium">Model</th>
+                        <th className="px-2 py-2 text-left font-medium">Effort</th>
+                        <th className="px-2 py-2 text-right font-medium">Tokens</th>
+                        <th className="px-2 py-2 text-right font-medium">≈ Cost</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {usage.map((u) => (
+                        <tr key={`${u.model}|${u.effort}`} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/60">
+                          <td className="px-2 py-2"><ModelName id={u.model} /></td>
+                          <td className="px-2 py-2">{u.effort ?? '—'}</td>
+                          <td className="px-2 py-2 text-right tabular-nums">{formatTokens(u.tokens.total)}</td>
+                          <td className="px-2 py-2 text-right tabular-nums">{formatCost(u.cost)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
-              </>
+              )}
+            </MoreBlock>
+
+            {!limited && (
+              <MoreBlock title="Phases" description="Where the turn's time went.">
+                {phases ? (
+                  <StackedBar100 rows={[{ label: 'this turn', values: phases.values }]} keys={phases.keys} valueFormat="duration" labelWidth={70} ariaLabel="Phase split of the turn" />
+                ) : (
+                  <p className="text-sm text-zinc-500 dark:text-zinc-400">No phase data for this turn.</p>
+                )}
+                {tools.length > 0 && (
+                  <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">Tools: {tools.map(([k, v]) => `${k} ×${v}`).join(', ')}</p>
+                )}
+              </MoreBlock>
             )}
-          </dl>
+
+            <MoreBlock title="Skills & MCP" description="Skills used and MCP calls made in this turn, sub-agents included; the last line is the main agent alone. Each flow section lists its steps' uses.">
+              <dl className="space-y-2 text-sm">
+                {limited ? (
+                  <div>
+                    <dt className="text-xs text-zinc-500 dark:text-zinc-400">Turn</dt>
+                    <dd className="text-zinc-900 dark:text-zinc-100">not available in limited form</dd>
+                  </div>
+                ) : (
+                  <>
+                    <div>
+                      <dt className="text-xs text-zinc-500 dark:text-zinc-400">Skills</dt>
+                      <dd className="text-zinc-900 dark:text-zinc-100">
+                        {skills.length > 0
+                          ? skills
+                              .map(([name, c]) => `${formatUsageName(name)}${c.user > 0 ? ` (typed ×${c.user})` : ''}${c.model > 0 ? ` (by the model ×${c.model})` : ''}`)
+                              .join(', ')
+                          : 'none recorded'}
+                      </dd>
+                    </div>
+                    {mcp.length > 0 ? (
+                      mcp.map(([server, calls]) => (
+                        <div key={server}>
+                          <dt className="text-xs text-zinc-500 dark:text-zinc-400" title={server}>
+                            MCP {formatUsageName(server)}
+                          </dt>
+                          <dd className="text-zinc-900 dark:text-zinc-100">{calls.map(([tool, n]) => `${formatUsageName(tool)} ×${n}`).join(', ')}</dd>
+                        </div>
+                      ))
+                    ) : (
+                      <div>
+                        <dt className="text-xs text-zinc-500 dark:text-zinc-400">MCP calls</dt>
+                        <dd className="text-zinc-900 dark:text-zinc-100">none recorded</dd>
+                      </div>
+                    )}
+                    <div>
+                      <dt className="text-xs text-zinc-500 dark:text-zinc-400" title="The turn row alone: what the main agent used, without its sub-agents">
+                        Main agent alone
+                      </dt>
+                      <dd className="text-zinc-900 dark:text-zinc-100">{!own.available ? 'not available in limited form' : ownLine || 'none recorded'}</dd>
+                    </div>
+                  </>
+                )}
+              </dl>
+            </MoreBlock>
+
+            {!limited && (
+              <MoreBlock title="Outcome signals" description="Why the outcome was classified this way.">
+                {signals.length > 0 ? (
+                  <ul className="flex flex-wrap gap-2">
+                    {signals.map((s) => (
+                      <li key={s}>
+                        <Badge>{s}</Badge>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-sm text-zinc-500 dark:text-zinc-400">No signals recorded (outcome {turn.outcome}).</p>
+                )}
+              </MoreBlock>
+            )}
+          </More>
         </Card>
 
-        {!limited && (
-          <Card title="Outcome signals" description="Why the outcome was classified this way.">
-            {signals.length > 0 ? (
-              <ul className="flex flex-wrap gap-2">
-                {signals.map((s) => (
-                  <li key={s}>
-                    <Badge>{s}</Badge>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p className="text-sm text-zinc-500 dark:text-zinc-400">No signals recorded (outcome {turn.outcome}).</p>
-            )}
-          </Card>
-        )}
-
-        <Card
-          title="Timeline"
-          description="The turn is the trunk; each sub-agent branches off where it starts and merges back where it ends. Workflow agents can keep running after the turn has ended (dashed trunk). Times are UTC."
-        >
+        <Card title="Timeline" description="Main agent as the trunk, sub-agents as branches; a dashed trunk means workflow agents ran on after the turn ended. Times are UTC.">
           <AgentGraph {...turnGraph(detail)} />
         </Card>
 
@@ -236,9 +242,14 @@ export default async function TurnDetailPage({ params, searchParams }: Props) {
           <FlowSection key={f.key} flow={f} flag={flags.get(f.key) ?? null} companyId={user.companyId} index={i} count={flows.length} />
         ))}
 
-        <Card title="Runs" description="Parent to child.">
-          <RunTree root={toRunTree(detail)} />
-          {runs.length === 0 && <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">No sub-agent runs in this turn.</p>}
+        <Card title="Runs" description="Every sub-agent run of the turn, parent to child.">
+          {runs.length === 0 ? (
+            <p className="text-sm text-zinc-500 dark:text-zinc-400">No sub-agent runs in this turn.</p>
+          ) : (
+            <More label="Show the run tree" hint={`${formatInt(runs.length)} run${runs.length === 1 ? '' : 's'}`}>
+              <RunTree root={toRunTree(detail)} />
+            </More>
+          )}
         </Card>
       </div>
     </>
