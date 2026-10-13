@@ -2,13 +2,13 @@ import { buildDigest } from '../../analysis/digest.js';
 import { looksLikeCorrection } from '../../analysis/corrections.js';
 import { detectRevert, finalOutcome, provisionalOutcome } from '../../analysis/outcome.js';
 import { mergeUsage, primaryModel } from '../../analysis/tokens.js';
-import { normalizeRunLinks, turnEvent, turnOutcomeEvent, withRunLinks, type RunLinkInput } from '../../events.js';
+import { normalizeRunLinks, sessionTitleEvent, turnEvent, turnOutcomeEvent, withRunLinks, type RunLinkInput } from '../../events.js';
 import type { IngestEvent, Outcome, RunEvent } from '../../protocol-types.js';
 import { analyzeEntries, isWorkflowKey, mergeAgg } from './analyze.js';
 import { computeRunLinks, type LinkableRun } from './run-links.js';
 import type { RunSpan, SessionState, StoredTurn } from './state.js';
 import { agentsOfToolUses, buildRun, listAgents, workflowOver, type AgentMeta } from './subagents.js';
-import { hasRevertCommand, readTranscript, type SlimEntry, type TranscriptLine } from './transcript.js';
+import { hasRevertCommand, readTranscript, type SlimEntry, type TranscriptLine, type TranscriptTitles } from './transcript.js';
 
 /**
  * Turns the new part of a session transcript into events. Turn boundary: a real user prompt (not a
@@ -69,6 +69,7 @@ export class Emitter {
 export function processTranscript(em: Emitter, opts: ProcessOptions): void {
   const st = em.state;
   const read = readTranscript(st.transcriptPath, st.offset, st.sessionId);
+  noteTitles(st, read.titles);
   const pre: SlimEntry[] = [];
   const segments: Segment[] = [];
   for (const l of read.lines) addLine(l, pre, segments);
@@ -86,6 +87,28 @@ export function processTranscript(em: Emitter, opts: ProcessOptions): void {
     if (active) finalizeTurn(em, seg, Boolean(opts.stopFailure) && isLast && opts.mode === 'stop', opts.mode === 'end');
   }
   st.offset = done < segments.length ? segments[done]!.start : read.end;
+}
+
+/** Keeps the latest title of each kind read from the transcript (ADR-0026). */
+function noteTitles(st: SessionState, titles: TranscriptTitles): void {
+  if (!titles.custom && !titles.ai) return;
+  st.title = { ...st.title, ...titles };
+}
+
+/**
+ * The session's title (ADR-0026) when it differs from the one last sent: the `/rename` title wins over the
+ * generated one, the latest of each kind wins. Marks it as sent.
+ */
+export function emitSessionTitle(em: Emitter): void {
+  const t = em.state.title;
+  const source = t?.custom ? 'custom' : t?.ai ? 'ai' : null;
+  const title = source ? t?.[source] : undefined;
+  if (!t || !source || !title) return;
+  const sent = `${source}\n${title}`;
+  if (t.sent === sent) return;
+  const ev = sessionTitleEvent({ harness: em.harness, sessionId: em.state.sessionId, title, source });
+  if (ev) em.events.push(ev);
+  t.sent = sent;
 }
 
 /**

@@ -10,6 +10,8 @@ export interface GraphLane {
   sublabel: string | null;
   /** Index into the chart palette (the lane's project colour). */
   colorIndex: number;
+  /** Where the lane label links to (a session lane: its session page, ADR-0026); none when absent. */
+  href?: string | null;
 }
 export interface GraphTurn {
   id: string;

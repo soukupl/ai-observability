@@ -14,6 +14,8 @@ import {
   type RunLinkKind,
   type SessionEndEvent,
   type SessionStartEvent,
+  type SessionTitleEvent,
+  type SessionTitleSource,
   type SkillCounts,
   type TurnEvent,
   type TurnOutcomeEvent,
@@ -321,6 +323,27 @@ export function turnSummaryEvent(i: Common & { turnId: string; summary: string; 
     harness: i.harness,
     turn_id: clip(i.turnId, 256),
     summary,
+    ...extOf(i),
+  };
+}
+
+/**
+ * Patch carrying the session's title as the harness shows it (ADR-0026). Same cleaning and limit as a summary; the
+ * id depends on the title and the send time: a renamed session sends a new event; a title the server rejects is
+ * not re-sent until it changes (the patch is idempotent, so a repeat after a crash is harmless). Empty → null.
+ */
+export function sessionTitleEvent(
+  i: Common & { sessionId: string; title: string; source: SessionTitleSource; at?: TimeInput },
+): SessionTitleEvent | null {
+  const title = cleanSummaryText(i.title);
+  if (!title) return null;
+  return {
+    event_id: id(i, `session_title|${i.sessionId}|${i.source}|${title}`, toMs(i.at ?? Date.now())),
+    type: 'session_title',
+    harness: i.harness,
+    session_id: clip(i.sessionId, 256),
+    title,
+    source: i.source,
     ...extOf(i),
   };
 }

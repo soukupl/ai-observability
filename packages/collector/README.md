@@ -378,6 +378,11 @@ How the adapter works:
   - **What it sends:** the remaining turns, the outcome patches and `session_end` with reason
     `crashed`, followed by the summaries.
   - **Clean-up:** the state of ended sessions is deleted after 30 days.
+- **Session title** (ADR-0026): the transcript's `custom-title` (`/rename`) and `ai-title` entries are tracked
+  while it is read; after every hook the effective title (the `/rename` title wins over the generated one, the latest
+  of each kind wins) is sent as a `session_title` patch when it differs from the one last sent (`title.sent` in the
+  session state). A resumed session first seen mid-way starts at the end of its file, so a title written before that
+  is sent only once Claude Code writes it again. Codex sends none.
 - **Summaries** run at `SessionEnd`, and earlier once 10 turns are waiting or the first waiting turn
   has waited 10 minutes (`summariesDue`, ADR-0023; the wait starts at the hook that first saw the turn
   waiting, `digestsSince` in the session state): `claude -p --model haiku --output-format json
@@ -436,9 +441,10 @@ How the adapter works:
 
 ## Privacy guarantees
 
-- **Never sent:** prompts, responses, code, diffs or file paths (ADR-0008). The only model-written text
-  that leaves the machine is the ≤ 140-char turn summary. Before it is sent, it is whitespace-collapsed
-  and any path in it is reduced to its last segment.
+- **Never sent:** prompts, responses, code, diffs or file paths (ADR-0008). The only conversation-derived text
+  that leaves the machine is the ≤ 140-char turn summary and the ≤ 140-char session title (Claude Code's `/rename` or
+  generated title, ADR-0026). Before either is sent, it is whitespace-collapsed and any path in it is reduced to its
+  last segment.
 - **Project identity:** the normalized git remote, with credentials, `user@` and port stripped. The queue keeps the plain key and plain skill / MCP names (local files, mode 0600); they are hashed or named **at send time** with the receiving company's salt and naming mode, so each company sees only its own form. `projects.json` and the assignment key never leave the machine, and neither does a plain path key.
   - **`hashed` mode:** `sha256:` + a hash of that remote, with no name. When collector-config sends a
     per-company `project_salt` (this server does, since migration 0004), the hash is HMAC-SHA256 keyed by it (the same on every machine, so

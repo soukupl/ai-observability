@@ -1,4 +1,4 @@
-import { sql } from 'drizzle-orm';
+import { sql, type SQL } from 'drizzle-orm';
 import type { Outcome } from '@ai-obs/db';
 import type { CostValue, PriceBook } from '../cost';
 import { CostSum, ZERO_COST } from '../cost';
@@ -424,11 +424,11 @@ export const flowHasGroup = (f: Pick<Flow, 'steps'>, group: string): boolean => 
 export async function getFlows(
   ctx: QueryCtx,
   f: Filters,
-  opts: { page: number; outcome: Outcome | null; group?: string | null; pageSize?: number },
+  opts: { page: number; outcome: Outcome | null; group?: string | null; pageSize?: number; sessionId?: string | null },
 ): Promise<FlowListResult> {
   const pageSize = Math.min(Math.max(1, Math.floor(opts.pageSize ?? FLOW_PAGE_SIZE)), FLOW_MAX_PAGE_SIZE);
   const page = Math.max(1, Math.floor(Number.isFinite(opts.page) ? opts.page : 1));
-  const { range, flows: matching, truncated, ignoredFilters } = await listFlows(ctx, f, opts.outcome, opts.group ?? null);
+  const { range, flows: matching, truncated, ignoredFilters } = await listFlows(ctx, f, opts.outcome, opts.group ?? null, opts.sessionId ?? null);
   const offset = (page - 1) * pageSize;
   return {
     range,
@@ -448,16 +448,20 @@ export async function listFlows(
   f: Filters,
   outcome: Outcome | null = null,
   group: string | null = null,
+  sessionId: string | null = null,
 ): Promise<{ range: ResolvedRange; flows: Flow[]; truncated: boolean; ignoredFilters: string[] }> {
   const range = rawRange(rangeFor(ctx, f));
   const d = dims(ctx, f, range);
 
-  let runRows: Record<string, unknown>[];
-  let linkRows: Record<string, unknown>[];
-  const projectsP = listProjects(ctx);
-  if (ctx.agg) {
+  let input: FlowInputs;
+  if (sessionId) {
+    // One session (ADR-0026): every flow of its turns, whatever the date range; raw rows under RLS (in aggregates-only
+    // mode a lead / admin reads only their own session this way).
+    input = await readFlowInputs(ctx, [sql`t.company_id = ${ctx.viewer.companyId}::uuid`, sql`t.session_id = ${sessionId}::uuid`]);
+  } else if (ctx.agg) {
     const args = aggArgs(d, 'ts');
-    [runRows, linkRows] = await Promise.all([
+    const projectsP = listProjects(ctx);
+    const [runRows, linkRows] = await Promise.all([
       rows<Record<string, unknown>>(
         ctx.tx,
         sql`select id, turn_id, parent_run_id, agent_type, agent_group, orchestration_id, stage_index, depth, model, effort,
@@ -467,34 +471,61 @@ export async function listFlows(
       ),
       rows<Record<string, unknown>>(ctx.tx, sql`select from_run_id, to_run_id, kind from agg_flow_links(${args}, ${FLOW_MAX_RUNS + 1}::integer)`),
     ]);
+    input = toFlowInputs(runRows, linkRows, await projectsP);
   } else {
-    const conds = turnConds(ctx, d);
-    [runRows, linkRows] = await Promise.all([
-      rows<Record<string, unknown>>(
-        ctx.tx,
-        sql`select r.id, r.turn_id, r.parent_run_id, r.agent_type, r.agent_group, r.orchestration_id, r.stage_index, r.depth, r.model, r.effort,
-              ${MS('r.started_at')} as started_ms, ${MS('r.ended_at')} as ended_ms, r.duration_ms, ${TOKEN_COLS('r.')}, r.outcome,
-              r.phases_ms, r.skills, r.mcp,
-              ${MS('t.started_at')} as turn_started_ms, t.project_id as turn_project_id, t.harness as turn_harness, t.summary as turn_summary,
-              (t.user_id is not distinct from ${ctx.viewer.id}::uuid) as turn_is_mine
-            from turns t join runs r on r.turn_id = t.id and r.company_id = t.company_id
-            ${where(conds)}
-            order by r.started_at, r.id limit ${FLOW_MAX_RUNS + 1}`,
-      ),
-      // Visibility follows the target run, as the run_links policy does.
-      rows<Record<string, unknown>>(
-        ctx.tx,
-        sql`select l.from_run_id, l.to_run_id, l.kind
-            from turns t join runs r on r.turn_id = t.id and r.company_id = t.company_id
-              join run_links l on l.to_run_id = r.id and l.company_id = r.company_id
-            ${where([...conds, sql`l.from_run_id is not null`])}
-            order by r.started_at, r.id, l.from_run_id, l.kind limit ${FLOW_MAX_RUNS + 1}`,
-      ),
-    ]);
+    input = await readFlowInputs(ctx, turnConds(ctx, d));
   }
 
-  const truncated = runRows.length > FLOW_MAX_RUNS || linkRows.length > FLOW_MAX_RUNS;
-  const projects = new Map((await projectsP).map((p) => [p.id, p.name]));
+  const all = buildFlows({ runs: input.runs, turns: input.turns, links: input.links, prices: ctx.prices });
+  return {
+    range,
+    flows: all.filter((x) => (!outcome || x.outcome === outcome) && (!group || flowHasGroup(x, group))),
+    truncated: input.truncated,
+    ignoredFilters: ctx.agg && d.effort && !sessionId ? ['effort'] : [],
+  };
+}
+
+/** What buildFlows reads, as one read returned it; `truncated` = the run or link cap was hit. */
+export interface FlowInputs {
+  runs: FlowRunInput[];
+  turns: Map<string, FlowTurn>;
+  links: RunLink[];
+  truncated: boolean;
+}
+
+/**
+ * Runs and stored links of the turns matching `conds` (conditions on `turns` aliased `t`), read from the tables under
+ * RLS, at most FLOW_MAX_RUNS of each (oldest runs first). Used by the flows list and the sessions view.
+ */
+export async function readFlowInputs(ctx: QueryCtx, conds: SQL[]): Promise<FlowInputs> {
+  const projectsP = listProjects(ctx);
+  const [runRows, linkRows] = await Promise.all([
+    rows<Record<string, unknown>>(
+      ctx.tx,
+      sql`select r.id, r.turn_id, r.parent_run_id, r.agent_type, r.agent_group, r.orchestration_id, r.stage_index, r.depth, r.model, r.effort,
+            ${MS('r.started_at')} as started_ms, ${MS('r.ended_at')} as ended_ms, r.duration_ms, ${TOKEN_COLS('r.')}, r.outcome,
+            r.phases_ms, r.skills, r.mcp,
+            ${MS('t.started_at')} as turn_started_ms, t.project_id as turn_project_id, t.harness as turn_harness, t.summary as turn_summary,
+            (t.user_id is not distinct from ${ctx.viewer.id}::uuid) as turn_is_mine
+          from turns t join runs r on r.turn_id = t.id and r.company_id = t.company_id
+          ${where(conds)}
+          order by r.started_at, r.id limit ${FLOW_MAX_RUNS + 1}`,
+    ),
+    // Visibility follows the target run, as the run_links policy does.
+    rows<Record<string, unknown>>(
+      ctx.tx,
+      sql`select l.from_run_id, l.to_run_id, l.kind
+          from turns t join runs r on r.turn_id = t.id and r.company_id = t.company_id
+            join run_links l on l.to_run_id = r.id and l.company_id = r.company_id
+          ${where([...conds, sql`l.from_run_id is not null`])}
+          order by r.started_at, r.id, l.from_run_id, l.kind limit ${FLOW_MAX_RUNS + 1}`,
+    ),
+  ]);
+  return toFlowInputs(runRows, linkRows, await projectsP);
+}
+
+function toFlowInputs(runRows: Record<string, unknown>[], linkRows: Record<string, unknown>[], projectList: { id: string; name: string }[]): FlowInputs {
+  const projects = new Map(projectList.map((p) => [p.id, p.name]));
   const turns = new Map<string, FlowTurn>();
   const runs: FlowRunInput[] = [];
   for (const r of runRows.slice(0, FLOW_MAX_RUNS)) {
@@ -517,14 +548,7 @@ export async function listFlows(
     .slice(0, FLOW_MAX_RUNS)
     .map(mapRunLink)
     .filter((l): l is RunLink => l !== null);
-
-  const all = buildFlows({ runs, turns, links, prices: ctx.prices });
-  return {
-    range,
-    flows: all.filter((x) => (!outcome || x.outcome === outcome) && (!group || flowHasGroup(x, group))),
-    truncated,
-    ignoredFilters: ctx.agg && d.effort ? ['effort'] : [],
-  };
+  return { runs, turns, links, truncated: runRows.length > FLOW_MAX_RUNS || linkRows.length > FLOW_MAX_RUNS };
 }
 
 /**

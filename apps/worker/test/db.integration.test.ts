@@ -301,7 +301,7 @@ describe('worker jobs against Postgres', () => {
       expect(await counts()).toEqual({ turns: '5', runs: '1', usage: '6', sessions: '4' });
       const c = makeCtx();
       const s = await runRetention(c, { force: true });
-      expect(s).toMatchObject({ turns: 3, runs: 1, usage: 4, sessions: 2, ingestEvents: 1, pendingPatches: 1, magicLinks: 1, authSessions: 1 });
+      expect(s).toMatchObject({ turns: 3, runs: 1, usage: 4, sessions: 2, ingestEvents: 1, pendingPatches: 2, magicLinks: 1, authSessions: 1 });
       expect(await counts()).toEqual({ turns: '2', runs: '0', usage: '2', sessions: '2' });
       const left = await rows<{ external_id: string }>(sql`select external_id from turns where company_id = ${co.companyId} order by 1`);
       expect(left.map((r) => r.external_id)).toEqual(['t-keep1', 't-long-new']);
@@ -315,6 +315,7 @@ describe('worker jobs against Postgres', () => {
       expect(await rows(sql`select event_id from ingest_events where company_id = ${co.companyId}`)).toEqual([{ event_id: 'new' }]);
       // parked patches whose turn never came are dropped after 30 days (ADR-0015), even if the company stopped ingesting
       expect(await rows(sql`select turn_external_id from pending_turn_patches where company_id = ${co.companyId}`)).toEqual([{ turn_external_id: 'claude-code:soon' }]);
+      expect(await rows(sql`select session_external_id from pending_session_patches where company_id = ${co.companyId}`)).toEqual([{ session_external_id: 'claude-code:soon-s' }]);
       expect(await rows(sql`select token_hash from magic_links`)).toEqual([{ token_hash: 'h2' }]);
       expect(await rows(sql`select token_hash from auth_sessions`)).toEqual([{ token_hash: 's2' }]);
       expect(c.state.get('retention.lastDay')).toBe('2026-10-05');

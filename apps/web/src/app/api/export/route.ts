@@ -6,13 +6,14 @@ import { filtersForAudit, parseFilters } from '@/lib/filters';
 import { buildExportTable, isExportView, isPhaseGroup, type ExportOptions } from '@/lib/queries/exports';
 import { rangeFor, addDays } from '@/lib/queries/range';
 import { canSeeUsers, createQueryContext } from '@/lib/queries/scope';
+import { parseSessionId } from '@/lib/queries/sessions';
 
 export const dynamic = 'force-dynamic';
 
 const OUTCOMES = ['success', 'failed', 'abandoned', 'unknown'] as const;
 
 /**
- * GET /api/export?view=<projects|models|phases|agents|turns|flows|overview|budgets>&<filters>
+ * GET /api/export?view=<projects|models|phases|agents|turns|flows|sessions|overview|budgets>&<filters>
  * Re-runs the view's query under the caller's RLS context and visibility mode (so a CSV can never show
  * more than the screen), streams it as CSV, and records an `export` row in audit_log (BRIEF §8).
  */
@@ -33,6 +34,9 @@ export async function GET(req: Request): Promise<Response> {
   const outcome = params.get('outcome');
   if ((view === 'turns' || view === 'flows') && (OUTCOMES as readonly string[]).includes(outcome ?? '')) opts.outcome = outcome as (typeof OUTCOMES)[number];
 
+  const sessionId = parseSessionId(params.get('session'));
+  if ((view === 'turns' || view === 'flows') && sessionId) opts.sessionId = sessionId;
+
   const companyId = viewer.companyId;
   const { table, range } = await withUserDb(user, async (tx) => {
     const ctx = await createQueryContext(tx, viewer);
@@ -46,6 +50,7 @@ export async function GET(req: Request): Promise<Response> {
         filters: filtersForAudit(filters),
         ...(opts.group ? { group: opts.group } : {}),
         ...(opts.outcome ? { outcome: opts.outcome } : {}),
+        ...(opts.sessionId ? { session: opts.sessionId } : {}),
         rows: table.rows.length,
         ...(table.truncated ? { truncated: true } : {}),
       },

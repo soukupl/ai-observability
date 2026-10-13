@@ -255,13 +255,14 @@ describe.skipIf(skipReason !== null)(skipReason ? `RLS — SKIPPED: ${skipReason
 
   describe('app_platform (super admin)', () => {
     it('has no access to telemetry tables', async () => {
-      for (const t of [...TELEMETRY, 'run_links', 'projects', 'machines', 'teams', 'team_memberships', 'ingest_events', 'ingest_tokens', 'budgets', 'pending_turn_patches']) {
+      for (const t of [...TELEMETRY, 'run_links', 'projects', 'machines', 'teams', 'team_memberships', 'ingest_events', 'ingest_tokens', 'budgets', 'pending_turn_patches', 'pending_session_patches']) {
         expect(await pgErrorCode(platform.execute(sql`select 1 from ${sql.identifier(t)} limit 1`)), t).toBe('42501');
       }
     });
 
-    it('pending_turn_patches is ingest-internal: the dashboard role cannot read it either', async () => {
+    it('pending_turn_patches / pending_session_patches are ingest-internal: the dashboard role cannot read them either', async () => {
       expect(await pgErrorCode(web.execute(sql`select 1 from pending_turn_patches limit 1`))).toBe('42501');
+      expect(await pgErrorCode(web.execute(sql`select 1 from pending_session_patches limit 1`))).toBe('42501');
     });
 
     it('manages companies and sees only admin contacts (through admin memberships)', async () => {

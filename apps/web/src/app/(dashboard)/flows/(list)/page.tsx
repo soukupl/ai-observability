@@ -12,6 +12,8 @@ import { getFlows } from '@/lib/queries/flows';
 import { loadFilterOptions } from '@/lib/queries/lookups';
 import { withDashboardContext } from '@/lib/queries/page';
 import { canSeeUsers } from '@/lib/queries/scope';
+import { getSessionLink, parseSessionId } from '@/lib/queries/sessions';
+import { sessionHref } from '../../sessions/_helpers';
 import { OUTCOME_VALUES, parseTurnParams } from '../../turns/_helpers';
 import { flowKpis, flowsListHref, flowsPaging, parseFlowGroup, toFlowTableRows } from '../_helpers';
 import { FlaggedFlows } from './FlaggedFlows';
@@ -40,10 +42,13 @@ export default async function FlowsPage({ searchParams }: { searchParams: Search
   const filters = parseFilters(sp, { allowUser: canSeeUsers(user) });
   const { page, outcome } = parseTurnParams(sp);
   const group = parseFlowGroup(sp);
-  const { options, list, flagged } = await withDashboardContext(user, async (ctx) => ({
+  const sessionParam = parseSessionId(sp.session);
+  const { options, list, flagged, session } = await withDashboardContext(user, async (ctx) => ({
     options: await loadFilterOptions(ctx),
-    list: await getFlows(ctx, filters, { page, outcome, group }),
+    // With a session: every flow of its turns (RLS decides which), whatever the date range.
+    list: await getFlows(ctx, filters, { page, outcome, group, sessionId: sessionParam }),
     flagged: await listFlaggedFlows(ctx),
+    session: sessionParam ? await getSessionLink(ctx, sessionParam) : null,
   }));
 
   const rows = toFlowTableRows(list.flows);
@@ -65,6 +70,21 @@ export default async function FlowsPage({ searchParams }: { searchParams: Search
       />
       <FilterBar filters={filters} options={options} />
       <FlaggedFlows rows={flagged} companyId={user.companyId} />
+      {sessionParam && (
+        <p role="note" className="text-xs text-zinc-600 dark:text-zinc-400">
+          {session ? (
+            <>
+              Flows of one session (
+              <Link href={sessionHref(session.id)} className="font-medium text-blue-700 hover:underline dark:text-blue-400">
+                {session.title}
+              </Link>
+              ); the date range and the filter bar do not apply here.
+            </>
+          ) : (
+            'That session does not exist or is outside your visibility.'
+          )}
+        </p>
+      )}
       {list.ignoredFilters.length > 0 && (
         <p className="text-xs text-amber-700 dark:text-amber-400">Not applied in aggregates-only mode: {list.ignoredFilters.join(', ')}.</p>
       )}
@@ -98,6 +118,11 @@ export default async function FlowsPage({ searchParams }: { searchParams: Search
               agent group: {group} ✕
             </Link>
           )}
+          {sessionParam && (
+            <Link href={flowsListHref(sp, { session: null })} className={pill(true)} title="Flows of one session. Click to clear." aria-label="Clear the session filter">
+              session: {session?.title ?? 'unknown'} ✕
+            </Link>
+          )}
         </nav>
         <DataTable
           columns={columns}
@@ -105,7 +130,7 @@ export default async function FlowsPage({ searchParams }: { searchParams: Search
           rowKey="id"
           caption="Agent flows"
           emptyMessage={emptyMessage}
-          exportHref={exportUrl('flows', filters, { outcome })}
+          exportHref={exportUrl('flows', filters, { outcome, session: sessionParam })}
         />
         <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-zinc-500 dark:text-zinc-400">
           <span>{rows.length > 0 ? `Rows ${first}–${last} of ${list.total}` : ''}</span>

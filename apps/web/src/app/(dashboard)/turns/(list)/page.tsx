@@ -9,7 +9,9 @@ import { parseFilters } from '@/lib/filters';
 import { loadFilterOptions } from '@/lib/queries/lookups';
 import { withDashboardContext } from '@/lib/queries/page';
 import { canSeeUsers, usesAggregateFunctions } from '@/lib/queries/scope';
+import { getSessionLink, parseSessionId } from '@/lib/queries/sessions';
 import { listTurns, TURN_PAGE_SIZE } from '@/lib/queries/turns';
+import { sessionHref } from '../../sessions/_helpers';
 import { listHref, OUTCOME_VALUES, parseTurnParams, toTableRows } from '../_helpers';
 
 export const metadata = { title: 'Turns' };
@@ -21,10 +23,16 @@ export default async function TurnsPage({ searchParams }: { searchParams: Search
   const sp = await searchParams;
   const filters = parseFilters(sp, { allowUser: canSeeUsers(user) });
   const { page, outcome } = parseTurnParams(sp);
-  const { options, list } = await withDashboardContext(user, async (ctx) => ({
-    options: await loadFilterOptions(ctx),
-    list: await listTurns(ctx, filters, { page, pageSize: TURN_PAGE_SIZE, outcome }),
-  }));
+  const sessionParam = parseSessionId(sp.session);
+  const { options, list, session } = await withDashboardContext(user, async (ctx) => {
+    // RLS decides which of the session's turns the viewer sees: an invisible session lists nothing.
+    const session = sessionParam ? await getSessionLink(ctx, sessionParam) : null;
+    return {
+      options: await loadFilterOptions(ctx),
+      list: await listTurns(ctx, filters, { page, pageSize: TURN_PAGE_SIZE, outcome, sessionId: sessionParam }),
+      session,
+    };
+  });
 
   const showUser = canSeeUsers(user) && !usesAggregateFunctions(user);
   const rows = toTableRows(list.rows);
@@ -61,6 +69,21 @@ export default async function TurnsPage({ searchParams }: { searchParams: Search
         description="Single turns, newest first. Costs are ≈ at API list prices. Unknown outcomes are shown, not hidden. The last 35 days at most are read from raw turns."
       />
       <FilterBar filters={filters} options={options} />
+      {sessionParam && (
+        <p role="note" className="mb-3 text-xs text-zinc-600 dark:text-zinc-400">
+          {session ? (
+            <>
+              Turns of one session (
+              <Link href={sessionHref(session.id)} className="font-medium text-blue-700 hover:underline dark:text-blue-400">
+                {session.title}
+              </Link>
+              ); the date range and the filter bar do not apply here.
+            </>
+          ) : (
+            'That session does not exist or is outside your visibility.'
+          )}
+        </p>
+      )}
       {list.ignoredFilters.length > 0 && (
         <p className="mb-3 text-xs text-amber-700 dark:text-amber-400">Not applied in aggregates-only mode: {list.ignoredFilters.join(', ')}.</p>
       )}
@@ -77,6 +100,11 @@ export default async function TurnsPage({ searchParams }: { searchParams: Search
               {o}
             </Link>
           ))}
+          {sessionParam && (
+            <Link href={listHref(sp, { session: null })} className={pill(true)} title="Turns of one session. Click to clear." aria-label="Clear the session filter">
+              session: {session?.title ?? 'unknown'} ✕
+            </Link>
+          )}
         </nav>
         <DataTable
           columns={columns}
@@ -84,7 +112,7 @@ export default async function TurnsPage({ searchParams }: { searchParams: Search
           rowKey="id"
           caption="Turns"
           emptyMessage="No turns match these filters. Widen the date range or clear a filter."
-          exportHref={exportUrl('turns', filters, { outcome })}
+          exportHref={exportUrl('turns', filters, { outcome, session: sessionParam })}
         />
         <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-zinc-500 dark:text-zinc-400">
           <span>{rows.length > 0 ? `Rows ${first}–${last}${list.total !== null ? ` of ${list.total}` : ''}` : ''}</span>

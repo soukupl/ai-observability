@@ -26,14 +26,15 @@ export function parseStartedMs(v: string | string[] | undefined): number | undef
   return first(v) && Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
 }
 
-/** URL for a list page: keeps the current search params, sets/clears page and outcome. */
-export function listHref(sp: Params, change: { page?: number | null; outcome?: string | null }): string {
+/** URL for a list page: keeps the current search params, sets/clears page, outcome and the `session` filter. */
+export function listHref(sp: Params, change: { page?: number | null; outcome?: string | null; session?: string | null }): string {
   const p = new URLSearchParams();
   for (const [k, v] of Object.entries(sp)) {
     const val = first(v);
-    if (val !== undefined && k !== 'page' && !(k === 'outcome' && 'outcome' in change)) p.set(k, val);
+    if (val !== undefined && k !== 'page' && !(k === 'outcome' && 'outcome' in change) && !(k === 'session' && 'session' in change)) p.set(k, val);
   }
   if (change.outcome) p.set('outcome', change.outcome);
+  if (change.session) p.set('session', change.session);
   if (change.page && change.page > 1) p.set('page', String(change.page));
   const s = p.toString();
   return s ? `/turns?${s}` : '/turns';

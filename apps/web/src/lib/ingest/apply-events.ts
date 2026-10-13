@@ -1,11 +1,13 @@
 import { sql } from 'drizzle-orm';
 import type { Tx } from '@ai-obs/db';
 import type {
+  IngestEvent,
   Outcome,
   RunEvent,
   RunLink,
   SessionEndEvent,
   SessionStartEvent,
+  SessionTitleEvent,
   TurnEvent,
   TurnOutcomeEvent,
   TurnSummaryEvent,
@@ -30,6 +32,13 @@ import { propagateTurnOwner, replaceUsage } from './usage-rows';
  * (`outcome-patch:<turn key>`), so a re-sent turn never overwrites a patched outcome with its
  * provisional one. Summaries are only ever written by patches.
  *
+ * Session titles (ADR-0026) follow the same design: a session_title for a session that has not arrived is parked in
+ * pending_session_patches and ingest_apply_pending_session_patch() moves it onto the session when any event creates
+ * the session row it creates. Every session write and the title patch take an advisory lock on the session key, so a
+ * title and its session in concurrent batches cannot miss each other. processBatch takes every session lock of the
+ * batch first, in sorted order (lockBatchSessions), so session locks always come before turn locks and concurrent
+ * batches cannot deadlock; the lock calls inside the apply functions then re-take a held lock, which is free.
+ *
  * Ownership (SEC-3): an existing turn, run or session is overwritten (or patched) only by its owner or
  * while it has none (see ownerMayWrite); anything else throws OwnerConflictError and the event is
  * rejected. A non-provisional outcome patch also leaves `outcome-final:<turn key>`, after which a
@@ -47,12 +56,42 @@ async function lockTurnKey(tx: Tx, ctx: BatchContext, key: string): Promise<void
   await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`turn:${ctx.companyId}:${key}`}, 0))`);
 }
 
+/** Serialises the session upserts and the title patches of one session key across concurrent batches (until commit). */
+async function lockSessionKey(tx: Tx, ctx: BatchContext, key: string): Promise<void> {
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`session:${ctx.companyId}:${key}`}, 0))`);
+}
+
+/** The session keys an event writes (session_start, turn, session_title, session_end); pure. */
+export function batchSessionKeys(events: readonly IngestEvent[]): string[] {
+  const keys = new Set<string>();
+  for (const e of events) {
+    if (e.type === 'session_start' || e.type === 'turn' || e.type === 'session_title' || e.type === 'session_end') {
+      keys.add(sessionKey(e.harness, e.session_id));
+    }
+  }
+  return [...keys].sort();
+}
+
+/** Takes the session locks of a batch up front, in sorted order (see the header comment). */
+export async function lockBatchSessions(tx: Tx, ctx: BatchContext, events: readonly IngestEvent[]): Promise<void> {
+  for (const key of batchSessionKeys(events)) await lockSessionKey(tx, ctx, key);
+}
+
+/**
+ * Moves a title parked for this session (if any) onto it; see ingest_apply_pending_session_patch() (one indexed
+ * delete; the 30-day prune of orphaned titles is the worker's).
+ */
+async function applyPendingSessionPatch(tx: Tx, sessionId: string): Promise<void> {
+  await tx.execute(sql`select ingest_apply_pending_session_patch(${sessionId}::uuid)`);
+}
+
 const durationMs = (startedAt: string, endedAt: string) => Math.max(0, Date.parse(endedAt) - Date.parse(startedAt));
 const json = (v: unknown) => JSON.stringify(v ?? {});
 
 export async function applySessionStart(tx: Tx, ctx: BatchContext, e: SessionStartEvent): Promise<void> {
   const project = e.project ? await upsertProject(tx, ctx, e.project) : null;
   const teamId = await teamFor(tx, ctx, project?.id ?? null);
+  await lockSessionKey(tx, ctx, sessionKey(e.harness, e.session_id));
   const [session] = await rows<{ id: string }>(
     tx,
     sql`insert into agent_sessions (company_id, team_id, user_id, machine_id, project_id, external_id, harness,
@@ -69,6 +108,7 @@ export async function applySessionStart(tx: Tx, ctx: BatchContext, e: SessionSta
         returning id`,
   );
   if (!session) throw new OwnerConflictError('session');
+  await applyPendingSessionPatch(tx, session.id);
   if (!project) return;
 
   // Turns that arrived before their session_start had no project: give them one (and its team).
@@ -88,7 +128,8 @@ export async function applySessionStart(tx: Tx, ctx: BatchContext, e: SessionSta
 
 export async function applySessionEnd(tx: Tx, ctx: BatchContext, e: SessionEndEvent): Promise<void> {
   const teamId = await teamFor(tx, ctx, null);
-  const done = await rows(
+  await lockSessionKey(tx, ctx, sessionKey(e.harness, e.session_id));
+  const [done] = await rows<{ id: string }>(
     tx,
     sql`insert into agent_sessions (company_id, team_id, user_id, machine_id, external_id, harness,
           started_at, ended_at, end_reason)
@@ -98,7 +139,8 @@ export async function applySessionEnd(tx: Tx, ctx: BatchContext, e: SessionEndEv
         where ${sessionOwnerGuard(ctx)}
         returning id`,
   );
-  if (done.length === 0) throw new OwnerConflictError('session');
+  if (!done) throw new OwnerConflictError('session');
+  await applyPendingSessionPatch(tx, done.id);
 }
 
 /** ON CONFLICT ... WHERE for agent_sessions: only the owner (or anyone, while unowned) may overwrite. */
@@ -109,6 +151,7 @@ const sessionOwnerGuard = (ctx: BatchContext) =>
 async function sessionForTurn(tx: Tx, ctx: BatchContext, e: TurnEvent): Promise<{ id: string; projectId: string | null }> {
   const key = sessionKey(e.harness, e.session_id);
   const teamId = await teamFor(tx, ctx, null);
+  await lockSessionKey(tx, ctx, key);
   const [row] = await rows<{ id: string; project_id: string | null }>(
     tx,
     sql`insert into agent_sessions (company_id, team_id, user_id, machine_id, external_id, harness, started_at)
@@ -119,6 +162,7 @@ async function sessionForTurn(tx: Tx, ctx: BatchContext, e: TurnEvent): Promise<
         returning id, project_id`,
   );
   if (!row) throw new OwnerConflictError('session');
+  await applyPendingSessionPatch(tx, row.id);
   return { id: row.id, projectId: row.project_id };
 }
 
@@ -356,4 +400,34 @@ export async function applyTurnOutcome(tx: Tx, ctx: BatchContext, e: TurnOutcome
 
 export async function applyTurnSummary(tx: Tx, ctx: BatchContext, e: TurnSummaryEvent): Promise<void> {
   await patchTurn(tx, ctx, e, sql`summary`, sql`${e.summary}`, sql`summary = ${e.summary}`);
+}
+
+/**
+ * Sets the session's title (ADR-0026), or parks it in pending_session_patches while the session has not arrived; a
+ * patch never creates a session. Only the session's owner (or anyone, while it has none) may set it; a parked title
+ * remembers its sender and is applied only to an ownerless session or one of the same owner (SEC-3).
+ */
+export async function applySessionTitle(tx: Tx, ctx: BatchContext, e: SessionTitleEvent): Promise<void> {
+  const key = sessionKey(e.harness, e.session_id);
+  await lockSessionKey(tx, ctx, key);
+  const [session] = await rows<{ user_id: string | null }>(
+    tx,
+    sql`select user_id from agent_sessions where external_id = ${key}`,
+  );
+  if (session) {
+    assertOwner('session', session.user_id, ctx.userId);
+    await tx.execute(sql`update agent_sessions set title = ${e.title}, title_source = ${e.source}
+      where external_id = ${key}`);
+    return;
+  }
+  const parked = await rows<{ id: string }>(
+    tx,
+    sql`insert into pending_session_patches (company_id, session_external_id, user_id, title, title_source)
+      values (${ctx.companyId}::uuid, ${key}, ${ctx.userId}::uuid, ${e.title}, ${e.source})
+      on conflict (company_id, session_external_id) do update set title = ${e.title}, title_source = ${e.source},
+        user_id = ${ctx.userId}::uuid, received_at = now()
+      where pending_session_patches.user_id is null or pending_session_patches.user_id = ${ctx.userId}::uuid
+      returning id`,
+  );
+  if (!parked.length) throw new OwnerConflictError('session patch');
 }

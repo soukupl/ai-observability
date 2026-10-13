@@ -84,6 +84,14 @@
       "session_id": "sess-1",
       "reason": "exit",
       "at": "2026-10-05T10:30:00Z"
+    },
+    {
+      "event_id": "01J9ZQ8Y3N4X5V6W7Z8A9B0C16",
+      "type": "session_title",
+      "harness": "claude-code",
+      "session_id": "sess-1",
+      "title": "Auth middleware JWT refresh",
+      "source": "custom"
     }
   ]
 }

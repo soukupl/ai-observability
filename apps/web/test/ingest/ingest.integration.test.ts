@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { Database, Tx } from '@ai-obs/db';
 import { schemas, validateBatch, type IngestBatchInput, type IngestEventInput, type IngestResponse } from '@ai-obs/protocol';
 import { handleCollectorConfig, handleIngest } from '../../src/lib/ingest/handler';
+import { batchSessionKeys } from '../../src/lib/ingest/apply-events';
 import { lookupToken } from '../../src/lib/ingest/context';
 import { EVENTS_PER_SAVEPOINT, processBatch } from '../../src/lib/ingest/process-batch';
 import { AuthGuard, TokenBucketLimiter } from '../../src/lib/ingest/rate-limit';
@@ -53,11 +54,14 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
   describe('protocol fixture', () => {
     it('accepts a valid batch and stores the turn, run, patches and session', async () => {
       const res = await post(w.tokens.alice, protocolFixture());
-      expect(res).toEqual({ status: 200, body: { accepted: 6, duplicates: 0, rejected: [] } });
+      expect(res).toEqual({ status: 200, body: { accepted: 7, duplicates: 0, rejected: [] } });
 
       const [s] = await q(sql`select s.*, p.key from agent_sessions s join projects p on p.id = s.project_id
         where s.external_id = 'claude-code:sess-1'`);
-      expect(s).toMatchObject({ key: 'github.com/acme/billing', harness_version: '2.1.0', end_reason: 'exit', user_id: w.users.alice });
+      expect(s).toMatchObject({
+        key: 'github.com/acme/billing', harness_version: '2.1.0', end_reason: 'exit', user_id: w.users.alice,
+        title: 'Auth middleware JWT refresh', title_source: 'custom',
+      });
       expect(s!.ended_at).not.toBeNull();
 
       const [t] = await q(sql`select *, input_tokens::int, output_tokens::int, cache_read_tokens::int,
@@ -120,7 +124,7 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
           (select count(*) from agent_sessions) s, (select max(updated_at) from turns) tu, (select count(*) from ingest_events) e`);
       const before = await snapshot();
       const res = await post(w.tokens.alice, protocolFixture());
-      expect(res).toEqual({ status: 200, body: { accepted: 0, duplicates: 6, rejected: [] } });
+      expect(res).toEqual({ status: 200, body: { accepted: 0, duplicates: 7, rejected: [] } });
       expect(await snapshot()).toEqual(before);
     });
 
@@ -528,6 +532,69 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
     });
   });
 
+  describe('session titles (ADR-0026)', () => {
+    const session = (id: string) =>
+      q(sql`select user_id, title, title_source from agent_sessions where external_id = ${`claude-code:${id}`}`);
+    const parked = (id: string) =>
+      q(sql`select user_id, title, title_source from pending_session_patches where session_external_id = ${`claude-code:${id}`}`);
+
+    it('sets the title of a known session; the latest patch wins', async () => {
+      await post(w.tokens.alice, batch([ev.sessionStart('ti-s')]));
+      expect((await post(w.tokens.alice, batch([ev.title('ti-s', 'Generated name')]))).body).toMatchObject({ accepted: 1, rejected: [] });
+      expect(await session('ti-s')).toEqual([{ user_id: w.users.alice, title: 'Generated name', title_source: 'ai' }]);
+      await post(w.tokens.alice, batch([ev.title('ti-s', 'My rename', 'custom')]));
+      expect(await session('ti-s')).toEqual([{ user_id: w.users.alice, title: 'My rename', title_source: 'custom' }]);
+    });
+
+    it('parks a title that arrives before its session (no session created) and applies it when any event creates it', async () => {
+      for (const [id, create] of [
+        ['ti-early-start', ev.sessionStart('ti-early-start')],
+        ['ti-early-turn', ev.turn('ti-early-turn', 'ti-early-turn-t')],
+        ['ti-early-end', { ...ev.sessionStart('ti-early-end'), type: 'session_end', reason: 'exit' } as unknown as IngestEventInput],
+      ] as const) {
+        expect((await post(w.tokens.alice, batch([ev.title(id, `Title of ${id}`)]))).body).toMatchObject({ accepted: 1, rejected: [] });
+        expect(await session(id)).toEqual([]);
+        expect(await parked(id)).toEqual([{ user_id: w.users.alice, title: `Title of ${id}`, title_source: 'ai' }]);
+        expect((await post(w.tokens.alice, batch([create]))).body).toMatchObject({ accepted: 1, rejected: [] });
+        expect(await session(id)).toEqual([{ user_id: w.users.alice, title: `Title of ${id}`, title_source: 'ai' }]);
+        expect(await parked(id)).toEqual([]);
+      }
+    });
+
+    it('a title and its session in one batch: the session is applied first', async () => {
+      const res = await post(w.tokens.alice, batch([ev.title('ti-same', 'Same batch', 'custom'), ev.sessionStart('ti-same')]));
+      expect(res.body).toMatchObject({ accepted: 2, rejected: [] });
+      expect(await session('ti-same')).toEqual([{ user_id: w.users.alice, title: 'Same batch', title_source: 'custom' }]);
+      expect(await parked('ti-same')).toEqual([]);
+    });
+
+    it("another user cannot set or overwrite the title of someone else's session or parked title", async () => {
+      await post(w.tokens.alice, batch([ev.sessionStart('ti-own'), ev.title('ti-own', 'Alice', 'custom')]));
+      expect((await post(w.tokens.bob, batch([ev.title('ti-own', 'Bob')]))).body.rejected).toEqual([expect.objectContaining({ reason: OWNED })]);
+      expect(await session('ti-own')).toEqual([{ user_id: w.users.alice, title: 'Alice', title_source: 'custom' }]);
+
+      await post(w.tokens.alice, batch([ev.title('ti-pp', "Alice's parked")]));
+      expect((await post(w.tokens.bob, batch([ev.title('ti-pp', 'Bob')]))).body.rejected).toEqual([expect.objectContaining({ reason: OWNED })]);
+      // Bob's own session with that key does not inherit Alice's parked title (it is dropped).
+      expect((await post(w.tokens.bob, batch([ev.sessionStart('ti-pp')]))).body.accepted).toBe(1);
+      expect(await session('ti-pp')).toEqual([{ user_id: w.users.bob, title: null, title_source: null }]);
+      expect(await parked('ti-pp')).toEqual([]);
+    });
+
+    it('app_ingest cannot read titles or parked title values, nor delete parked titles', async () => {
+      await post(w.tokens.alice, batch([ev.title('ti-never', 'Parked')]));
+      const denied = (query: ReturnType<typeof sql>) =>
+        db.transaction(async (tx) => {
+          await tx.execute(sql`select set_config('app.company_id', ${w.companyId}, true)`);
+          await tx.execute(query);
+        });
+      const denial = { cause: expect.objectContaining({ code: '42501' }) };
+      await expect(denied(sql`select title from agent_sessions`)).rejects.toMatchObject(denial);
+      await expect(denied(sql`select title from pending_session_patches`)).rejects.toMatchObject(denial);
+      await expect(denied(sql`delete from pending_session_patches`)).rejects.toMatchObject(denial);
+    });
+  });
+
   describe('event time window (DP-05, DP-08)', () => {
     const at = (iso: string) => ({ started_at: iso, ended_at: iso });
     // The test company is on the Free plan: its 395-day setting is capped to the plan maximum, 30 days.
@@ -852,6 +919,40 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
       expect((await Promise.all([a, b])).map((r) => r.accepted)).toEqual([1, 1]);
       const [run] = await q(sql`select turn_id is not null linked from runs where external_id = 'race-r'`);
       expect(run).toEqual({ linked: true });
+    });
+
+    it('takes the session locks of a batch before any turn lock (no deadlock with a concurrent batch, ADR-0026)', async () => {
+      const token = (await lookupToken(db, hashToken(w.tokens.alice)))!;
+      const first = parsed([ev.turn('lock-s', 'lock-t1')]);
+      const second = parsed([ev.turn('lock-s', 'lock-t2')], { machine: { id: 'bbbbbbbb-7d4b-4c1a-9b5e-3f2d1c0b9a87', os: 'linux' } });
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      let firstApplied!: () => void;
+      const applied = new Promise<void>((r) => (firstApplied = r));
+
+      // Transaction A holds the session lock of lock-s and stays open.
+      const a = withIngestContext(db, token.companyId, async (tx) => {
+        const res = await processBatch(tx, token, first.header, first.events);
+        firstApplied();
+        await gate;
+        return res;
+      });
+      await applied;
+      const b = withIngestContext(db, token.companyId, (tx) => processBatch(tx, token, second.header, second.events));
+      await new Promise((r) => setTimeout(r, 400));
+      // B waits for the session lock without holding its turn lock: a batch of A that went on to lock-t2 could not
+      // deadlock with it (before, B took turn:lock-t2 first and then waited for the session).
+      const turnLock = `turn:${token.companyId}:claude-code:lock-t2`;
+      const [free] = await q(sql`select pg_try_advisory_lock(hashtextextended(${turnLock}, 0)) as free`);
+      expect(free).toEqual({ free: true });
+      await q(sql`select pg_advisory_unlock(hashtextextended(${turnLock}, 0))`);
+      release();
+      expect((await Promise.all([a, b])).map((r) => r.accepted)).toEqual([1, 1]);
+    });
+
+    it('batchSessionKeys: the sessions a batch writes, once each, sorted', () => {
+      const b = parsed([ev.turn('k-b', 'k-t1'), ev.sessionStart('k-a'), ev.turn('k-b', 'k-t2'), ev.run('k-t1', 'k-r', null, 1)]);
+      expect(batchSessionKeys(b.events)).toEqual(['claude-code:k-a', 'claude-code:k-b']);
     });
 
     it('uses one savepoint per chunk, not per event, and isolates a failing event within its chunk', async () => {

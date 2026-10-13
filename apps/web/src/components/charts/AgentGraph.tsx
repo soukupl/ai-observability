@@ -375,9 +375,19 @@ export function AgentGraph({ lanes, turns, runs, fromMs, toMs, projectLegend, gr
                   <div className="pointer-events-auto flex flex-col justify-center pr-2 pl-1" style={{ height: trunkRow }}>
                     <div className="flex min-w-0 items-center gap-1.5">
                       <span aria-hidden className="inline-block h-2.5 w-2.5 shrink-0 rounded-sm" style={{ background: t.color(lane.colorIndex) }} />
-                      <span className="truncate text-xs font-semibold text-zinc-800 dark:text-zinc-200" title={lane.label}>
-                        {lane.label}
-                      </span>
+                      {lane.href ? (
+                        <a
+                          href={lane.href}
+                          className="truncate text-xs font-semibold text-blue-700 hover:underline dark:text-blue-400"
+                          title={`${lane.label}: open the session`}
+                        >
+                          {lane.label}
+                        </a>
+                      ) : (
+                        <span className="truncate text-xs font-semibold text-zinc-800 dark:text-zinc-200" title={lane.label}>
+                          {lane.label}
+                        </span>
+                      )}
                     </div>
                     {lane.sublabel && (
                       <span className="truncate pl-4 text-[11px] leading-tight text-zinc-500 dark:text-zinc-400" title={lane.sublabel}>

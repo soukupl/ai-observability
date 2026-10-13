@@ -13,7 +13,9 @@ import { requireUser } from '@/lib/auth/session';
 import { getFlowFlags } from '@/lib/queries/flow-flags';
 import { turnFlows } from '@/lib/queries/flows';
 import { withDashboardContext } from '@/lib/queries/page';
+import { getSessionLink } from '@/lib/queries/sessions';
 import { getTurnDetail } from '@/lib/queries/turns';
+import { sessionHref } from '../../sessions/_helpers';
 import { flowAnchor, turnUsesSummary } from '../../flows/_helpers';
 import { parseStartedMs, phaseRow, toRunTree, turnGraph } from '../_helpers';
 import { Fact } from './Fact';
@@ -31,11 +33,16 @@ type Props = { params: Promise<{ id: string }>; searchParams: Promise<Record<str
 export default async function TurnDetailPage({ params, searchParams }: Props) {
   const user = await requireUser();
   const [{ id }, sp] = await Promise.all([params, searchParams]);
-  const { detail, flows, flags } = await withDashboardContext(user, async (ctx) => {
+  const { detail, flows, flags, session } = await withDashboardContext(user, async (ctx) => {
     const detail = await getTurnDetail(ctx, id, parseStartedMs(sp.startedMs));
-    if (!detail) return { detail, flows: [], flags: new Map() };
+    if (!detail) return { detail, flows: [], flags: new Map(), session: null };
     const flows = turnFlows(detail, ctx.prices);
-    return { detail, flows, flags: flows.length > 0 ? await getFlowFlags(ctx, detail.turn.id) : new Map() };
+    return {
+      detail,
+      flows,
+      flags: flows.length > 0 ? await getFlowFlags(ctx, detail.turn.id) : new Map(),
+      session: await getSessionLink(ctx, detail.turn.sessionId),
+    };
   });
   if (!detail) notFound();
   const { turn, runs, usage, limited } = detail;
@@ -82,6 +89,13 @@ export default async function TurnDetailPage({ params, searchParams }: Props) {
               </span>
             </Fact>
             <Fact label="Project">{turn.projectName ?? '—'}</Fact>
+            {session && (
+              <Fact label="Session" title="The harness session this turn belongs to, with its other turns, workflows and flows">
+                <Link href={sessionHref(session.id)} className="font-medium text-blue-700 hover:underline dark:text-blue-400">
+                  {session.title} →
+                </Link>
+              </Fact>
+            )}
             <Fact label="Model"><ModelName id={turn.model} /></Fact>
             <Fact label="Duration">{formatDuration(turn.durationMs)}</Fact>
             <Fact label="Tokens">{formatTokens(tk.total)}</Fact>

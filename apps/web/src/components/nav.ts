@@ -14,6 +14,7 @@ export const VIEW_NAV: readonly NavItem[] = [
   { href: '/agents', label: 'Agents', title: 'Sub-agent usage' },
   { href: '/flows', label: 'Agent flows', title: 'Multi-step sub-agent flows: steps, tokens, time, models, phases' },
   { href: '/skills-mcp', label: 'Skills & MCP', title: 'Which skills and MCP servers are used, and how often' },
+  { href: '/sessions', label: 'Sessions', title: 'Harness sessions with their turns, workflows and flows' },
   { href: '/turns', label: 'Turns', title: 'Explore single turns with their run timeline' },
 ];
 export const ADMIN_NAV: NavItem = { href: '/admin', label: 'Admin', title: 'Teams, members, tokens, settings, budgets' };

@@ -141,6 +141,7 @@ const INGEST_TYPE_LABEL: Record<string, string> = {
   run: 'runs',
   turn_outcome: 'patches',
   turn_summary: 'patches',
+  session_title: 'patches',
   session_start: 'sessions',
   session_end: 'sessions',
 };

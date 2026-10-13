@@ -139,7 +139,8 @@ Request handling, in order:
    (a batch of 500 uses about 20 subtransaction ids, DP-14), together with the events' `ingest_events` rows, so a
    duplicate `event_id` is counted in `duplicates` and changes nothing. A failing chunk is rolled back and its events
    retried one per savepoint, so an event the DB refuses is rejected (`"could not be stored"`) alone, without being
-   marked as seen. Events are applied in the order session_start → turn → run (by depth) → patches (arrival order) → session_end.
+   marked as seen. Events are applied in the order session_start → turn → run (by depth) → patches (`turn_outcome`, `turn_summary`,
+   `session_title`; arrival order) → session_end.
    Ledger keys are `<user id, else token:<token id>>:<event_id>`: retries de-duplicate across one user's tokens and
    machines, and nobody can pre-claim another sender's event ids (SEC-3).
 
@@ -161,6 +162,15 @@ Resolution rules:
   plain key is hashed server-side (`sha256:` + hex SHA-256 of the key, which collectors must match) and its name dropped.
 - **Sessions**: a turn or `session_end` for an unknown session creates it; `session_start` sets
   `started_at`, project, version, and back-fills the project (and mapped team) of turns that came first.
+- **Session titles** (ADR-0026): `session_title` sets `agent_sessions.title` / `title_source` (`custom` | `ai`; the
+  latest patch wins; only the session's owner, or anyone while it has none). A title for a session that has not
+  arrived is **parked** in `pending_session_patches` (it never creates a session) and moved onto the session by
+  `ingest_apply_pending_session_patch(session_id)` (SECURITY DEFINER) whenever a `session_start`, turn or
+  `session_end` upserts it, only onto an ownerless session or one of the same sender; parked titles whose session
+  never comes are dropped after 30 days by the worker's retention pass. Session writes and title patches take an
+  advisory lock on the session key; `processBatch` takes every session lock of the batch first, in sorted order
+  (`lockBatchSessions`), so session locks always precede turn locks and concurrent batches cannot deadlock.
+  The ingest role (`app_ingest`) can write titles but not read them.
 - **Runs** before their turn keep `turn_id` null and are linked (with team / user) when the turn arrives;
   children before their parent are linked when the parent arrives.
 - **Run links** (ADR-0020): a run event stores `stage_index` and `flow_key` (trimmed, ≤ 128, path-like or free text →
@@ -326,7 +336,7 @@ Two more cards (brief `docs/briefs/dashboard-followups-2026-10-10.md`):
 
 - **Ingest** (`IngestCard.tsx`, right after the KPI tiles): what the collectors delivered, company-wide and not filtered:
   the last event received (relative, UTC in the sub line), events in the last 24 h (by type: turns, runs, patches =
-  `turn_outcome` + `turn_summary`, sessions, other) and in the last 7 days. `getIngestStats` (`lib/queries/ingest-stats.ts`)
+  `turn_outcome` + `turn_summary` + `session_title`, sessions, other) and in the last 7 days. `getIngestStats` (`lib/queries/ingest-stats.ts`)
   reads `agg_ingest_stats()` (migration 0015, SECURITY DEFINER over `ingest_events`, which keeps 30 days) inside a
   savepoint, so a deployment without the migration shows "Ingest stats unavailable" instead of failing the page;
   `ingestSummary` / `relativeAgo` in `helpers.ts` shape the card.
@@ -479,9 +489,33 @@ error rate (errors / calls not refused), denied calls and the latency bucket of 
 over ≥ 20 calls); the CSV adds `errors`, `denied`, `latency_ms` and the five bucket counts. Hashed names (company project-naming mode) are shortened to
 `sha256:12345678…` (`formatUsageName`). Turn detail lists the turn's skills (typed / by the model) and MCP calls per server.
 
+### Sessions (`/sessions`, `/sessions/[id]`, ADR-0026)
+
+A session is one harness session (`agent_sessions`; the id `claude --resume` / `codex resume` takes) with its turns
+and, through them, their sub-agent runs, workflows (`orchestration_id`) and flows. Read from raw rows under RLS in
+`src/lib/queries/sessions.ts` (`listSessions`, `getSessionDetail`, `getSessionLink`, `exportSessions`); no table or
+aggregate function of its own. A session's span runs from its first turn (or `started_at`) to the latest of its last
+turn end, last run end and `ended_at`, because workflow agents outlive their turn. Its title (`sessionTitle`) is the
+harness title stored by the `session_title` patch (`/rename` title over the AI title), else the first turn summary,
+else `Session <first 8 chars of the id>`.
+
+- **List** (`/sessions`, paged, CSV view `sessions`): sessions with a filter-matching turn that started in the range
+  or up to a day before it, kept when their span overlaps the range; newest first. Columns: title, project, harness,
+  user (only when `canSeeUsers`), started, span, turns, runs, workflows, flows, tokens, ≈ cost, outcome mix, "open"
+  when no `session_end` arrived and the last activity is under 30 minutes old.
+- **Detail** (`/sessions/[id]`): header with copy buttons for the harness session id and the resume command
+  (`resumeCommand`), KPI tiles, the session as a one-lane `AgentGraph` over its whole span with drag-to-zoom
+  (`SessionGraph.tsx`, "Whole session" resets), turns in order with their flows (links to `/turns/<id>#flow-<key>`) and
+  workflows, merged skills & MCP. A session partly cut by retention says so.
+- **Links in**: the turn page's "Session" fact, the Agents timeline lane labels (only when the viewer reads raw rows,
+  never on aggregate pseudonym lanes), and `?session=<uuid>` on `/turns` and `/flows` (and their CSV exports, recorded
+  in the audit log). The session filter ignores the date range and the filter bar; it reads under RLS only.
+- **Privacy**: in aggregates-only mode leads and admins see only their own sessions (RLS plus an explicit
+  `user_id = viewer` condition); in full mode visibility follows `/turns`.
+
 ### Turns explorer (`/turns`, `/turns/[id]`)
 
-`/turns` is a paged, filterable table (`?outcome=all|success|failed|abandoned|unknown&page=`; started, user (only when
+`/turns` is a paged, filterable table (`?outcome=all|success|failed|abandoned|unknown&page=`, `&session=<uuid>` for one session; started, user (only when
 `canSeeUsers`), project, harness, model, effort, duration, tokens, ≈ cost, outcome, attribution, summary). `/turns/[id]?startedMs=…`
 is the single detail page of a turn and its agent flows (ADR-0025), kept light to read: secondary detail sits behind
 collapsed "More" toggles (`components/More.tsx`, native `<details>`). The Turn card shows the summary and key facts

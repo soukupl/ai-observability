@@ -7,6 +7,7 @@ import type { CollectorContext, HookInvocation } from '../types.js';
 import { cachedVersion, type VersionProbe } from './detect.js';
 import {
   collectWorkflowRuns,
+  emitSessionTitle,
   Emitter,
   flushOpenRuns,
   followUpTurns,
@@ -145,6 +146,7 @@ async function finish(em: Emitter, ctx: CollectorContext, capturedAt: number): P
   const st = em.state;
   // Turns about to fall out of the state file never see a follow-up: settle them now.
   settleTurns(em, evictedUnsettledTurns(st), st.lastSeen);
+  emitSessionTitle(em);
   if (st.digests.length > 0 && st.digestsSince === undefined) st.digestsSince = capturedAt;
   const summarize = summariesDue({ ended: st.ended, pending: st.digests.length, since: st.digestsSince, now: capturedAt });
   const key = em.events.length || summarize ? await ctx.streamFor(st, capturedAt) : null;

@@ -16,7 +16,7 @@ import { getKpis } from '@/lib/queries/kpis';
 import { loadFilterOptions } from '@/lib/queries/lookups';
 import { withDashboardContext } from '@/lib/queries/page';
 import { addDays } from '@/lib/queries/range';
-import { canSeeUsers } from '@/lib/queries/scope';
+import { canSeeUsers, usesAggregateFunctions } from '@/lib/queries/scope';
 import { depthBars, flowsQueryString, groupAgentRows, spawnsPerTurn, tokenBars } from './agents-view';
 import { runHrefs, timelineFlowInput, timelineGraph, timelineNav } from './timeline-view';
 
@@ -46,7 +46,8 @@ export default async function AgentsPage({ searchParams }: { searchParams: Searc
   const subTokens = agents.rows.reduce((s, r) => s + r.tokens.total, 0);
   const ignored = [...new Set([...agents.ignoredFilters, ...kpis.ignoredFilters, ...timeline.ignoredFilters])];
   const groupOrder = groups.map((g) => g.group);
-  const graph = timelineGraph(timeline, groupOrder, runHrefs(flows, timeline.turns, timeline.runs));
+  // Session lanes link to their session page only where they carry the stored id (not the aggregate pseudonyms).
+  const graph = timelineGraph(timeline, groupOrder, runHrefs(flows, timeline.turns, timeline.runs), { sessionLinks: !usesAggregateFunctions(user) });
   const flowsQuery = flowsQueryString(sp);
   const nav = timelineNav('/agents', sp, timeline);
   const cut = timeline.truncated.turns || timeline.truncated.runs;

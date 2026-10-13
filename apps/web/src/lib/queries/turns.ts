@@ -45,6 +45,11 @@ export interface TurnListOptions {
   page?: number;
   pageSize?: number;
   outcome?: Outcome | null;
+  /**
+   * Only the turns of this session (`agent_sessions.id`, ADR-0026), whatever the date range and the other filters; read
+   * from the tables under RLS (a lead / admin in aggregates-only mode sees only their own session this way).
+   */
+  sessionId?: string | null;
 }
 
 export interface TurnListResult {
@@ -109,14 +114,14 @@ const LIST_COLS = sql.raw(
 /** Direct path page: stable order (started_at desc, id); `after` = keyset cursor (the last row of the previous page). */
 async function directRows(
   ctx: QueryCtx,
-  d: Dims,
+  base: SQL[],
   outcome: Outcome | null,
   withUsers: boolean,
   limit: number,
   offset: number,
   after: { raw: string; id: string } | null,
 ): Promise<Record<string, unknown>[]> {
-  const conds = turnConds(ctx, d);
+  const conds = [...base];
   if (outcome) conds.push(sql`t.outcome = ${outcome}::outcome`);
   if (after) conds.push(sql`(t.started_at < ${after.raw}::timestamptz or (t.started_at = ${after.raw}::timestamptz and t.id > ${after.id}::uuid))`);
   const userCols: SQL = withUsers ? sql`, t.user_id, coalesce(u.name, u.email) as user_name` : sql``;
@@ -210,6 +215,11 @@ async function aggTurnCosts(ctx: QueryCtx, list: Record<string, unknown>[]): Pro
 
 const turnCosts = (ctx: QueryCtx, list: Record<string, unknown>[]) => (ctx.agg ? aggTurnCosts(ctx, list) : directTurnCosts(ctx, list));
 
+/** Conditions on `turns` aliased `t` for one session (no date range: the session is the scope). */
+export function sessionTurnConds(ctx: QueryCtx, sessionId: string): SQL[] {
+  return [sql`t.company_id = ${ctx.viewer.companyId}::uuid`, sql`t.session_id = ${sessionId}::uuid`];
+}
+
 /** Filterable, paged turn list (newest first). Raw rows for every range. */
 export async function listTurns(ctx: QueryCtx, f: Filters, opts: TurnListOptions = {}): Promise<TurnListResult> {
   const range = rawRange(rangeFor(ctx, f));
@@ -219,16 +229,18 @@ export async function listTurns(ctx: QueryCtx, f: Filters, opts: TurnListOptions
   const offset = (page - 1) * pageSize;
   const lk = await lookups(ctx);
   const withUsers = !ctx.agg && canSeeUsers(ctx.viewer);
+  const sessionId = opts.sessionId ?? null;
 
-  if (!ctx.agg) {
-    const conds = turnConds(ctx, d);
+  if (!ctx.agg || sessionId) {
+    const base = sessionId ? sessionTurnConds(ctx, sessionId) : turnConds(ctx, d);
+    const conds = [...base];
     if (opts.outcome) conds.push(sql`t.outcome = ${opts.outcome}::outcome`);
     const [list, totalRow] = await Promise.all([
-      directRows(ctx, d, opts.outcome ?? null, withUsers, pageSize + 1, offset, null),
+      directRows(ctx, base, opts.outcome ?? null, withUsers, pageSize + 1, offset, null),
       rows<{ n: unknown }>(ctx.tx, sql`select count(*) as n from turns t ${where(conds)}`),
     ]);
     const pageRows = list.slice(0, pageSize);
-    const costs = await turnCosts(ctx, pageRows);
+    const costs = await directTurnCosts(ctx, pageRows);
     return {
       range,
       rows: pageRows.map((r) => mapRow(r, lk, withUsers, costs.get(String(r.id)) ?? ZERO_COST)),
@@ -290,13 +302,15 @@ export interface TurnExport {
  *  - aggregate path: agg_turn_list orders by started_at only, so the window's upper bound moves down to the
  *    last start and the whole group of turns that share it is fetched in one call.
  */
-export async function exportTurns(ctx: QueryCtx, f: Filters, opts: { outcome?: Outcome | null; max?: number } = {}): Promise<TurnExport> {
+export async function exportTurns(ctx: QueryCtx, f: Filters, opts: { outcome?: Outcome | null; max?: number; sessionId?: string | null } = {}): Promise<TurnExport> {
   const max = Math.max(1, Math.floor(opts.max ?? EXPORT_MAX_ROWS));
   const outcome = opts.outcome ?? null;
   const range = rawRange(rangeFor(ctx, f));
   const d = dims(ctx, f, range);
   const lk = await lookups(ctx);
   const withUsers = !ctx.agg && canSeeUsers(ctx.viewer);
+  const sessionId = opts.sessionId ?? null;
+  const direct = !ctx.agg || sessionId !== null;
   const picked: Record<string, unknown>[] = [];
   const seen = new Set<string>();
   const take = (batch: Record<string, unknown>[]) => {
@@ -304,14 +318,15 @@ export async function exportTurns(ctx: QueryCtx, f: Filters, opts: { outcome?: O
       const id = String(r.id);
       if (seen.has(id)) continue;
       seen.add(id);
-      if (!ctx.agg || !d.effort || r.effort === d.effort) picked.push(r);
+      if (direct || !d.effort || r.effort === d.effort) picked.push(r);
     }
   };
 
-  if (!ctx.agg) {
+  if (direct) {
+    const base = sessionId ? sessionTurnConds(ctx, sessionId) : turnConds(ctx, d);
     let after: { raw: string; id: string } | null = null;
     while (picked.length <= max) {
-      const page = await directRows(ctx, d, outcome, withUsers, EXPORT_PAGE, 0, after);
+      const page = await directRows(ctx, base, outcome, withUsers, EXPORT_PAGE, 0, after);
       take(page);
       const last = page[page.length - 1];
       if (!last || page.length < EXPORT_PAGE) break;
@@ -339,14 +354,14 @@ export async function exportTurns(ctx: QueryCtx, f: Filters, opts: { outcome?: O
   const out: TurnListRow[] = [];
   for (let i = 0; i < kept.length; i += EXPORT_PAGE) {
     const chunk = kept.slice(i, i + EXPORT_PAGE);
-    const costs = await turnCosts(ctx, chunk);
+    const costs = await (direct ? directTurnCosts(ctx, chunk) : turnCosts(ctx, chunk));
     for (const r of chunk) out.push(mapRow(r, lk, withUsers, costs.get(String(r.id)) ?? ZERO_COST));
   }
   return { rows: out, truncated };
 }
 
 /** The rows of {@link exportTurns} (kept for callers that do not care about truncation). */
-export async function listTurnsForExport(ctx: QueryCtx, f: Filters, opts: { outcome?: Outcome | null; max?: number } = {}): Promise<TurnListRow[]> {
+export async function listTurnsForExport(ctx: QueryCtx, f: Filters, opts: { outcome?: Outcome | null; max?: number; sessionId?: string | null } = {}): Promise<TurnListRow[]> {
   return (await exportTurns(ctx, f, opts)).rows;
 }
 
@@ -371,6 +386,8 @@ export interface TurnDetail {
     linesRemoved: number | null;
     outcomeSignals: string[] | null;
     outcomeProvisional: boolean | null;
+    /** The turn's session (`agent_sessions.id`, ADR-0026); null when it has none or the turn is seen in limited form. */
+    sessionId: string | null;
   };
   runs: RunRow[];
   /** Parent -> child tree of the runs (the main agent is the implicit root). */
@@ -423,7 +440,7 @@ export async function getTurnDetail(ctx: QueryCtx, turnId: string, atMs?: number
   const [own] = await rows<Record<string, unknown>>(
     ctx.tx,
     sql`select ${LIST_COLS}, (extract(epoch from t.ended_at) * 1000)::bigint as ended_ms, t.phases_ms, t.tools, t.files_touched,
-          t.lines_added, t.lines_removed, t.outcome_signals, t.outcome_provisional, t.skills, t.mcp,
+          t.lines_added, t.lines_removed, t.outcome_signals, t.outcome_provisional, t.skills, t.mcp, t.session_id,
           (select coalesce(jsonb_agg(jsonb_build_object('skills', r.skills, 'mcp', r.mcp)), '[]'::jsonb) from runs r
             where r.turn_id = t.id and r.company_id = t.company_id and (r.skills <> '{}'::jsonb or r.mcp <> '{}'::jsonb)) as run_uses,
           (t.user_id = ${ctx.viewer.id}::uuid) as is_mine ${userCols}
@@ -447,12 +464,13 @@ export async function getTurnDetail(ctx: QueryCtx, turnId: string, atMs?: number
       linesRemoved: num(own.lines_removed),
       outcomeSignals: (own.outcome_signals as string[]) ?? [],
       outcomeProvisional: Boolean(own.outcome_provisional),
+      sessionId: (own.session_id as string | null) ?? null,
     };
   } else if (ctx.agg) {
     const found = await findViaAgg(ctx, turnId, atMs);
     if (!found) return null;
     base = mapRow(found, lk, false, (await aggTurnCosts(ctx, [found])).get(String(found.id)) ?? ZERO_COST);
-    extra = { endedMs: base.startedMs + base.durationMs, phasesMs: null, tools: null, skills: null, mcp: null, ownSkills: null, ownMcp: null, filesTouched: null, linesAdded: null, linesRemoved: null, outcomeSignals: null, outcomeProvisional: null };
+    extra = { endedMs: base.startedMs + base.durationMs, phasesMs: null, tools: null, skills: null, mcp: null, ownSkills: null, ownMcp: null, filesTouched: null, linesAdded: null, linesRemoved: null, outcomeSignals: null, outcomeProvisional: null, sessionId: null };
     limited = true;
   } else {
     return null;

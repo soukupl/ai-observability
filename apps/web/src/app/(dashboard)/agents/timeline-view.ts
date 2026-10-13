@@ -104,12 +104,15 @@ export function runHrefs(
 /**
  * Lanes, turns, runs and the project legend of the window. `groupOrder` ranks the agent groups for their colours (the
  * Agents page passes its groups by spawns in the filter range, so colours stay put when the window changes).
- * `runHrefById` (runHrefs) makes each run a link; without it a run opens its turn.
+ * `runHrefById` (runHrefs) makes each run a link; without it a run opens its turn. `sessionLinks` makes each session
+ * lane's label link to its session page (ADR-0026); only for raw lanes, never for the per-window pseudonyms of the
+ * aggregate path.
  */
 export function timelineGraph(
   r: Pick<AgentTimelineResult, 'window' | 'turns' | 'runs'>,
   groupOrder?: string[],
   runHrefById?: ReadonlyMap<string, string>,
+  opts: { sessionLinks?: boolean } = {},
 ): TimelineGraph {
   // Project legend: the projects present, sorted by name; the index is the colour.
   const projects = new Map<string, ProjectKey>();
@@ -145,6 +148,7 @@ export function timelineGraph(
     label: l.project.label,
     sublabel: laneSublabel(l.harness, l.firstMs, dayStartMs),
     colorIndex: colorOf.get(l.project.key) ?? 0,
+    ...(opts.sessionLinks && l.id.startsWith('s:') ? { href: `/sessions/${l.id.slice(2)}` } : {}),
   }));
 
   const turnById = new Map(r.turns.map((t) => [t.id, t]));

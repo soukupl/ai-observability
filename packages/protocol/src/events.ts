@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { MAX_RUN_LINKS, MAX_STAGE_INDEX, RUN_LINK_KINDS } from './constants.js';
+import { MAX_RUN_LINKS, MAX_STAGE_INDEX, RUN_LINK_KINDS, SESSION_TITLE_SOURCES } from './constants.js';
 import {
   count,
   effort,
@@ -123,6 +123,18 @@ export const turnSummaryEvent = z.object({
   summary,
 });
 
+/**
+ * Patch: the session's title as the harness shows it (ADR-0026), e.g. Claude Code's `/rename` title (`custom`) or its
+ * generated title (`ai`). Conversation-derived text like a turn summary, so it has the same limits.
+ */
+export const sessionTitleEvent = z.object({
+  ...base,
+  type: z.literal('session_title'),
+  session_id: nonEmptyId,
+  title: summary,
+  source: z.enum(SESSION_TITLE_SOURCES),
+});
+
 export const sessionEndEvent = z.object({
   ...base,
   type: z.literal('session_end'),
@@ -137,5 +149,6 @@ export const ingestEvent = z.discriminatedUnion('type', [
   runEvent,
   turnOutcomeEvent,
   turnSummaryEvent,
+  sessionTitleEvent,
   sessionEndEvent,
 ]);

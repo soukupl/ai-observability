@@ -76,6 +76,22 @@ describe('validateBatch', () => {
     expect(res.rejected).toHaveLength(3);
   });
 
+  it('accepts session titles from both sources and rejects long titles or unknown sources', () => {
+    const title = fixture().events[6]!;
+    const res = validateBatch(
+      withEvents([
+        title,
+        { ...title, event_id: '01J9ZQ8Y3N4X5V6W7Z8A9B0C17', source: 'ai' },
+        { ...title, event_id: '01J9ZQ8Y3N4X5V6W7Z8A9B0C18', title: 'x'.repeat(141) },
+        { ...title, event_id: '01J9ZQ8Y3N4X5V6W7Z8A9B0C19', source: 'user' },
+        { ...title, event_id: '01J9ZQ8Y3N4X5V6W7Z8A9B0C1A', title: '' },
+      ]),
+    );
+    if (!res.ok) throw new Error(res.error);
+    expect(res.events.map((e) => e.type === 'session_title' && e.source)).toEqual(['custom', 'ai']);
+    expect(res.rejected).toHaveLength(3);
+  });
+
   it('accepts hashed project keys and rejects local paths', () => {
     const start = fixture().events[0]!;
     const hashed = { ...start, project: { key: `sha256:${'a'.repeat(64)}` } };

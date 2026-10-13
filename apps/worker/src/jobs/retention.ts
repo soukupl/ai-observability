@@ -115,10 +115,14 @@ async function pruneGlobal(ctx: WorkerContext, signal?: AbortSignal) {
         select id from ingest_events where received_at < ${eventCut}::timestamptz limit ${limit}) returning 1) select count(*) as n from d`,
   );
   const patchCut = new Date(ctx.now().getTime() - PENDING_PATCH_DAYS * DAY_MS).toISOString();
-  const pendingPatches = await batched(
-    (limit) => sql`with d as (delete from pending_turn_patches where id in (
-        select id from pending_turn_patches where received_at < ${patchCut}::timestamptz limit ${limit}) returning 1) select count(*) as n from d`,
-  );
+  // Parked turn patches (ADR-0015) and session titles (ADR-0026) whose turn / session never came.
+  let pendingPatches = 0;
+  for (const table of ['pending_turn_patches', 'pending_session_patches']) {
+    pendingPatches += await batched(
+      (limit) => sql`with d as (delete from ${sql.identifier(table)} where id in (
+          select id from ${sql.identifier(table)} where received_at < ${patchCut}::timestamptz limit ${limit}) returning 1) select count(*) as n from d`,
+    );
+  }
   const magicLinks = await batched(
     (limit) => sql`with d as (delete from magic_links where id in (
         select id from magic_links where expires_at < ${now}::timestamptz limit ${limit}) returning 1) select count(*) as n from d`,
@@ -167,7 +171,7 @@ export async function runRetention(ctx: WorkerContext, opts: { force?: boolean; 
     Object.assign(summary, await pruneGlobal(ctx, opts.signal));
   } catch (err) {
     failed += 1;
-    ctx.log.error('retention: pruning ingest_events / pending_turn_patches / auth failed', err);
+    ctx.log.error('retention: pruning ingest_events / pending patches / auth failed', err);
   }
   if (failed > 0) throw new Error(`retention: ${failed} step(s) failed`);
   if (!opts.signal?.aborted) ctx.state.set(LAST_DAY_KEY, utcDay(now));

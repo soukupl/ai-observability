@@ -172,6 +172,16 @@ export interface TurnSummaryEvent extends EventBase {
   summary: string;
 }
 
+/** Where a session title comes from (ADR-0026): the user's `/rename` (`custom`) or the harness-generated one (`ai`). */
+export type SessionTitleSource = 'custom' | 'ai';
+
+export interface SessionTitleEvent extends EventBase {
+  type: 'session_title';
+  session_id: string;
+  title: string;
+  source: SessionTitleSource;
+}
+
 export interface SessionEndEvent extends EventBase {
   type: 'session_end';
   session_id: string;
@@ -185,6 +195,7 @@ export type IngestEvent =
   | RunEvent
   | TurnOutcomeEvent
   | TurnSummaryEvent
+  | SessionTitleEvent
   | SessionEndEvent;
 
 export interface IngestBatch {

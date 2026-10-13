@@ -6,6 +6,7 @@ export {
   runLink,
   sessionEndEvent,
   sessionStartEvent,
+  sessionTitleEvent,
   turnEvent,
   turnOutcomeEvent,
   turnSummaryEvent,

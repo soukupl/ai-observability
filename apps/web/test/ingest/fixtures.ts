@@ -4,7 +4,10 @@ import type { Tx } from '@ai-obs/db';
 import type { IngestBatchInput, IngestEventInput } from '@ai-obs/protocol';
 import { generateToken } from '../../src/lib/ingest/tokens';
 
-/** The shared protocol fixture (6 events: session_start, turn, run, turn_outcome, turn_summary, session_end). */
+/**
+ * The shared protocol fixture (7 events: session_start, turn, run, turn_outcome, turn_summary, session_end,
+ * session_title).
+ */
 export function protocolFixture(): IngestBatchInput {
   return JSON.parse(
     readFileSync(new URL('../../../../packages/protocol/fixtures/valid-batch.json', import.meta.url), 'utf8'),
@@ -63,6 +66,9 @@ export const ev = {
   }),
   summary: (turnId: string, summary: string): IngestEventInput => ({
     event_id: ulid(), type: 'turn_summary', harness: 'claude-code', turn_id: turnId, summary,
+  }),
+  title: (sessionId: string, title: string, source: 'custom' | 'ai' = 'ai'): IngestEventInput => ({
+    event_id: ulid(), type: 'session_title', harness: 'claude-code', session_id: sessionId, title, source,
   }),
 };
 

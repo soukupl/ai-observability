@@ -47,12 +47,20 @@ export const agentSessions = pgTable(
     startedAt: tstz('started_at').notNull(),
     endedAt: tstz('ended_at'),
     endReason: text('end_reason'),
+    /**
+     * The session's title as the harness shows it (ADR-0026), set only by `session_title` patches: Claude Code's
+     * `/rename` title (`custom`) or its generated title (`ai`). Conversation-derived text, like a turn summary.
+     */
+    title: text('title'),
+    titleSource: text('title_source'),
     createdAt: createdAt(),
   },
   (t) => [
     unique('agent_sessions_company_external_uq').on(t.companyId, t.externalId),
     unique('agent_sessions_company_id_uq').on(t.companyId, t.id),
     index('agent_sessions_company_started_idx').on(t.companyId, t.startedAt),
+    check('agent_sessions_title_len', sql`char_length(${t.title}) <= 140`),
+    check('agent_sessions_title_source', sql`${t.titleSource} in ('custom', 'ai')`),
   ],
 );
 
@@ -226,6 +234,32 @@ export const pendingTurnPatches = pgTable(
     unique('pending_turn_patches_company_turn_uq').on(t.companyId, t.turnExternalId),
     index('pending_turn_patches_received_idx').on(t.receivedAt),
     check('pending_turn_patches_summary_len', sql`char_length(${t.summary}) <= 140`),
+  ],
+);
+
+/**
+ * A session_title that arrived before its session (ADR-0026). Parked like pending_turn_patches; when the session
+ * row is created, ingest_apply_pending_session_patch() copies it onto the session and deletes it. Never read by the
+ * dashboard.
+ */
+export const pendingSessionPatches = pgTable(
+  'pending_session_patches',
+  {
+    id: pk(),
+    companyId: companyRef(),
+    /** agent_sessions.external_id of the session the patch is for (`<harness>:<session_id>`). */
+    sessionExternalId: text('session_external_id').notNull(),
+    title: text('title').notNull(),
+    titleSource: text('title_source').notNull(),
+    /** The sender (null = unverified); applied only to an ownerless session or one of the same owner (SEC-3). */
+    userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }),
+    receivedAt: tstz('received_at').notNull().defaultNow(),
+  },
+  (t) => [
+    unique('pending_session_patches_company_session_uq').on(t.companyId, t.sessionExternalId),
+    index('pending_session_patches_received_idx').on(t.receivedAt),
+    check('pending_session_patches_title_len', sql`char_length(${t.title}) <= 140`),
+    check('pending_session_patches_title_source', sql`${t.titleSource} in ('custom', 'ai')`),
   ],
 );
 

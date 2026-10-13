@@ -6,6 +6,7 @@ import type {
   runLink,
   sessionEndEvent,
   sessionStartEvent,
+  sessionTitleEvent,
   turnEvent,
   turnOutcomeEvent,
   turnSummaryEvent,
@@ -27,6 +28,7 @@ export type RunEvent = z.infer<typeof runEvent>;
 export type RunLink = z.infer<typeof runLink>;
 export type TurnOutcomeEvent = z.infer<typeof turnOutcomeEvent>;
 export type TurnSummaryEvent = z.infer<typeof turnSummaryEvent>;
+export type SessionTitleEvent = z.infer<typeof sessionTitleEvent>;
 export type SessionEndEvent = z.infer<typeof sessionEndEvent>;
 export type IngestEvent = z.infer<typeof ingestEvent>;
 /** What a collector sends (defaults not yet applied). */

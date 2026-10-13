@@ -56,7 +56,8 @@ The file is append-only JSONL with one entry per line. Every message entry has `
 | `assistant` | **One entry per content block** (`thinking`, `text`, `tool_use`). The entries of one API response share `message.id` and `requestId`, and **each repeats the full `message.usage`**. | Tokens (de-duplicated by `message.id`), model, effort, tools, timeline. |
 | `assistant` with `isApiErrorMessage: true`, `message.model: "<synthetic>"` | An API error placeholder (e.g. a 429) | Counts as activity; carries no usage. |
 | `system` `subtype: "stop_hook_summary"` / `"turn_duration"` | Written at the end of a turn (`stop_hook_summary` only when Stop hooks exist; with ai-obs installed they always do) | A turn boundary for injected task notifications. |
-| `system` (`compact_boundary`, `api_error`, `away_summary`, `local_command`, …), `attachment`, `file-history-snapshot`, `file-history-delta`, `queue-operation`, `last-prompt`, `custom-title`, `ai-title`, `agent-name`, `mode`, `permission-mode`, `cost-state`, `atis-latch` | Housekeeping | Ignored. |
+| `custom-title` (`{type, customTitle, sessionId}`, from `/rename`) / `ai-title` (`{type, aiTitle, sessionId}`, generated) | The session's name in the `/resume` picker. No `timestamp`; written again when it changes. | The latest of each kind is kept in the session state; the effective title (custom wins over AI) is sent as a `session_title` patch when it changes (ADR-0026). Paths scrubbed and cut to 140 chars like a summary. Not a turn entry. |
+| `system` (`compact_boundary`, `api_error`, `away_summary`, `local_command`, …), `attachment`, `file-history-snapshot`, `file-history-delta`, `queue-operation`, `last-prompt`, `agent-name`, `mode`, `permission-mode`, `cost-state`, `atis-latch` | Housekeeping | Ignored. |
 
 ### Assistant fields
 

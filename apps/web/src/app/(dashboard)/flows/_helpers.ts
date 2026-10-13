@@ -38,14 +38,22 @@ export function parseFlowGroup(sp: Params): string | null {
  * URL for the flows list: keeps the current search params (the agent `group` filter included), sets/clears page,
  * outcome and group (as turns' listHref). Changing outcome or group resets the page.
  */
-export function flowsListHref(sp: Params, change: { page?: number | null; outcome?: string | null; group?: string | null }): string {
+export function flowsListHref(sp: Params, change: { page?: number | null; outcome?: string | null; group?: string | null; session?: string | null }): string {
   const p = new URLSearchParams();
   for (const [k, v] of Object.entries(sp)) {
     const val = first(v);
-    if (val !== undefined && k !== 'page' && !(k === 'outcome' && 'outcome' in change) && !(k === 'group' && 'group' in change)) p.set(k, val);
+    if (
+      val !== undefined &&
+      k !== 'page' &&
+      !(k === 'outcome' && 'outcome' in change) &&
+      !(k === 'group' && 'group' in change) &&
+      !(k === 'session' && 'session' in change)
+    )
+      p.set(k, val);
   }
   if (change.outcome) p.set('outcome', change.outcome);
   if (change.group) p.set('group', change.group);
+  if (change.session) p.set('session', change.session);
   if (change.page && change.page > 1) p.set('page', String(change.page));
   const s = p.toString();
   return s ? `/flows?${s}` : '/flows';

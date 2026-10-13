@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm';
 import {
-  agentSessions, authSessions, budgets, companies, companyMemberships, ingestEvents, magicLinks, pendingTurnPatches, runs, teamMemberships, teams, turns, usage, users,
+  agentSessions, authSessions, budgets, companies, companyMemberships, ingestEvents, magicLinks, pendingSessionPatches, pendingTurnPatches, runs, teamMemberships, teams, turns, usage, users,
   type Database,
 } from '@ai-obs/db';
 
@@ -173,6 +173,10 @@ export const addNoise = (db: Database, companyId: string, userId: string, nowIso
     await tx.insert(pendingTurnPatches).values([
       { companyId, turnExternalId: 'claude-code:gone', summary: 'secret summary', receivedAt: ago(400) },
       { companyId, turnExternalId: 'claude-code:soon', summary: 'waiting', receivedAt: ago(1) },
+    ]);
+    await tx.insert(pendingSessionPatches).values([
+      { companyId, sessionExternalId: 'claude-code:gone-s', title: 'secret title', titleSource: 'ai', receivedAt: ago(400) },
+      { companyId, sessionExternalId: 'claude-code:soon-s', title: 'waiting', titleSource: 'custom', receivedAt: ago(1) },
     ]);
     await tx.insert(authSessions).values([
       { userId, tokenHash: 's1', expiresAt: ago(2) },

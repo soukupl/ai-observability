@@ -81,6 +81,17 @@ export interface SessionState {
   digests: TurnDigest[];
   /** hook time (epoch ms) at which `digests` first became non-empty; absent while nothing waits (and in older state) */
   digestsSince?: number;
+  /**
+   * The session's titles seen in the transcript (ADR-0026; latest of each kind, cleaned) and the one last sent as
+   * `session_title` (`<source>\n<title>`). Absent in older state and until a title entry is read.
+   */
+  title?: SessionTitles;
+}
+
+export interface SessionTitles {
+  custom?: string;
+  ai?: string;
+  sent?: string;
 }
 
 const KEEP_TURNS = 3;

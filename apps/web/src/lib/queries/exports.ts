@@ -13,10 +13,11 @@ import { getSkillsMcp, type McpReliability } from './skills-mcp';
 import { getWastedSpend, modelKey, wastedShare } from './wasted';
 import type { TokenTotals } from './sqlutil';
 import { getTokenSeries } from './timeseries';
+import { exportSessions } from './sessions';
 import { exportTurns } from './turns';
 
 /** Table views that have a CSV export (BRIEF §8: every table view). */
-export const EXPORT_VIEWS = ['overview', 'projects', 'models', 'phases', 'agents', 'skills-mcp', 'turns', 'flows', 'budgets'] as const;
+export const EXPORT_VIEWS = ['overview', 'projects', 'models', 'phases', 'agents', 'skills-mcp', 'turns', 'flows', 'sessions', 'budgets'] as const;
 export type ExportView = (typeof EXPORT_VIEWS)[number];
 
 export interface CsvTable {
@@ -36,6 +37,8 @@ export interface ExportOptions {
   outcome?: Outcome | null;
   /** turns: row cap (default EXPORT_MAX_ROWS); newest rows are kept. */
   maxRows?: number;
+  /** turns, flows: only this session (`agent_sessions.id`, ADR-0026), whatever the date range. */
+  sessionId?: string | null;
 }
 
 export const isExportView = (v: string | null | undefined): v is ExportView => (EXPORT_VIEWS as readonly string[]).includes(v ?? '');
@@ -136,7 +139,7 @@ export async function buildExportTable(ctx: QueryCtx, view: ExportView, f: Filte
     }
     case 'turns': {
       const withUsers = canSeeUsers(ctx.viewer);
-      const { rows: turns, truncated } = await exportTurns(ctx, f, { outcome: opts.outcome ?? null, max: opts.maxRows });
+      const { rows: turns, truncated } = await exportTurns(ctx, f, { outcome: opts.outcome ?? null, max: opts.maxRows, sessionId: opts.sessionId ?? null });
       const headers = [
         'started_at',
         ...(withUsers ? ['user'] : []),
@@ -174,7 +177,7 @@ export async function buildExportTable(ctx: QueryCtx, view: ExportView, f: Filte
       return { headers, rows: body, truncated };
     }
     case 'flows': {
-      const { flows, truncated } = await listFlows(ctx, f, opts.outcome ?? null);
+      const { flows, truncated } = await listFlows(ctx, f, opts.outcome ?? null, null, opts.sessionId ?? null);
       const headers = [
         'started_at', 'project', 'flow', 'kind', 'steps', 'stages', 'duration_ms', ...TOKEN_HEADERS, 'est_cost_usd', 'models', 'outcome', 'turn_id', 'key',
       ];
@@ -196,6 +199,43 @@ export async function buildExportTable(ctx: QueryCtx, view: ExportView, f: Filte
       if (truncated) {
         const note: CsvCell[] = headers.map(() => '');
         note[0] = `TRUNCATED: the range has more than ${FLOW_MAX_RUNS} sub-agent runs; only flows of the oldest runs are listed; narrow the range or filters to export the rest`;
+        body.push(note);
+      }
+      return { headers, rows: body, truncated };
+    }
+    case 'sessions': {
+      const withUsers = !ctx.agg && canSeeUsers(ctx.viewer);
+      const { rows: list, truncated } = await exportSessions(ctx, f);
+      const headers = [
+        'started_at', 'last_activity_at', 'ended_at', 'end_reason', 'session_id', 'title', ...(withUsers ? ['user'] : []), 'team', 'project', 'harness',
+        'span_ms', 'turns', 'sub_agent_runs', 'workflows', 'flows', ...TOKEN_HEADERS, 'est_cost_usd', 'success', 'failed', 'abandoned', 'unknown',
+      ];
+      const body = list.map((x): CsvCell[] => [
+        iso(x.startedMs),
+        iso(x.lastActivityMs),
+        x.endedMs === null ? '' : iso(x.endedMs),
+        x.endReason,
+        x.harnessSessionId,
+        x.title,
+        ...(withUsers ? [x.userName ?? (x.userId ? 'former member' : '')] : []),
+        x.teamName,
+        x.projectName,
+        x.harness,
+        x.spanMs,
+        x.turns,
+        x.runs,
+        x.workflows,
+        x.flows,
+        ...tokenCells(x.tokens),
+        usd(x.cost),
+        x.outcomes.success,
+        x.outcomes.failed,
+        x.outcomes.abandoned,
+        x.outcomes.unknown,
+      ]);
+      if (truncated) {
+        const note: CsvCell[] = headers.map(() => '');
+        note[0] = `TRUNCATED: only the newest ${list.length} sessions are listed; narrow the range or filters to export the rest`;
         body.push(note);
       }
       return { headers, rows: body, truncated };

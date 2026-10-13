@@ -5,9 +5,11 @@ import {
   applyRun,
   applySessionEnd,
   applySessionStart,
+  applySessionTitle,
   applyTurn,
   applyTurnOutcome,
   applyTurnSummary,
+  lockBatchSessions,
 } from './apply-events';
 import { OwnerConflictError, rows, type BatchContext, type TokenContext } from './context';
 import { enforceLimits, timeWindowProblem } from './limits';
@@ -20,6 +22,7 @@ const TYPE_ORDER: Record<IngestEvent['type'], number> = {
   run: 2,
   turn_outcome: 3,
   turn_summary: 3,
+  session_title: 3,
   session_end: 4,
 };
 
@@ -51,6 +54,8 @@ async function applyEvent(tx: Tx, ctx: BatchContext, e: IngestEvent): Promise<vo
       return applyTurnOutcome(tx, ctx, e);
     case 'turn_summary':
       return applyTurnSummary(tx, ctx, e);
+    case 'session_title':
+      return applySessionTitle(tx, ctx, e);
     case 'session_end':
       return applySessionEnd(tx, ctx, e);
   }
@@ -127,6 +132,9 @@ export async function processBatch(
     if (limited.ok) ordered.push(limited.event);
     else rejected.push({ event_id: event.event_id, reason: limited.reason });
   }
+
+  // Every session lock of the batch first, outside the savepoints (ADR-0026): keeps the lock order sessions → turns.
+  await lockBatchSessions(tx, ctx, ordered);
 
   for (let i = 0; i < ordered.length; i += EVENTS_PER_SAVEPOINT) {
     const chunk = ordered.slice(i, i + EVENTS_PER_SAVEPOINT);
