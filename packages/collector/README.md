@@ -84,6 +84,14 @@ cd ~/work/billing && ai-obs use acme                                            
   With another token already registered, `--name` is required and the token sends nothing until
   `ai-obs token confirm <name>` (or a later fetch) proves its company.
 
+### Upgrading to 0.3
+
+Version 0.3 adds session titles (ADR-0026): the Claude Code adapter sends the session's `/rename` title (or Claude Code's
+generated one) as a `session_title` event, so the dashboard's Sessions view shows the names of the `/resume` picker.
+Install the new version and run `ai-obs init` (no `--token`: it keeps the registered tokens and only refreshes the hook
+runtime and the hooks). The server must have migration 0016; `MIN_COLLECTOR_VERSION` can stay at 0.2.0, since 0.2 still
+works without titles.
+
 ### Upgrading from 0.1
 
 Version 0.2 reads a 0.1.x `config.json` but keeps no token from it: the server revoked every old token (ADR-0022), so

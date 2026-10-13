@@ -1,6 +1,6 @@
 {
   "name": "ai-obs",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "ai-obs collector: zero-dependency CLI that captures AI coding-agent usage from harness hooks",
   "type": "module",
   "license": "UNLICENSED",
