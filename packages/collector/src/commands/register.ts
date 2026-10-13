@@ -310,7 +310,7 @@ export async function afterRegistration(outcome: Extract<RegisterOutcome, { ok: 
       io.out(several ? `✓ ${t.name}: project naming ${cc.value.project_naming}` : `✓ project naming: ${cc.value.project_naming}`);
       if (compareVersions(COLLECTOR_VERSION, cc.value.min_collector_version) < 0) {
         io.out(
-          `! this collector (${COLLECTOR_VERSION}) is older than the server minimum ${cc.value.min_collector_version}${several ? ` (${t.name})` : ''}; update with \`npx ai-obs@latest init\``,
+          `! this collector (${COLLECTOR_VERSION}) is older than the server minimum ${cc.value.min_collector_version}${several ? ` (${t.name})` : ''}; update with \`npx @soukupl/ai-obs@latest init\``,
         );
       }
     }

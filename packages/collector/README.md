@@ -11,8 +11,8 @@ Design: [BRIEF §5](../../BRIEF.md), ADR-0001, ADR-0004, ADR-0005, ADR-0008, ADR
 ## Install
 
 ```sh
-npx ai-obs init --token aiobs_u_… --endpoint https://obs.example.com            # user-level hooks
-npx ai-obs init --token aiobs_u_… --endpoint https://obs.example.com --project  # hooks in this repo only
+npx @soukupl/ai-obs init --token aiobs_u_… --endpoint https://obs.example.com            # user-level hooks
+npx @soukupl/ai-obs init --token aiobs_u_… --endpoint https://obs.example.com --project  # hooks in this repo only
 ```
 
 A user token (`aiobs_u_`) identifies you in one company. A company token (`aiobs_c_`, made by an admin or lead) writes
@@ -39,8 +39,8 @@ into a company and matches you by git e-mail. A machine can hold several tokens 
 ### Several companies
 
 ```sh
-npx ai-obs init --token aiobs_u_<acme> --endpoint https://obs.example.com          # registered as "acme"
-npx ai-obs token add --token aiobs_c_<globex> --endpoint https://obs.example.com   # registered as "globex"
+npx @soukupl/ai-obs init --token aiobs_u_<acme> --endpoint https://obs.example.com          # registered as "acme"
+npx @soukupl/ai-obs token add --token aiobs_c_<globex> --endpoint https://obs.example.com   # registered as "globex"
 cd ~/work/billing && ai-obs use acme                                               # this repository reports to acme
 ```
 
@@ -88,8 +88,9 @@ cd ~/work/billing && ai-obs use acme                                            
 
 Version 0.3 adds session titles (ADR-0026): the Claude Code adapter sends the session's `/rename` title (or Claude Code's
 generated one) as a `session_title` event, so the dashboard's Sessions view shows the names of the `/resume` picker.
-Install the new version and run `ai-obs init` (no `--token`: it keeps the registered tokens and only refreshes the hook
-runtime and the hooks). The server must have migration 0016; `MIN_COLLECTOR_VERSION` can stay at 0.2.0, since 0.2 still
+It is the first release on npm, as `@soukupl/ai-obs` (npm refused the name `ai-obs`; the command is still `ai-obs`).
+Run `npx @soukupl/ai-obs@latest init` (no `--token`: it keeps the registered tokens and only refreshes the hook runtime
+and the hooks). The server must have migration 0016; `MIN_COLLECTOR_VERSION` can stay at 0.2.0, since 0.2 still
 works without titles.
 
 ### Upgrading from 0.1
@@ -482,9 +483,9 @@ How the adapter works:
 ## Development
 
 ```sh
-pnpm --filter ai-obs typecheck
-pnpm --filter ai-obs test     # = vitest run --project collector (no network: local http servers, temp homes)
-pnpm --filter ai-obs build    # dist/; the real-process hook tests (test/hook-process.test.ts) run only when dist exists
+pnpm --filter @soukupl/ai-obs typecheck
+pnpm --filter @soukupl/ai-obs test     # = vitest run --project collector (no network: local http servers, temp homes)
+pnpm --filter @soukupl/ai-obs build    # dist/; the real-process hook tests (test/hook-process.test.ts) run only when dist exists
 ```
 
 Test helpers (`test/helpers.ts`): `writeTestConfig` / `writeTestTokens` (registered tokens with their caches), `writeProjects`, `tokenResponder` (per-token fake server), `okResponder`, `gitRepo`, and `queueStore` (`test/queue-helpers.ts`). The multi-company definition-of-done test is `test/multi-token.integration.test.ts`: two local servers, the real CLI, hook and worker.

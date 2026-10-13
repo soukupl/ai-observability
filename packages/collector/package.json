@@ -1,5 +1,5 @@
 {
-  "name": "ai-obs",
+  "name": "@soukupl/ai-obs",
   "version": "0.3.0",
   "description": "ai-obs collector: zero-dependency CLI that captures AI coding-agent usage from harness hooks",
   "type": "module",

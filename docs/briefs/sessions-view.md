@@ -75,7 +75,8 @@ retention shows the turns still kept and says so.
 - Titles are model- or user-written text derived from the conversation, like turn summaries (ADR-0004), so they get
   the same handling: shown to whoever may see the session, never in aggregate reads.
 - Codex: no title source known; keeps the phase-1 fallback.
-- Ships as a new collector npm version (`npm i -g ai-obs@latest`, no re-init, tokens unchanged).
+- Ships as collector 0.3.0, the first npm release, published as `@soukupl/ai-obs` (npm refused `ai-obs` as too
+  similar to `aiobs`); upgrading is `npx @soukupl/ai-obs@latest init` (no `--token`: the tokens are kept).
 
 ## Out of scope
 

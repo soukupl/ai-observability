@@ -57,7 +57,7 @@ export async function listTokens(tx: Tx, companyId: string, opts: { onlyUserId?:
 
 /** The one command a developer runs (BRIEF §5.1). */
 export function collectorCommand(token: string, endpoint: string): string {
-  return `npx ai-obs init --token ${token} --endpoint ${endpoint.replace(/\/+$/, '')}`;
+  return `npx @soukupl/ai-obs init --token ${token} --endpoint ${endpoint.replace(/\/+$/, '')}`;
 }
 
 /**

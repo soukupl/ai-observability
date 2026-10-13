@@ -573,7 +573,7 @@ company switcher appears with two or more companies, and an "Invitations (n)" li
 `generateToken()` / `hashToken()` from `src/lib/ingest/tokens.ts`; only the hash and the display prefix
 are stored. Kinds: **company** tokens (`aiobs_c_`; created by admins and leads, match users by git e-mail among the
 company's members) and **user** tokens (`aiobs_u_`; created by anyone, own only, in the active company). The plaintext,
-the command `npx ai-obs init --token <token> --endpoint <APP_URL>` and, for
+the command `npx @soukupl/ai-obs init --token <token> --endpoint <APP_URL>` and, for
 company tokens, a downloadable JSON for MDM / dotfiles rollout (`{endpoint, token, company, install}`, where `company` is the slug) are
 returned once in the action state and never written anywhere. The collector creates its `machine_id`
 on `init`, so the rollout runs `install` on each machine. Audit rows carry the prefix, never the secret.

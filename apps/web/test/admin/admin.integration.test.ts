@@ -228,7 +228,7 @@ describe.skipIf(skipReason !== null)(skipReason ? `admin console — SKIPPED: ${
       expect(tok.plaintext).toMatch(/^aiobs_c_/);
       expect(tok.kind).toBe('company');
       expect(tok.companyName).toBe('Acme');
-      expect(tok.command).toBe(`npx ai-obs init --token ${tok.plaintext} --endpoint ${ENDPOINT}`);
+      expect(tok.command).toBe(`npx @soukupl/ai-obs init --token ${tok.plaintext} --endpoint ${ENDPOINT}`);
       expect(JSON.parse(tok.mdmJson!)).toMatchObject({ endpoint: ENDPOINT, token: tok.plaintext, company: 'acme' });
       expect(tok.mdmFilename).toBe('ai-obs-acme.json');
       const [stored] = await asOwner((tx) => q<{ hash: string; prefix: string; user_id: string | null; kind: string }>(tx, sql`select hash, prefix, user_id, kind from ingest_tokens where id = ${tok.id}`));

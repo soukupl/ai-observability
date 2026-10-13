@@ -39,7 +39,7 @@ The design is now being implemented; see README.md for the build.
 | 13 | Cost | Estimated cost at **API list prices** from a dated price table, computed at query time | brief only |
 | 14 | Retention | Per-company, 30 days – 24 months raw, **default 13 months**; daily rollups kept forever | [0012](docs/adr/0012-retention-and-rollups.md) |
 | 15 | Delivery | Local file queue + retry; client-generated event IDs; server de-duplicates | [0011](docs/adr/0011-local-queue-idempotent-delivery.md) |
-| 16 | Install | One CLI: `npx ai-obs init --token …` configures every detected harness. `ai-obs token add` registers a token for another company and `ai-obs use <name>` picks the token of a repo | [0022](docs/adr/0022-company-memberships-and-token-kinds.md) |
+| 16 | Install | One CLI: `npx @soukupl/ai-obs init --token …` configures every detected harness. `ai-obs token add` registers a token for another company and `ai-obs use <name>` picks the token of a repo | [0022](docs/adr/0022-company-memberships-and-token-kinds.md) |
 | 17 | Dashboard | All eight views in v1 (see §8) | brief only |
 | 18 | Alerts | Monthly token/cost budgets per team/user, e-mail at 80 % / 100 %, never blocking | brief only |
 | 19 | Billing | Plans + limits (Free / Team / Business) set by super admin; no payments | brief only |
@@ -120,7 +120,7 @@ the resolved user in that company, (3) none (the turn has no team).
 
 ### 5.1 Install and runtime
 
-- `npx ai-obs init --token <token> [--project]` — detects installed harnesses, writes hook config
+- `npx @soukupl/ai-obs init --token <token> [--project]` — detects installed harnesses, writes hook config
   (user-level by default, repo-level with `--project`; the token is never written into a repo).
 - **Status:** collector 0.2.0 registers several tokens (`config.json` v2 with `tokens[]`; user `aiobs_u_` or company
   `aiobs_c_`), keeps a per-repository choice (`projects.json`), holds data until a repository is assigned, asks through the
@@ -369,7 +369,7 @@ Set by the super admin; new sign-ups land on **Free**. Values are placeholders. 
 
 **The future MVP build** is done when:
 
-1. `npx ai-obs init` on a machine with Claude Code and Codex configures both; `ai-obs doctor` is green.
+1. `npx @soukupl/ai-obs init` on a machine with Claude Code and Codex configures both; `ai-obs doctor` is green.
 2. A real Claude Code session with a sub-agent and a Codex session appear in the dashboard within
    minutes, with correct tokens (matching transcript totals), model, effort, phases, outcome, summary,
    and the parent → child run tree.

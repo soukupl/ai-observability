@@ -95,12 +95,12 @@ describe('token-kind permissions (ADR-0022, brief Q2/Q9)', () => {
 
 describe('helpers', () => {
   it('collector command and MDM config', () => {
-    expect(collectorCommand('aiobs_c_x', 'https://obs.example/')).toBe('npx ai-obs init --token aiobs_c_x --endpoint https://obs.example');
+    expect(collectorCommand('aiobs_c_x', 'https://obs.example/')).toBe('npx @soukupl/ai-obs init --token aiobs_c_x --endpoint https://obs.example');
     expect(mdmConfig('aiobs_c_x', 'https://obs.example', { slug: 'acme' })).toEqual({
       endpoint: 'https://obs.example',
       token: 'aiobs_c_x',
       company: 'acme',
-      install: 'npx ai-obs init --token aiobs_c_x --endpoint https://obs.example',
+      install: 'npx @soukupl/ai-obs init --token aiobs_c_x --endpoint https://obs.example',
     });
   });
   it('invitation e-mail links to the login page and escapes HTML', () => {

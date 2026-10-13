@@ -54,7 +54,7 @@ To try the collector against your dev server:
 ```sh
 TOKEN=$(pnpm -s dev:token)                      # user token for a seeded user in their active company (scripts/dev-token.ts)
 # pnpm -s dev:token alice@acme.example globex   # the same user in another company
-pnpm --filter ai-obs build
+pnpm --filter @soukupl/ai-obs build
 AI_OBS_HOME=/tmp/ai-obs-dev node packages/collector/bin/ai-obs.js init --token "$TOKEN" --endpoint http://localhost:3000
 ```
 
