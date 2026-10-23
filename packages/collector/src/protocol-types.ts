@@ -102,6 +102,16 @@ export interface SessionStartEvent extends EventBase {
   at: string;
 }
 
+/** Live status (ADR-0027): a main-agent prompt was submitted; the turn is working until its `turn` arrives. */
+export interface TurnStartedEvent extends EventBase {
+  type: 'turn_started';
+  session_id: string;
+  /** the turn's key when known at prompt time (Claude Code: prompt uuid; Codex: hook turn_id), else null */
+  turn_id: string | null;
+  /** ISO time the prompt-submit hook fired */
+  started_at: string;
+}
+
 export interface TurnEvent extends EventBase {
   type: 'turn';
   session_id: string;
@@ -191,6 +201,7 @@ export interface SessionEndEvent extends EventBase {
 
 export type IngestEvent =
   | SessionStartEvent
+  | TurnStartedEvent
   | TurnEvent
   | RunEvent
   | TurnOutcomeEvent

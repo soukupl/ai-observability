@@ -2,9 +2,11 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { hookCommandFactory, hookRuntimeProblems, isVersionManagedNode, parseShellWords, shellQuote } from '../src/adapters/hook-command.js';
-import { pendingSummariesPath } from '../src/analysis/summaries.js';
+import { listStagedDigests, pendingSummariesPath, stageDigests } from '../src/analysis/summaries.js';
 import { main } from '../src/cli.js';
 import { sessionEndEvent } from '../src/events.js';
+import { tryLock } from '../src/lock.js';
+import { nullLogger } from '../src/log.js';
 import { type AiObsPaths } from '../src/paths.js';
 import { cleanupHomes, fakeAdapter, okResponder, startServer, tmpHome, writeTestConfig } from './helpers.js';
 import { bound, enqueueFor, queueStore } from './queue-helpers.js';
@@ -165,6 +167,64 @@ describe('flush: sweep and pending summaries', () => {
     const types = srv.received.flatMap((r) => ((r.json as { events?: Array<{ type: string }> } | null)?.events ?? []).map((e) => e.type)).sort();
     expect(types).toEqual(['session_end', 'turn_summary']);
     expect(queueStore(paths).stats().events).toBe(0);
+  });
+
+  it('also writes the staged summaries (ADR-0027)', async () => {
+    const srv = await server();
+    const paths = tmpHome();
+    writeTestConfig(paths, srv.url);
+    const key = { kind: 'project' as const, pk: 'github.com/acme/billing', bind: bound('acme', srv.url, 'acme', 'aiobs_u_testtoken') };
+    stageDigests(paths.state, 'codex', [{ turnId: 'ts', sessionId: 's', prompt: 'p', tools: [], lastAssistantMessage: 'm' }], key, Date.now(), nullLogger);
+    const codex = fakeAdapter({ name: 'codex', displayName: 'Codex', summarize: async () => new Map([['ts', 'Did a thing']]) });
+    const c = capture();
+    expect(await main(['flush'], c.io, { paths, adapters: [codex], env: {}, resolveProjectKey })).toBe(0);
+    expect(c.text()).toContain('Codex: summaries 1 of 1 done, 0 still waiting');
+    expect(listStagedDigests(paths.state, 'codex')).toEqual([]);
+    const types = srv.received.flatMap((r) => ((r.json as { events?: Array<{ type: string }> } | null)?.events ?? []).map((e) => e.type));
+    expect(types).toEqual(['turn_summary']);
+  });
+
+  it('leaves the summaries to the background worker while it holds summaries.lock', async () => {
+    const srv = await server();
+    const paths = tmpHome();
+    writeTestConfig(paths, srv.url);
+    const key = { kind: 'project' as const, pk: 'github.com/acme/billing', bind: bound('acme', srv.url, 'acme', 'aiobs_u_testtoken') };
+    stageDigests(paths.state, 'codex', [{ turnId: 'ts', sessionId: 's', prompt: 'p', tools: [], lastAssistantMessage: 'm' }], key, Date.now(), nullLogger);
+    let calls = 0;
+    const codex = fakeAdapter({
+      name: 'codex',
+      displayName: 'Codex',
+      async summarize() {
+        calls++;
+        return new Map();
+      },
+    });
+    const release = tryLock(paths.summariesLock)!;
+    try {
+      const c = capture();
+      expect(await main(['flush'], c.io, { paths, adapters: [codex], env: {}, resolveProjectKey })).toBe(0);
+      expect(c.text().match(/summaries are being written by the background worker; they are sent when done/g)).toHaveLength(1);
+      expect(c.text()).not.toContain('Codex: summaries');
+    } finally {
+      release();
+    }
+    expect(calls).toBe(0);
+    expect(listStagedDigests(paths.state, 'codex')).toHaveLength(1);
+  });
+
+  it('status shows the summaries waiting for retry and the due (staged) ones', async () => {
+    const srv = await server();
+    const paths = tmpHome();
+    writeTestConfig(paths, srv.url);
+    const key = { kind: 'project' as const, pk: 'github.com/acme/billing', bind: bound('acme', srv.url, 'acme', 'aiobs_u_testtoken') };
+    const d = { turnId: 'ts', sessionId: 's', prompt: 'p', tools: [], lastAssistantMessage: 'm' };
+    stageDigests(paths.state, 'codex', [d, { ...d, turnId: 'tt' }], key, Date.now(), nullLogger);
+    stageDigests(paths.state, 'claude-code', [d], key, Date.now(), nullLogger);
+    mkdirSync(dirname(pendingSummariesPath(paths.state, 'codex')), { recursive: true });
+    writeFileSync(pendingSummariesPath(paths.state, 'codex'), JSON.stringify([{ ...d, attempts: 1, firstFailedAt: Date.now(), key }]));
+    const c = capture();
+    expect(await main(['status'], c.io, { paths, env: {}, resolveProjectKey })).toBe(0);
+    expect(c.text()).toContain('summaries  1 waiting for retry, 3 due');
   });
 
   it('a failing sweep does not stop the flush', async () => {

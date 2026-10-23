@@ -96,7 +96,7 @@ describe('codex adapter: synthetic 3-turn rollout', () => {
     await env.hook('SessionEnd', {});
     const batch = buildEnvelope(buildConfig({ endpoint: 'https://obs.example.com', token: 'aiobs_u_x' }), env.events);
     const r = validateBatch(JSON.parse(JSON.stringify(batch)));
-    expect(r.ok && r.rejected).toEqual([]);
+    expect(r.ok && r.rejected.length).toBe(0);
     const wire = JSON.stringify(env.events);
     for (const secret of ['/work/acme-app', 'src/retry', 'Now run the tests', 'pnpm test', 'Add a retry helper', 'README']) expect(wire).not.toContain(secret);
   });
@@ -213,6 +213,7 @@ describe('codex adapter: incremental processing', () => {
     utimesSync(early.mainPath, new Date('2026-10-05T10:05:27Z'), new Date('2026-10-05T10:05:27Z'));
     const later = { ...early.ctx, now: () => new Date('2026-10-05T12:10:00Z') };
     await early.adapter.sweepCrashedSessions(later);
+    await early.summaries(); // the worker's summary phase after its flush (ADR-0027)
     const end = ofType(early.events, 'session_end');
     expect(end).toEqual([expect.objectContaining({ reason: 'crashed', at: '2026-10-05T10:05:27.000Z' })]);
     // last turn has no next prompt → final keeps its status
@@ -241,5 +242,57 @@ describe('codex adapter: mid-session summaries (ADR-0023)', () => {
     const state = env.ctx.state.get<{ digests: unknown[]; digestsSince?: number }>(SESSION)!;
     expect(state.digests).toEqual([]);
     expect(state.digestsSince).toBeUndefined();
+  });
+});
+
+describe('codex adapter: turn_started (live status, ADR-0027)', () => {
+  const lines = fixtureLines('main-rollout.jsonl');
+  const t1Complete = lines.findIndex((l) => l.includes('"task_complete"'));
+  const t2Start = lines.findIndex((l) => l.includes(`"task_started","turn_id":"${T2}"`));
+
+  it('UserPromptSubmit sends turn_started with the hook turn_id at the hook time', async () => {
+    const env = codexTestEnv();
+    env.writeChild(fixtureLines('child-rollout.jsonl'));
+    env.writeMain(lines.slice(0, t1Complete + 1));
+    await env.hook('Stop', { turn_id: T1 });
+    env.writeMain(lines.slice(0, t2Start));
+    await env.hook('UserPromptSubmit', { turn_id: T2, prompt: 'thanks, now run the tests' }, '2026-10-05T10:01:30Z');
+    const started = ofType(env.events, 'turn_started');
+    expect(started.map(strip)).toEqual([{ type: 'turn_started', session_id: SESSION, turn_id: T2, started_at: '2026-10-05T10:01:30.000Z' }]);
+    expect(env.events.at(-1)?.type).toBe('turn_started');
+    // the later turn carries the same key
+    env.writeMain(lines);
+    await env.hook('Stop', { turn_id: T2 });
+    expect(ofType(env.events, 'turn').map((t) => t.turn_id)).toContain(T2);
+    const r = validateBatch(JSON.parse(JSON.stringify(buildEnvelope(buildConfig({ endpoint: 'https://obs.example.com', token: 'aiobs_u_x' }), env.events))));
+    expect(r.ok && r.rejected.length).toBe(0);
+  });
+
+  it('no turn_id in the payload: turn_id null', async () => {
+    const env = codexTestEnv();
+    env.writeMain(lines.slice(0, t1Complete + 1));
+    await env.hook('UserPromptSubmit', { prompt: 'hi' });
+    expect(ofType(env.events, 'turn_started').map((e) => e.turn_id)).toEqual([null]);
+  });
+
+  it('a sub-agent hook (agent_id) or a sub-agent session sends none', async () => {
+    const env = codexTestEnv();
+    copyFixtures(env);
+    await env.hook('UserPromptSubmit', { turn_id: T2, prompt: 'x', agent_id: 'agent-1' });
+    expect(ofType(env.events, 'turn_started')).toEqual([]);
+    const sub = codexTestEnv();
+    sub.ctx.state.set(CHILD, { v: 1, sessionId: CHILD, rolloutPath: null, offset: 0, meta: null, subagent: true, startedSent: false, ended: false });
+    await sub.hook('UserPromptSubmit', { session_id: CHILD, transcript_path: sub.childPath, turn_id: T2, prompt: 'x' });
+    expect(ofType(sub.events, 'turn_started')).toEqual([]);
+  });
+
+  it('a first hook that is UserPromptSubmit: session_start first, turn_started last', async () => {
+    const env = codexTestEnv();
+    env.writeChild(fixtureLines('child-rollout.jsonl'));
+    env.writeMain(lines.slice(0, t2Start));
+    await env.hook('UserPromptSubmit', { turn_id: T2, prompt: 'now run the tests' });
+    const types = env.events.map((e) => e.type);
+    expect(types[0]).toBe('session_start');
+    expect(types.at(-1)).toBe('turn_started');
   });
 });

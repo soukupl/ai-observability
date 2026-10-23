@@ -18,7 +18,7 @@ import { provisionalOutcome } from '../src/analysis/outcome.js';
 import { emptyPhaseTotals } from '../src/analysis/phases.js';
 import { sumUsage } from '../src/analysis/tokens.js';
 import { buildConfig } from '../src/config.js';
-import { countTools, runEvent, sessionEndEvent, sessionStartEvent, sessionTitleEvent, turnEvent, turnOutcomeEvent, turnSummaryEvent } from '../src/events.js';
+import { countTools, runEvent, sessionEndEvent, sessionStartEvent, sessionTitleEvent, turnEvent, turnOutcomeEvent, turnStartedEvent, turnSummaryEvent } from '../src/events.js';
 import * as local from '../src/protocol-types.js';
 import { buildEnvelope } from '../src/sender.js';
 
@@ -48,6 +48,9 @@ function allEvents(): local.IngestEvent[] {
     turnSummaryEvent({ harness, turnId: 't1', summary: 'Added JWT refresh to auth middleware '.repeat(10), at: '2026-10-05T10:30:00Z' })!,
     sessionEndEvent({ harness, sessionId: 's1', reason: 'exit', at: '2026-10-05T10:30:00Z' }),
     sessionTitleEvent({ harness, sessionId: 's1', title: 'Auth middleware JWT refresh '.repeat(10), source: 'custom', at: '2026-10-05T10:30:00Z' })!,
+    turnStartedEvent({ harness, sessionId: 's1', turnId: 't1', startedAt: '2026-10-05T10:00:04Z' }),
+    // turn_id is not in the id seed (ADR-0027): another prompt time, another id
+    turnStartedEvent({ harness, sessionId: 's1', turnId: null, startedAt: '2026-10-05T10:05:04Z' }),
   ];
 }
 
@@ -59,20 +62,22 @@ describe('collector events conform to @ai-obs/protocol', () => {
     expect(r.ok).toBe(true);
     if (r.ok) {
       expect(r.rejected).toEqual([]);
-      expect(r.events).toHaveLength(8);
+      expect(r.events).toHaveLength(10);
       // the flow fields survive validation (ADR-0020)
       expect(r.events.find((e) => e.type === 'run' && e.run_id === 'agent-2')).toMatchObject({
         stage_index: 1,
         flow_key: 'data',
         links: [{ from_run_id: 'agent-1', kind: 'item' }, { from_run_id: 'agent-1', kind: 'sequence' }],
       });
+      // live status (ADR-0027): a null turn_id (prompt not in the transcript yet) survives validation
+      expect(r.events.filter((e) => e.type === 'turn_started').map((e) => (e as { turn_id: string | null }).turn_id)).toEqual(['t1', null]);
     }
   });
 
   it('local types are assignable to the protocol input types (compile-time)', () => {
     const events: IngestEventInput[] = allEvents();
     const batch: IngestBatchInput = buildEnvelope(buildConfig({ endpoint: 'https://x.io', token: 'aiobs_c_x' }), allEvents());
-    expect(events.length + batch.events.length).toBe(16);
+    expect(events.length + batch.events.length).toBe(20);
   });
 
   it('token prefixes match the server: user and company tokens are accepted, the dropped team prefix is not (ADR-0022)', () => {

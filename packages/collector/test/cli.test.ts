@@ -53,13 +53,16 @@ describe('ai-obs cli', () => {
     const c = capture();
     expect(await main([], c.io)).toBe(1);
     expect(c.text()).toContain('Usage: ai-obs');
-    expect(await main(['--help'], capture().io)).toBe(0);
+    const help = capture();
+    expect(await main(['--help'], help.io)).toBe(0);
+    expect(help.text()).toContain('live [--cwd] [--once]');
     expect(await main(['bogus'], capture().io)).toBe(2);
     const paths = tmpHome();
     expect(await main(['status', '--nope'], capture().io, { paths })).toBe(2);
     expect(COMMANDS).toContain('hook');
     expect(COMMANDS).toContain('token');
     expect(COMMANDS).toContain('use');
+    expect(COMMANDS).toContain('live');
   });
 
   it('extracts --home from anywhere in argv', () => {

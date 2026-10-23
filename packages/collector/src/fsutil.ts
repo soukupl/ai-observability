@@ -38,3 +38,15 @@ export function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
 }
+
+/** Rejects when `p` has not settled after `ms` (it is not cancelled: it keeps running in the background). */
+export function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: NodeJS.Timeout;
+  return Promise.race([
+    p.finally(() => clearTimeout(timer)),
+    new Promise<T>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms} ms`)), ms);
+      timer.unref?.();
+    }),
+  ]);
+}

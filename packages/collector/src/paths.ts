@@ -50,6 +50,10 @@ export function aiObsPaths(home: string = resolveHome()) {
     app: join(home, 'app'),
     /** held by the single worker / flush process */
     workerLock: join(home, 'worker.lock'),
+    /** held while turn summaries are written (worker summary phase after its flush, or `ai-obs flush`; ADR-0027) */
+    summariesLock: join(home, 'summaries.lock'),
+    /** digests due for summarising, staged/<harness>/<ulid>.json (local only, mode 0600; ADR-0027) */
+    stagedSummaries: join(state, 'summaries', 'staged'),
   } as const;
 }
 

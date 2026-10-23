@@ -25,6 +25,11 @@ describe('claude-code transcript entries', () => {
     expect(slimEntry({ type: 'user', timestamp: ts, sessionId: 'other', message: { content: 'x' } }, 'mine')).toBeNull();
   });
 
+  it('keeps the prompt entry\'s promptId (matched to UserPromptSubmit prompt_id, ADR-0027); null when absent', () => {
+    expect(user('fix the bug', { promptId: 'p-1' })).toMatchObject({ k: 'prompt', promptId: 'p-1' });
+    expect(user('fix the bug')).toMatchObject({ k: 'prompt', promptId: null });
+  });
+
   it('reads Bash exit codes from tool results', () => {
     const r = (content: string, is_error: boolean) => {
       const e = user([{ type: 'tool_result', tool_use_id: 't', content, is_error }]);

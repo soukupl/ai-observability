@@ -94,6 +94,9 @@ importers:
 
   packages/collector:
     devDependencies:
+      '@ai-obs/db':
+        specifier: workspace:*
+        version: link:../db
       '@ai-obs/protocol':
         specifier: workspace:*
         version: link:../protocol

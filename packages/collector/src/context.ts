@@ -1,6 +1,6 @@
 import { resolve as resolvePath } from 'node:path';
 import type { CollectorContext, HarnessAdapter, StreamHolder } from './adapters/types.js';
-import { summarizeAndQueue } from './analysis/summaries.js';
+import { stageDigests } from './analysis/summaries.js';
 import type { CollectorConfig } from './config.js';
 import type { Logger } from './log.js';
 import { harnessStateDir, type AiObsPaths } from './paths.js';
@@ -96,11 +96,13 @@ export function createContext(deps: ContextDeps): CollectorContext {
       holder.stream = pk === null ? { kind: 'unresolved', cwd: holder.pkCwd, bind: d.bind } : { kind: 'project', pk, bind: d.bind };
       return holder.stream;
     },
-    async summarizeTurns(digests, key) {
+    scheduleSummaries(digests, key) {
       try {
-        await summarizeAndQueue(deps.adapter, digests, ctx, key);
+        stageDigests(deps.paths.state, deps.adapter.name, digests, key, ctx.now().getTime(), deps.log);
+        return true;
       } catch (err) {
-        deps.log.error('summaries: unexpected failure', { error: String(err) });
+        deps.log.error('summaries: cannot stage digests', { error: String(err).slice(0, 200) });
+        return false;
       }
     },
   };

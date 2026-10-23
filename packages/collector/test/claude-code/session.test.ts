@@ -156,7 +156,7 @@ describe('claude-code adapter: 3-turn session', () => {
     writeSession(h.projectDir, fx, { upTo: fx.turn2End }); // turn 3's prompt not written yet
     await h.hook('SessionStart', at(-1), { source: 'startup' });
     await h.hook('UserPromptSubmit', at(359.9), { prompt: "no, that's wrong - use exponential backoff" });
-    expect(h.events.map((e) => e.type)).toEqual(['session_start', 'turn', 'run', 'run', 'turn_outcome', 'turn', 'turn_outcome']);
+    expect(h.events.map((e) => e.type)).toEqual(['session_start', 'turn', 'run', 'run', 'turn_outcome', 'turn', 'turn_outcome', 'turn_started']);
     const patches = byType(h.events, 'turn_outcome');
     expect(patches[1]).toMatchObject({ turn_id: 'cc-fixture-turn-2', outcome: { status: 'abandoned', signals: ['user_interrupt', 'next_prompt_correction'] } });
     // turn 3 later: no second patch for turn 2

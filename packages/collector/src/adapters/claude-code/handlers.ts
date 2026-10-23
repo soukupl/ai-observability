@@ -2,7 +2,7 @@ import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import { looksLikeCorrection } from '../../analysis/corrections.js';
 import { summariesDue } from '../../analysis/summaries.js';
-import { sessionEndEvent, sessionStartEvent } from '../../events.js';
+import { sessionEndEvent, sessionStartEvent, turnStartedEvent } from '../../events.js';
 import type { CollectorContext, HookInvocation } from '../types.js';
 import { cachedVersion, type VersionProbe } from './detect.js';
 import {
@@ -16,6 +16,7 @@ import {
   settleTurns,
   subagentFailed,
   subagentFinished,
+  type PromptRef,
 } from './session.js';
 import { evictedUnsettledTurns, loadSession, newSessionState, saveSession, type SessionState } from './state.js';
 
@@ -36,9 +37,22 @@ interface Payload {
   reason?: unknown;
   prompt?: unknown;
   agent_id?: unknown;
+  /** UserPromptSubmit: the prompt's id, = the transcript prompt entry's `promptId` (ADR-0027) */
+  prompt_id?: unknown;
 }
 
 const str = (v: unknown) => (typeof v === 'string' && v ? v : null);
+
+/** A transcript prompt matched by time is at most this long before the UserPromptSubmit hook fired … */
+export const PROMPT_MATCH_BEFORE_MS = 10_000;
+/** … and at most this long after it. */
+export const PROMPT_MATCH_AFTER_MS = 1_000;
+
+/** Whether a transcript prompt is the one this UserPromptSubmit announced: prompt_id = promptId when both exist, else by time. */
+export function isHookPrompt(p: PromptRef, promptId: string | null, receivedAt: number): boolean {
+  if (promptId && p.promptId) return p.promptId === promptId;
+  return p.at >= receivedAt - PROMPT_MATCH_BEFORE_MS && p.at <= receivedAt + PROMPT_MATCH_AFTER_MS;
+}
 
 /** Where Claude Code keeps a session transcript when the payload does not say. */
 export function defaultTranscriptPath(claudeDir: string, cwd: string, sessionId: string): string {
@@ -85,12 +99,16 @@ export async function handleHook(event: HookInvocation, ctx: CollectorContext, d
   switch (event.hook) {
     case 'UserPromptSubmit': {
       if (subagent) break;
-      processTranscript(em, { mode: 'prompt', receivedAt });
+      const promptId = str(p.prompt_id);
+      const own = (q: PromptRef) => isHookPrompt(q, promptId, receivedAt);
+      const { prompts } = processTranscript(em, { mode: 'prompt', receivedAt, ownPrompt: own });
       const prompt = typeof p.prompt === 'string' ? p.prompt : null;
       if (prompt !== null) {
         const human = !/^\s*<task-notification>/.test(prompt);
         followUpTurns(em, { human, correction: human && looksLikeCorrection(prompt), revertOf: () => false }, receivedAt);
       }
+      // live status (ADR-0027): the session is working until this turn's `turn` arrives
+      em.events.push(turnStartedEvent({ harness: ctx.harness, sessionId, turnId: prompts.filter(own).at(-1)?.uuid ?? null, startedAt: receivedAt }));
       break;
     }
     case 'Stop':
@@ -139,8 +157,10 @@ function endSession(em: Emitter, reason: string, at: number): void {
 
 /**
  * Enqueue into the session's stream (pinned at its first hook, which always carries `session_start`;
- * `capturedAt` = that job's received_at; C12, C15), save the cursor and the pin, then summarize the waiting
- * turns when they are due (session over, 10 waiting, or the first has waited 10 minutes; ADR-0023).
+ * `capturedAt` = that job's received_at; C12, C15), hand the waiting turns to the summariser when they are
+ * due (session over, 10 waiting, or the first has waited 10 minutes; ADR-0023), then save the cursor and the
+ * pin. The digests are staged durably before the state forgets them; the worker summarises them after its
+ * flush, so a slow summary never delays the next hook's events (ADR-0027).
  */
 async function finish(em: Emitter, ctx: CollectorContext, capturedAt: number): Promise<void> {
   const st = em.state;
@@ -151,14 +171,12 @@ async function finish(em: Emitter, ctx: CollectorContext, capturedAt: number): P
   const summarize = summariesDue({ ended: st.ended, pending: st.digests.length, since: st.digestsSince, now: capturedAt });
   const key = em.events.length || summarize ? await ctx.streamFor(st, capturedAt) : null;
   if (em.events.length) ctx.queue.enqueue(em.events, key);
-  saveSession(ctx.state, st);
-  if (summarize) {
-    const digests = st.digests;
+  // durable before the state forgets them (ADR-0027); the worker summarises after its flush
+  if (summarize && ctx.scheduleSummaries(st.digests, key)) {
     st.digests = [];
     delete st.digestsSince;
-    saveSession(ctx.state, st);
-    await ctx.summarizeTurns(digests, key); // retries failures itself
   }
+  saveSession(ctx.state, st);
 }
 
 /** SessionStart sweep: sessions silent for 24 h without SessionEnd get session_end "crashed". */

@@ -19,6 +19,7 @@ import {
   type SkillCounts,
   type TurnEvent,
   type TurnOutcomeEvent,
+  type TurnStartedEvent,
   type TurnSummaryEvent,
   type UsageEntry,
 } from './protocol-types.js';
@@ -132,6 +133,20 @@ export function sessionStartEvent(i: Common & { sessionId: string; at: TimeInput
     ...(i.harnessVersion ? { harness_version: clip(i.harnessVersion, 128) } : {}),
     ...(project ? { project } : {}),
     at: iso(at),
+    ...extOf(i),
+  };
+}
+
+/** Live status (ADR-0027): sent by the prompt-submit hook. Id seed `turn_started|<session>` + hook time (stable across replays, ADR-0011). */
+export function turnStartedEvent(i: Common & { sessionId: string; turnId: string | null; startedAt: TimeInput }): TurnStartedEvent {
+  const at = toMs(i.startedAt);
+  return {
+    event_id: id(i, `turn_started|${i.sessionId}`, at),
+    type: 'turn_started',
+    harness: i.harness,
+    session_id: clip(i.sessionId, 256),
+    turn_id: i.turnId ? clip(i.turnId, 256) : null,
+    started_at: iso(at),
     ...extOf(i),
   };
 }

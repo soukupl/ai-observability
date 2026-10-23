@@ -47,7 +47,7 @@ These come from the input schemas embedded in the 0.154.0 binary.
 | tool-scoped and turn-scoped (in a sub-agent) | `agent_id`, `agent_type`, optional |
 | `SessionStart` | `source`: `startup`, `resume`, `clear` or `compact` |
 | `SessionEnd` | `reason`, which is always `"other"` today; no `turn_id` or `model` |
-| `UserPromptSubmit` | `turn_id`, `prompt` |
+| `UserPromptSubmit` | `turn_id`, `prompt`; `turn_id` → `turn_started.turn_id` (sent at the hook time for live status, ADR-0027; null when absent) |
 | `Stop` | `turn_id`, `stop_hook_active`, `last_assistant_message` |
 | `SubagentStart` | `turn_id`, `agent_id`, `agent_type` |
 | `SubagentStop` | `turn_id`, `agent_id`, `agent_type`, `agent_transcript_path`, `stop_hook_active`, `last_assistant_message` |

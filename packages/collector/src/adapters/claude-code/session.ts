@@ -30,9 +30,18 @@ export interface ProcessOptions {
   receivedAt: number;
   /** StopFailure: the turn ended with an API error */
   stopFailure?: boolean;
+  /** 'prompt' mode: the hook's own prompt; its segment never ends at UserPromptSubmit (ADR-0027). */
+  ownPrompt?: (p: PromptRef) => boolean;
 }
 
-interface Segment {
+/** A prompt entry read by processTranscript (ADR-0027: matched to the UserPromptSubmit that announced it). */
+export interface PromptRef {
+  uuid: string;
+  at: number;
+  promptId: string | null;
+}
+
+export interface Segment {
   start: number;
   prompt: Extract<SlimEntry, { k: 'prompt' }>;
   entries: SlimEntry[];
@@ -66,7 +75,8 @@ export class Emitter {
   }
 }
 
-export function processTranscript(em: Emitter, opts: ProcessOptions): void {
+/** Returns the prompts of the segments read, in transcript order. */
+export function processTranscript(em: Emitter, opts: ProcessOptions): { prompts: PromptRef[] } {
   const st = em.state;
   const read = readTranscript(st.transcriptPath, st.offset, st.sessionId);
   noteTitles(st, read.titles);
@@ -87,6 +97,7 @@ export function processTranscript(em: Emitter, opts: ProcessOptions): void {
     if (active) finalizeTurn(em, seg, Boolean(opts.stopFailure) && isLast && opts.mode === 'stop', opts.mode === 'end');
   }
   st.offset = done < segments.length ? segments[done]!.start : read.end;
+  return { prompts: segments.map((s) => ({ uuid: s.prompt.uuid, at: s.prompt.at, promptId: s.prompt.promptId })) };
 }
 
 /** Keeps the latest title of each kind read from the transcript (ADR-0026). */
@@ -115,7 +126,7 @@ export function emitSessionTitle(em: Emitter): void {
  * A prompt starts a new segment, except a message Claude Code injects itself (task notification)
  * into a turn that is still running (no end-of-turn record since its prompt): that is part of the turn.
  */
-function addLine(l: TranscriptLine, pre: SlimEntry[], segments: Segment[]): void {
+export function addLine(l: TranscriptLine, pre: SlimEntry[], segments: Segment[]): void {
   const cur = segments.at(-1);
   if (l.entry.k !== 'prompt') {
     (cur?.entries ?? pre).push(l.entry);
@@ -129,6 +140,8 @@ function addLine(l: TranscriptLine, pre: SlimEntry[], segments: Segment[]): void
 /** Whether the last (not yet followed by a prompt) segment is a finished turn. */
 function endsHere(seg: Segment, active: boolean, opts: ProcessOptions): boolean {
   if (opts.mode === 'end') return true;
+  // The prompt this UserPromptSubmit announced is running (a late worker may already see its replies); its Stop ends it.
+  if (opts.mode === 'prompt' && opts.ownPrompt?.({ uuid: seg.prompt.uuid, at: seg.prompt.at, promptId: seg.prompt.promptId })) return false;
   // A prompt typed after the hook fired belongs to the next turn; an empty segment has not run yet.
   return active && seg.prompt.at < opts.receivedAt;
 }

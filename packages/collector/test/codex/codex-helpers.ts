@@ -2,6 +2,7 @@ import { chmodSync, copyFileSync, mkdirSync, readFileSync, writeFileSync } from 
 import { join } from 'node:path';
 import { createCodexAdapter, type CodexAdapterDeps } from '../../src/adapters/codex/index.js';
 import type { CollectorContext, HarnessAdapter, HookInvocation } from '../../src/adapters/types.js';
+import { runSummaryBatch } from '../../src/analysis/summaries.js';
 import { createContext } from '../../src/context.js';
 import { nullLogger } from '../../src/log.js';
 import type { IngestEvent } from '../../src/protocol-types.js';
@@ -26,8 +27,10 @@ export interface CodexTestEnv {
   events: IngestEvent[];
   /** the stream key of every enqueue call, in order */
   keys: Array<StreamKey | null>;
-  /** runs one hook through the adapter like the worker does (incl. the sweep after SessionStart) */
+  /** runs one hook through the adapter like the worker does (incl. the sweep after SessionStart and the summary phase) */
   hook(name: string, payload: Record<string, unknown>, receivedAt?: string): Promise<void>;
+  /** the worker's summary phase (ADR-0027): summarises the staged digests into ctx.queue */
+  summaries(): Promise<{ summarized: number; pending: number } | null>;
   writeMain(lines: readonly string[]): void;
   writeChild(lines: readonly string[]): void;
 }
@@ -63,6 +66,13 @@ export function codexTestEnv(opts: { now?: string; deps?: CodexAdapterDeps } = {
     now: () => now,
     resolveProject: async () => 'github.com/acme/app',
   });
+  const summaries = () =>
+    runSummaryBatch(adapter, ctx, {
+      commit: async (gs) => {
+        for (const g of gs) ctx.queue.enqueue(g.events, g.key);
+        return true;
+      },
+    });
   return {
     codexHome,
     mainPath,
@@ -75,7 +85,9 @@ export function codexTestEnv(opts: { now?: string; deps?: CodexAdapterDeps } = {
       const inv: HookInvocation = { harness: 'codex', hook: name, payload: { session_id: SESSION, transcript_path: mainPath, cwd: '/work/acme-app', ...payload }, cwd: '/work/acme-app', env: {}, receivedAt };
       await adapter.handleHook(inv, ctx);
       if (adapter.sessionStartHooks.includes(name)) await adapter.sweepCrashedSessions(ctx);
+      await summaries();
     },
+    summaries,
     writeMain: (lines) => writeFileSync(mainPath, lines.map((l) => `${l}\n`).join('')),
     writeChild: (lines) => writeFileSync(childPath, lines.map((l) => `${l}\n`).join('')),
   };

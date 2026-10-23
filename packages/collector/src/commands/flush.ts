@@ -1,9 +1,9 @@
 import { ADAPTERS } from '../adapters/index.js';
-import { pendingSummariesPath, summarizeAndQueue } from '../analysis/summaries.js';
+import { countStagedDigests, pendingSummariesPath, runSummaryBatch } from '../analysis/summaries.js';
 import { loadConfig } from '../config.js';
 import { createContext } from '../context.js';
 import { errorMessage, readJsonFile } from '../fsutil.js';
-import { acquireLock } from '../lock.js';
+import { acquireLock, tryLock } from '../lock.js';
 import { createLogger } from '../log.js';
 import { RESOLVE_TIMEOUT_MS } from '../project-key.js';
 import { effectiveCompany, loadRouting, type HeldReason } from '../projects.js';
@@ -15,8 +15,9 @@ const WAITING: readonly HeldReason[] = ['unassigned', 'dangling', 'projects-unre
 /**
  * `ai-obs flush` — finish what is waiting, then send the queue now, per token, ignoring the retry
  * backoff and retrying refused tokens once. Before sending it runs each adapter's idle-session sweep
- * (Codex ends sessions idle for 1 h, Claude Code ones silent for 24 h) and retries pending summaries,
- * so data does not wait for the next hook (design §2.8).
+ * (Codex ends sessions idle for 1 h, Claude Code ones silent for 24 h) and writes the staged and pending
+ * summaries, so data does not wait for the next hook (design §2.8). While the background worker's summary
+ * phase holds summaries.lock, it leaves the summaries to it (ADR-0027).
  */
 export async function flushCommand(args: readonly string[], io: Io, deps: CliDeps): Promise<number> {
   const { values } = parseOptions(args, { wait: { type: 'string', default: '30' } });
@@ -27,7 +28,7 @@ export async function flushCommand(args: readonly string[], io: Io, deps: CliDep
   }
   const release = await acquireLock(deps.paths.workerLock, Number(values.wait) * 1000, 15 * 60_000);
   if (!release) {
-    io.out('the background worker is busy (e.g. summarizing); it flushes when done');
+    io.out('the background worker is busy (e.g. a large backlog); it flushes when done');
     return 0;
   }
   try {
@@ -36,21 +37,36 @@ export async function flushCommand(args: readonly string[], io: Io, deps: CliDep
     const transport = deps.transport;
     const resolveProject = deps.resolveProjectKey ? (cwd: string) => deps.resolveProjectKey!(cwd, { timeoutMs: RESOLVE_TIMEOUT_MS }) : undefined;
 
-    for (const adapter of deps.adapters ?? ADAPTERS) {
-      const ctx = createContext({ adapter, config, paths: deps.paths, queue: store, log, ...(resolveProject ? { resolveProject } : {}) });
-      try {
-        const before = store.stats().events;
-        await adapter.sweepCrashedSessions(ctx);
-        const swept = store.stats().events - before;
-        if (swept > 0) io.out(`${adapter.displayName}: idle-session sweep queued ${swept} events`);
-        const waiting = (readJsonFile<unknown[]>(pendingSummariesPath(deps.paths.state, adapter.name)) ?? []).length;
-        if (waiting) {
-          const r = await summarizeAndQueue(adapter, [], ctx);
-          io.out(`${adapter.displayName}: summaries ${r.summarized} of ${waiting} done, ${r.pending} still waiting`);
+    const sum = tryLock(deps.paths.summariesLock, 15 * 60_000);
+    if (!sum) io.out('summaries are being written by the background worker; they are sent when done');
+    try {
+      for (const adapter of deps.adapters ?? ADAPTERS) {
+        const ctx = createContext({ adapter, config, paths: deps.paths, queue: store, log, ...(resolveProject ? { resolveProject } : {}) });
+        try {
+          const before = store.stats().events;
+          await adapter.sweepCrashedSessions(ctx);
+          const swept = store.stats().events - before;
+          if (swept > 0) io.out(`${adapter.displayName}: idle-session sweep queued ${swept} events`);
+          if (!sum) continue;
+          const waiting =
+            (readJsonFile<unknown[]>(pendingSummariesPath(deps.paths.state, adapter.name)) ?? []).length + countStagedDigests(deps.paths.state, adapter.name);
+          if (waiting) {
+            // this process holds worker.lock: the summaries go straight into the queue it sends below
+            const r = await runSummaryBatch(adapter, ctx, {
+              retry: true,
+              commit: async (groups) => {
+                for (const g of groups) store.enqueue(g.events, g.key);
+                return true;
+              },
+            });
+            io.out(`${adapter.displayName}: summaries ${r?.summarized ?? 0} of ${waiting} done, ${r?.pending ?? waiting} still waiting`);
+          }
+        } catch (err) {
+          log.warn('flush: sweep / summaries failed', { harness: adapter.name, error: errorMessage(err).slice(0, 200) });
         }
-      } catch (err) {
-        log.warn('flush: sweep / summaries failed', { harness: adapter.name, error: errorMessage(err).slice(0, 200) });
       }
+    } finally {
+      sum?.();
     }
 
     const r = await flushQueue(

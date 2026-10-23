@@ -16,7 +16,7 @@ import {
   type RoutingView,
 } from '../projects.js';
 import { COLLECTOR_VERSION, compareVersions } from '../version.js';
-import { pendingSummariesPath } from '../analysis/summaries.js';
+import { countStagedDigests, pendingSummariesPath } from '../analysis/summaries.js';
 import {
   ago,
   formatBytes,
@@ -184,8 +184,10 @@ export async function statusCommand(args: readonly string[], io: Io, deps: CliDe
   const stale = staleRuntime(deps.paths);
   if (stale) io.out(`runtime    ${stale}`);
   io.out(`jobs       ${listJobs(deps.paths.jobs).length} pending`);
-  const pending = ['claude-code', 'codex'].map((h) => (readJsonFile<unknown[]>(pendingSummariesPath(deps.paths.state, h)) ?? []).length);
-  io.out(`summaries  ${pending.reduce((a, b) => a + b, 0)} waiting for retry`);
+  const harnesses = ['claude-code', 'codex'];
+  const retry = harnesses.reduce((n, h) => n + (readJsonFile<unknown[]>(pendingSummariesPath(deps.paths.state, h)) ?? []).length, 0);
+  const due = harnesses.reduce((n, h) => n + countStagedDigests(deps.paths.state, h), 0);
+  io.out(`summaries  ${retry} waiting for retry, ${due} due`);
   if (config.tokens.length === 1) {
     const d = tokenDelivery(readDelivery(deps.paths), config.tokens[0]!);
     io.out(`last send  ${ago(d.last_success_at, nowMs)}${d.last_result ? ` (accepted ${d.last_result.accepted}, duplicates ${d.last_result.duplicates}, rejected ${d.last_result.rejected})` : ''}`);

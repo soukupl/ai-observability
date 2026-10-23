@@ -3,16 +3,20 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { StreamHolder } from '../src/adapters/types.js';
+import { buildDigest } from '../src/analysis/digest.js';
+import { listStagedDigests, pendingSummariesPath, stageDigests } from '../src/analysis/summaries.js';
 import { writeCache } from '../src/cc-cache.js';
 import { newMachineConfig, saveConfig, type TokenEntry } from '../src/config.js';
-import { sessionStartEvent } from '../src/events.js';
+import { sessionStartEvent, turnEvent } from '../src/events.js';
 import { writeJob } from '../src/jobs.js';
+import { nullLogger } from '../src/log.js';
 import { tryLock } from '../src/lock.js';
 import { streamDirName } from '../src/projects.js';
+import type { StreamKey } from '../src/queue.js';
 import { ulid } from '../src/ulid.js';
 import { runWorker } from '../src/worker.js';
 import { ACME, cleanupHomes, fakeAdapter, okResponder, startServer, tmpHome, writeTestConfig } from './helpers.js';
-import { bound } from './queue-helpers.js';
+import { bound, OPEN } from './queue-helpers.js';
 
 const closers: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -193,5 +197,200 @@ describe('runWorker', () => {
     writeJob(paths.jobs, job('Stop'), 1000);
     await runWorker({ paths, adapters: [fakeAdapter()], flush: false });
     expect(readdirSync(paths.nudged)).toEqual(['new']);
+  });
+});
+
+/** Like the real adapters: enqueues a `turn` per hook and stages its digest with ctx.scheduleSummaries (ADR-0027). */
+function summarizingAdapter(summarize: (turnIds: string[]) => Promise<Map<string, string>> | Map<string, string>, turns = 1) {
+  const adapter = fakeAdapter({ summarize: async (d) => summarize(d.map((x) => x.turnId)) });
+  const sessions = new Map<string, StreamHolder>();
+  adapter.handleHook = async (event, ctx) => {
+    adapter.calls.push(event);
+    const sid = (event.payload as { session_id: string }).session_id;
+    const holder = sessions.get(sid) ?? { pkCwd: event.cwd };
+    sessions.set(sid, holder);
+    const key = await ctx.streamFor(holder, Date.parse(event.receivedAt));
+    const turnId = `${sid}-turn`;
+    const t = Date.parse(event.receivedAt);
+    ctx.queue.enqueue(
+      [turnEvent({ harness: ctx.harness, sessionId: sid, turnId, startedAt: t - 1000, endedAt: t, model: 'claude-opus-5-5', effort: null, usage: [], phases: {}, outcome: { status: 'success', signals: [], provisional: true } })],
+      key,
+    );
+    const ids = turns === 1 ? [turnId] : Array.from({ length: turns }, (_, i) => `${turnId}-${String(i).padStart(3, '0')}`);
+    expect(ctx.scheduleSummaries(ids.map((id) => buildDigest({ turnId: id, prompt: 'p', toolNames: [], lastAssistantMessage: 'm' })), key)).toBe(true);
+  };
+  return adapter;
+}
+
+const resolveProject = async () => 'github.com/acme/billing';
+const KEY: StreamKey = { kind: 'project', pk: 'github.com/acme/billing', bind: OPEN };
+const sentTypes = (srv: { received: Array<{ url: string; json: unknown }> }) =>
+  srv.received.filter((x) => x.url === '/api/v1/ingest').map((x) => (x.json as { events: Array<{ type: string }> }).events.map((e) => e.type));
+const stagedOf = (paths: ReturnType<typeof tmpHome>) => listStagedDigests(paths.state, 'claude-code').map((f) => readFileSync(f, 'utf8'));
+
+describe('runWorker: summary phase after the flush (ADR-0027)', () => {
+  it('sends the turn first, then summarises outside the job and sends the summary in a second POST', async () => {
+    const srv = await startServer(okResponder('plain'));
+    closers.push(srv.close);
+    const paths = tmpHome();
+    writeTestConfig(paths, srv.url);
+    writeJob(paths.jobs, job('Stop'), 1000);
+    let postsAtSummarize = -1;
+    const adapter = summarizingAdapter((ids) => {
+      postsAtSummarize = sentTypes(srv).length;
+      return new Map(ids.map((id) => [id, 'Fixed the expiry check']));
+    });
+    const r = await runWorker({ paths, adapters: [adapter], resolveProject });
+    expect(postsAtSummarize).toBe(1);
+    expect(sentTypes(srv)).toEqual([['turn'], ['turn_summary']]);
+    expect(r.summaries).toMatchObject({ summarized: 1, flush: { status: 'ok', sent: 1 } });
+    expect(stagedOf(paths)).toEqual([]);
+    expect(JSON.parse(readFileSync(pendingSummariesPath(paths.state, 'claude-code'), 'utf8'))).toEqual([]);
+  });
+
+  it('summarises without worker.lock; a job written meanwhile is processed and flushed in the same run', async () => {
+    const srv = await startServer(okResponder('plain'));
+    closers.push(srv.close);
+    const paths = tmpHome();
+    writeTestConfig(paths, srv.url);
+    writeJob(paths.jobs, job('Stop'), 1000);
+    let lockFree = false;
+    let wrote = false;
+    const adapter = summarizingAdapter((ids) => {
+      const release = tryLock(paths.workerLock);
+      lockFree = release !== null;
+      release?.();
+      if (!wrote) {
+        wrote = true;
+        writeJob(paths.jobs, job('Stop', 's2'), 3000);
+      }
+      return new Map(ids.map((id) => [id, `S ${id}`]));
+    });
+    const r = await runWorker({ paths, adapters: [adapter], resolveProject });
+    expect(lockFree).toBe(true);
+    expect(adapter.calls.map((c) => (c.payload as { session_id: string }).session_id)).toEqual(['s1', 's2']);
+    expect(r.jobs).toBe(2);
+    expect(readdirSync(paths.jobs)).toEqual([]);
+    expect(sentTypes(srv).flat().sort()).toEqual(['turn', 'turn', 'turn_summary', 'turn_summary']);
+    expect(r.summaries?.summarized).toBe(2);
+  });
+
+  it('worker.lock held across the commit: nothing changes; the next run sends the summary', async () => {
+    const srv = await startServer(okResponder('plain'));
+    closers.push(srv.close);
+    const paths = tmpHome();
+    writeTestConfig(paths, srv.url);
+    writeJob(paths.jobs, job('Stop'), 1000);
+    let hold: (() => void) | null = null;
+    let staged: string[] = [];
+    const adapter = summarizingAdapter((ids) => {
+      staged = stagedOf(paths);
+      hold ??= tryLock(paths.workerLock); // another worker / `ai-obs flush` takes it now
+      return new Map(ids.map((id) => [id, `S ${id}`]));
+    });
+    const r = await runWorker({ paths, adapters: [adapter], resolveProject, summaryCommitWaitMs: 400 });
+    expect(hold).not.toBeNull();
+    expect(r.summaries).toBeUndefined();
+    expect(staged).toHaveLength(1);
+    expect(stagedOf(paths)).toEqual(staged);
+    expect(existsSync(pendingSummariesPath(paths.state, 'claude-code'))).toBe(false);
+    expect(sentTypes(srv)).toEqual([['turn']]);
+
+    hold!();
+    const next = await runWorker({ paths, adapters: [adapter], resolveProject });
+    expect(next.summaries?.summarized).toBe(1);
+    expect(sentTypes(srv)).toEqual([['turn'], ['turn_summary']]);
+    expect(stagedOf(paths)).toEqual([]);
+  });
+
+  it('a backlog slower than the timeout still commits: no chunk starts after it, the rest waits as pending', async () => {
+    const paths = tmpHome();
+    writeTestConfig(paths);
+    writeJob(paths.jobs, job('Stop'), 1000);
+    let calls = 0;
+    const adapter = summarizingAdapter(async (ids) => {
+      calls++;
+      await new Promise((r) => setTimeout(r, 300)); // one chunk outlasts the whole timeout
+      return new Map(ids.map((id) => [id, `S ${id}`]));
+    }, 51);
+    const r = await runWorker({ paths, adapters: [adapter], flush: false, resolveProject, summaryTimeoutMs: 100 });
+    expect(calls).toBe(1);
+    expect(r.summaries?.summarized).toBe(25);
+    expect(stagedOf(paths)).toEqual([]);
+    const pending = JSON.parse(readFileSync(pendingSummariesPath(paths.state, 'claude-code'), 'utf8')) as Array<{ attempts: number }>;
+    expect(pending).toHaveLength(26);
+    expect(pending.every((p) => p.attempts === 0)).toBe(true);
+  });
+
+  it('a job written during a commit is processed in the same run even when a later batch makes no progress', async () => {
+    const paths = tmpHome();
+    writeTestConfig(paths);
+    writeJob(paths.jobs, job('Stop'), 1000);
+    let wrote = false;
+    const cc = summarizingAdapter((ids) => {
+      if (!wrote) {
+        wrote = true;
+        writeJob(paths.jobs, job('Stop', 's2'), 3000); // its worker found worker.lock taken by our commit and left
+      }
+      return new Map(ids.map((id) => [id, `S ${id}`]));
+    });
+    let hold: (() => void) | null = null;
+    const codex = fakeAdapter({
+      name: 'codex',
+      summarize: async (d) => {
+        hold ??= tryLock(paths.workerLock); // another worker takes it: this commit is refused
+        return new Map(d.map((x) => [x.turnId, 'x']));
+      },
+    });
+    stageDigests(paths.state, 'codex', [buildDigest({ turnId: 'cx-1', prompt: 'p', toolNames: [], lastAssistantMessage: 'm' })], KEY, Date.now(), nullLogger);
+    const log = {
+      info() {},
+      warn(msg: string) {
+        if (msg.includes('worker busy')) hold?.(); // that worker is done by the time we look again
+      },
+      error() {},
+    };
+    const r = await runWorker({ paths, adapters: [cc, codex], flush: false, resolveProject, log, summaryCommitWaitMs: 200 });
+    expect(hold).not.toBeNull();
+    expect(cc.calls.map((c) => (c.payload as { session_id: string }).session_id)).toEqual(['s1', 's2']);
+    expect(r.jobs).toBe(2);
+    expect(readdirSync(paths.jobs)).toEqual([]);
+    expect(listStagedDigests(paths.state, 'codex')).toHaveLength(1);
+  });
+
+  it('summaries.lock held by another process: the staged digests wait for it', async () => {
+    const paths = tmpHome();
+    writeTestConfig(paths);
+    writeJob(paths.jobs, job('Stop'), 1000);
+    let calls = 0;
+    const adapter = summarizingAdapter((ids) => {
+      calls++;
+      return new Map(ids.map((id) => [id, `S ${id}`]));
+    });
+    const release = tryLock(paths.summariesLock)!;
+    const r = await runWorker({ paths, adapters: [adapter], flush: false, resolveProject });
+    expect(calls).toBe(0);
+    expect(r.summaries).toBeUndefined();
+    expect(stagedOf(paths)).toHaveLength(1);
+    release();
+    const next = await runWorker({ paths, adapters: [adapter], flush: false, resolveProject });
+    expect(calls).toBe(1);
+    expect(next.summaries?.summarized).toBe(1);
+    expect(stagedOf(paths)).toEqual([]);
+  });
+
+  it('summaries: false skips the phase', async () => {
+    const paths = tmpHome();
+    writeTestConfig(paths);
+    writeJob(paths.jobs, job('Stop'), 1000);
+    let calls = 0;
+    const adapter = summarizingAdapter(() => {
+      calls++;
+      return new Map();
+    });
+    const r = await runWorker({ paths, adapters: [adapter], flush: false, summaries: false, resolveProject });
+    expect(r.jobs).toBe(1);
+    expect(calls).toBe(0);
+    expect(stagedOf(paths)).toHaveLength(1);
   });
 });

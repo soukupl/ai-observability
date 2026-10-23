@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { validateBatch } from '@ai-obs/protocol';
 import { createClaudeCodeAdapter, type ClaudeCodeAdapterOptions } from '../../src/adapters/claude-code/index.js';
 import type { CollectorContext, HarnessAdapter, HookInvocation } from '../../src/adapters/types.js';
+import { runSummaryBatch } from '../../src/analysis/summaries.js';
 import { createContext } from '../../src/context.js';
 import { createLogger } from '../../src/log.js';
 import type { IngestEvent } from '../../src/protocol-types.js';
@@ -24,8 +25,10 @@ export interface Harness {
   keys: Array<StreamKey | null>;
   claudeDir: string;
   projectDir: string;
-  /** fires a hook with `receivedAt` = fixture time */
+  /** fires a hook with `receivedAt` = fixture time, then runs the summary phase like the worker does after its flush */
   hook(name: string, receivedAtMs: number, payload?: Record<string, unknown>): Promise<void>;
+  /** the worker's summary phase (ADR-0027): summarises the staged digests into ctx.queue */
+  summaries(): Promise<{ summarized: number; pending: number } | null>;
 }
 
 export function setup(opts: ClaudeCodeAdapterOptions & { now?: () => Date } = {}): Harness {
@@ -52,6 +55,13 @@ export function setup(opts: ClaudeCodeAdapterOptions & { now?: () => Date } = {}
     resolveProject: async () => 'github.com/acme/billing',
   });
   const transcript = join(projectDir, `${SESSION}.jsonl`);
+  const summaries = () =>
+    runSummaryBatch(adapter, ctx, {
+      commit: async (gs) => {
+        for (const g of gs) ctx.queue.enqueue(g.events, g.key);
+        return true;
+      },
+    });
   return {
     adapter,
     ctx,
@@ -69,7 +79,9 @@ export function setup(opts: ClaudeCodeAdapterOptions & { now?: () => Date } = {}
         receivedAt: new Date(receivedAtMs).toISOString(),
       };
       await adapter.handleHook(inv, ctx);
+      await summaries();
     },
+    summaries,
   };
 }
 

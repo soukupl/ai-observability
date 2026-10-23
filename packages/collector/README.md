@@ -84,6 +84,19 @@ cd ~/work/billing && ai-obs use acme                                            
   With another token already registered, `--name` is required and the token sends nothing until
   `ai-obs token confirm <name>` (or a later fetch) proves its company.
 
+### Upgrading to 0.4
+
+Version 0.4 adds the live session status (ADR-0027). The collector sends a `turn_started` event when you submit a prompt
+(Claude Code `UserPromptSubmit`, Codex `userpromptsubmit`; never from a sub-agent), so the dashboard's "Active now" strip
+and session page can tell a working session from an idle one, and `ai-obs live` shows the sessions on this machine. It
+also moves summaries out of the hook job: a finished turn is no longer delayed while a summary is written (see "How hooks
+work"). Run `npx @soukupl/ai-obs@latest init` to refresh the hook runtime; the hook list does not change, so there is
+**no need to re-init the hooks** and Codex needs no new trust. Upgrade the server (migration 0017) first: an older
+server rejects `turn_started` per event and keeps the rest of the batch, so until then only the live status is lost;
+`MIN_COLLECTOR_VERSION` can stay at 0.2.0, since older collectors keep working but send no `turn_started`, so their
+sessions never show as working. The collector has a devDependency on `@ai-obs/db` for one test (it keeps the local price
+table equal to the dashboard's); the runtime still has no dependencies.
+
 ### Upgrading to 0.3
 
 Version 0.3 adds session titles (ADR-0026): the Claude Code adapter sends the session's `/rename` title (or Claude Code's
@@ -150,8 +163,9 @@ Options:
 | `use <name> [--project-dir <dir>]` | Assign this repository (key: remote, else top level, else path) to a token. Flags: `--move-queued` (also move data recorded under its previous token), `--all-held` (every repository whose data is waiting) |
 | `use --none [--discard-queued]` / `use --clear` / `use --reset-projects` | Stop recording this repository (keep or delete its queue) / remove its choice / set a damaged `projects.json` aside |
 | `doctor` | Checks the config, each token (endpoint, collector-config, rejection, company), the server's minimum version, this project's token, each harness (installed, version supported, hooks installed), the hook runtime, the queue and the last send. Also checks that the node binary and script baked into the installed hook commands still exist (✗ with "run `ai-obs init` again" when they do not), and for Codex whether the hooks are still waiting to be trusted via `/hooks` (`!`). Prints ✓, ! or ✗ per check and exits 1 if any check shows ✗ |
-| `status` | Shows local state without using the network: tokens and their state (a rejected or suspended token is marked), this project's token, queue size per token and what is waiting or kept (unassigned, opted out, unconfirmed, pre-upgrade), dropped events, pending hook jobs, summaries waiting for retry, last send and last error |
-| `flush [--wait <s>]` | First runs every adapter's idle-session sweep (Codex ends sessions idle for 1 h, Claude Code ones silent for 24 h) and retries pending summaries, then sends the queue now, ignores the retry backoff and retries a rejected token once. Held data stays held (exit 0) |
+| `status` | Shows local state without using the network: tokens and their state (a rejected or suspended token is marked), this project's token, queue size per token and what is waiting or kept (unassigned, opted out, unconfirmed, pre-upgrade), dropped events, pending hook jobs, summaries (`<n> waiting for retry, <m> due`: due = staged digests not yet summarised), last send and last error |
+| `flush [--wait <s>]` | First runs every adapter's idle-session sweep (Codex ends sessions idle for 1 h, Claude Code ones silent for 24 h) and writes the staged and pending summaries (`<Harness>: summaries X of Y done, Z still waiting`; while the background worker holds `summaries.lock` it prints that the worker is writing them and skips this), then sends the queue now, ignores the retry backoff and retries a rejected token once. Held data stays held (exit 0) |
+| `live [--cwd] [--once]` | Watch the Claude Code and Codex sessions running on this machine: a table redrawn about once per second (alternate screen, in place; `q`, `Q` or Ctrl-C quits and restores the terminal). Local only: no network, nothing written, hook state files and offsets untouched, works without a token. `--cwd` narrows to the current git repository (or the directory itself outside one). `--once`, or a stdin or stdout that is not a terminal, prints one frame without escape codes and exits 0; on a non-terminal it is cut at 200 columns, with `--once` on a terminal at the terminal width. An unknown flag exits 2 with the usage text. Details below |
 | `uninstall [--purge [--yes]] [--project-dir <dir>]` | Removes our hooks from user scope and from the current repo. `--purge` also deletes `~/.ai-obs`, including tokens, assignments and any unsent events |
 | `hook <harness> <hook>` | Internal. Harness hooks call it. It always exits 0 |
 
@@ -169,7 +183,7 @@ Options:
 | | Queue caps: ~50 MB for the whole queue (oldest segment first) and 30 days for streams that can be sent now, counted from when the stream became sendable (`sendable_since` in its `stream.json`), so waiting data released by `use` or a confirmed / unblocked token gets its full 30 days. Waiting, rejected, unconfirmed and opted-out streams are exempt from the age cap. Every drop is counted in `state/dropped.json` and shown in `status`, `doctor` and `flush`, and once in the next SessionStart text (`state/dropped-shown.json`) |
 | `jobs/*.v2.json` | Hook invocations waiting for the worker (0.1.x wrote `<id>.json`, still read). They hold the raw hook payload and stay on this machine |
 | `state/<harness>/<session>.json` | Per-session adapter state, such as transcript cursors, provisional outcomes and the session's pinned stream |
-| `state/summaries/<harness>.json` | Turn digests whose summary failed, with their stream key. They are retried for up to 5 attempts or 7 days and stay on this machine |
+| `state/summaries/<harness>.json` | Turn digests whose summary failed or was not tried yet, with their stream key. They are retried for up to 5 attempts or 7 days (staged digests expire after 7 days too) and stay on this machine |
 | `state/collector-config/<name>.json` | Cached collector-config per token. TTL 6 h; after a failed fetch, the next try waits 10 min |
 | `state/delivery.json` | Per token: last attempt, last success, last error, backoff and a `blocked` flag (401 / 403) |
 | `state/dropped.json` | Counters of events dropped by the size cap, split into waiting and sendable |
@@ -178,7 +192,9 @@ Options:
 | `state/pre-upgrade.json` | Number of batches moved to `queue/dead/pre-upgrade/` and whether it was reported |
 | `log/collector.log` | Errors and warnings from hooks and the worker. Rotated at 1 MB. Prompts and paths are never logged |
 | `app/` | The collector copy that hooks run |
+| `state/summaries/staged/<harness>/<ulid>.json` | Digests due for a summary (mode 0600, local only). The hook job writes them before it clears them from the session state; the summary phase deletes them after the summaries are queued |
 | `worker.lock` | Held by the single worker or a `flush` |
+| `summaries.lock` | Held by the worker's summary phase (or `flush`) while it runs the model call. Separate from `worker.lock`, so hooks and sends are not blocked by it |
 
 ## How hooks work
 
@@ -197,6 +213,12 @@ worker:  take worker.lock (or exit: the holder picks the job up)
          ├─ flush: route every stream to its token (held streams are skipped); per token
          │     ≤ 500 events / 1 MB per batch, gzip, that token's Bearer token and naming
          └─ release lock, re-scan jobs/ (and run again when config.json or projects.json changed)
+
+summary phase (after the flush, under ~/.ai-obs/summaries.lock, at most 3 passes):
+         ├─ summarise the staged + pending digests (one headless call per chunk of 25; worker.lock is NOT held;
+         │     no chunk starts after 5 min, the rest waits as pending)
+         ├─ take worker.lock (waits up to 60 s), queue the turn_summary events, send them in a second flush
+         └─ jobs that arrived meanwhile are processed in the same run
 ```
 
 - **SessionStart question.** The time budget counts in-process from hook entry (Node start-up is not counted). The hook
@@ -206,6 +228,12 @@ worker:  take worker.lock (or exit: the holder picks the job up)
   session in a freshly cloned repository), this session gets no question: its events are kept, the worker caches the
   key, and the next session asks. It does no network call and prints at most once per session and text. The Claude
   Code `SessionStart` entry has `timeout: 5`. Every other hook prints nothing.
+- **Summaries** (ADR-0027). When digests are due (session ended, 10 waiting, or the oldest has waited 10 minutes) the hook
+  job only stages them to `state/summaries/staged/<harness>/<ulid>.json` and clears them from the session state after
+  that. The worker's summary phase writes the summaries in chunks of 25; a chunk that has not finished after 130 s counts
+  as a failed attempt, and after 5 minutes no further chunk starts: what was written is sent and the rest waits in
+  `state/summaries/<harness>.json`. If `worker.lock` stays busy (60 s), nothing changes and the next run retries. A summary keeps its event id across retries (its time is the digest's first
+  staging or failure time).
 - **Recursion guard.** `bin/ai-obs.js` exits immediately when `AI_OBS_SUMMARIZING` is set. The
   summarizer sets that variable on the headless model call it starts.
 - **Delivery.** A batch is acked (removed from the queue) only after a 2xx response. Server
@@ -238,7 +266,7 @@ in `src/adapters/index.ts`. The contract is in [`src/adapters/types.ts`](src/ada
 | `uninstallHooks({scope, projectDir?})` | Removes only our entries; use `isAiObsHookCommand()` to recognize them |
 | `handleHook(invocation, ctx)` | Runs in the worker. Reads the transcript from the cursor in `ctx.state`, builds events with `src/events.ts` and enqueues them into the session's pinned stream (`ctx.streamFor(holder, capturedAt)`) |
 | `sweepCrashedSessions(ctx)` | Finishes sessions that never got an end hook and emits `session_end` with reason `crashed` |
-| `summarize(digests, ctx)` | One headless call to the cheapest model. Implement it with `summarizeWithCommand()`. Never call it directly; use `ctx.summarizeTurns(digests)` |
+| `summarize(digests, ctx)` | One headless call to the cheapest model. Implement it with `summarizeWithCommand()`. Never call it directly; use `ctx.scheduleSummaries(digests, key)`, which stages the digests for the post-flush summary phase (synchronous; `false` = the staged file could not be written, keep the digests and retry at the next due hook) |
 
 Shared, harness-neutral helpers:
 
@@ -285,7 +313,7 @@ The real hook and transcript format (field names, version 2.1.289) is documented
 | Module | Role |
 |---|---|
 | `index.ts` | The adapter (`createClaudeCodeAdapter()` for tests) and the summary command |
-| `handlers.ts` | Hook dispatch, `session_start` / `session_end`, crash sweep, summaries (at session end, every 10 turns, or after 10 minutes) |
+| `handlers.ts` | Hook dispatch, `session_start` / `turn_started` / `session_end`, crash sweep, staging digests for summaries (at session end, every 10 turns, or after 10 minutes) |
 | `session.ts` | Turn segmentation from the cursor, continuations, outcome patches, sub-agent runs |
 | `analyze.ts` | One stretch of activity: tokens, phases, tools, edits, checks, interrupts |
 | `transcript.ts` | Byte-cursor JSONL reader; slims each line to ids, numbers and phase decisions |
@@ -299,6 +327,12 @@ How the adapter works:
   tool results, meta entries, local-command output and interrupt markers do not count. The turn ends
   at the next prompt or at the `Stop` / `StopFailure` that follows. `turn_id` is the prompt entry's
   `uuid`.
+  - **`turn_started`.** `UserPromptSubmit` (main agent only, task-notification prompts included) also sends a
+    `turn_started` event with the hook time. Its `turn_id` is the uuid of the transcript prompt matched to the hook
+    (`prompt_id` against the entry's `promptId`; without them, a prompt from 10 s before to 1 s after the hook time),
+    null when the prompt is not in the transcript yet. A `UserPromptSubmit` never ends its own prompt's turn, even when
+    a late worker already sees the replies; that turn is emitted at its `Stop`. Earlier interrupted turns still end at
+    `UserPromptSubmit`.
   - **Late reads:** a prompt written after the hook fired stays open, so a worker that runs late
     never cuts the next turn short.
   - **Interrupted turns** get no `Stop`. They end at the next `UserPromptSubmit`, `Stop` or session
@@ -426,16 +460,45 @@ hooks. `ai-obs doctor` lists the ai-obs hooks that are still untrusted.
 
 How the adapter works:
 
+- **`turn_started`.** The `userpromptsubmit` hook (main thread only) sends `turn_started` with the hook time; `turn_id` is the hook payload's `turn_id`, or null.
 - **Tokens** come from the differences between cumulative `total_token_usage` snapshots. Repeated
   snapshots are skipped, and cached input is subtracted from input.
 - **Session state** is stored in `state/codex/<session>.json`. It holds the byte cursor, the open turn,
-  the previous turn's outcome and the pending digests. Summaries run at `SessionEnd`, once 10 turns are
+  the previous turn's outcome and the pending digests. Digests are staged for summaries at `SessionEnd`, once 10 turns are
   waiting, or once the first waiting turn has waited 10 minutes (same `summariesDue` rule as Claude Code,
-  ADR-0023).
+  ADR-0023); the worker writes the summaries after its flush.
 - **Idle sessions:** a session whose rollout has been idle for more than 1 h without a `SessionEnd`
   (crash or kill) is ended by the sweep with reason `crashed`.
 - **Resumed sessions:** a session that started before `init` and is resumed afterwards is back-filled
   from the start of its rollout.
+
+## `ai-obs live`
+
+Lists the Claude Code and Codex sessions running on this machine (ADR-0027). **Sessions:** hook state files in
+`~/.ai-obs/state/<harness>` younger than 2 h and not ended, plus Claude Code transcripts under
+`$CLAUDE_CONFIG_DIR` (default `~/.claude`)`/projects/*/<uuid>.jsonl` that have no state file and were written in the last
+30 minutes. **Columns:**
+
+| Column | Meaning |
+|---|---|
+| STATUS | `working` or `idle`, with the time since the turn started / ended |
+| HARNESS, PROJECT | Harness and the last path segment of the working directory |
+| TITLE | The `/rename` title, else the generated one (Codex has none) |
+| TOKENS | Input + output + cache read + cache write of the current turn while working, of the last turn while idle, main agent and sub-agents |
+| ≈COST | At default list prices from a local copy of the dashboard's table (`+` = some model has no price, `n/a` = none has). Prices an operator edited are not visible locally |
+| TOOLS, AGENTS, LAST TOOL | Tool calls, sub-agents launched in the turn, the tool called last (`-` when only a stored turn's tool list is known and it used several tools) |
+
+On a narrow terminal the least important columns are dropped (LAST TOOL, then AGENTS, then TOOLS) so the title keeps room;
+on a short one the sessions that do not fit are left out and counted in the footer (`N more not shown`). Control
+characters in names and titles are shown as spaces.
+**Order:** working (longest running first), then idle (most recent first). Stale rows are hidden and counted in the
+footer. **Status rules** match the dashboard's: working until an end-of-turn record follows the last activity (a user
+interrupt, an interrupted tool result or an API error also ends it); a working turn is stale after 2 h, an idle session
+after 30 minutes without a signal. **How it reads:** new sessions are found every 5 s; known ones are read on every redraw
+from an in-memory byte cursor (Claude Code starts at the state offset, the start of the first unfinished turn; Codex
+replays the rollout into a copy of the state with the adapter's own reducer, rebuilt whenever the hook writes newer
+state, which also carries the sub-agents' usage; scan-only transcripts are read from the
+last 8 MB). It never writes, and never touches the hook state files or their offsets.
 
 ## Environment
 
@@ -474,7 +537,8 @@ How the adapter works:
   error texts are only matched locally (to tell a refusal from an error) and never sent.
 - **Hook job files** keep only harness-related env vars (`CLAUDE_*`, `CODEX_*`, `AI_OBS_*`) and drop
   any whose name suggests a secret. Job files are deleted after processing.
-- **Local only:** prompt digests for summaries, edit fingerprints for revert detection (hashes only)
+- **`ai-obs live`** reads local state files and transcripts only: it sends nothing and writes nothing, and works without a token.
+- **Local only:** prompt digests for summaries (including the staged files), edit fingerprints for revert detection (hashes only)
   and next-prompt correction checks.
 - The git e-mail is sent only in the batch `identity`, so a company token (`aiobs_c_`) can match you to a member of the company (user tokens `aiobs_u_` already identify you).
 - The SessionStart question carries only token names, company slugs, hosts, the sanitized project key and directory, never a token.

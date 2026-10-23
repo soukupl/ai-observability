@@ -25,6 +25,7 @@ describe('claude-code adapter: crash sweep', () => {
 
     age(h.ctx.state.path(SESSION), 25 * 3600_000);
     await h.adapter.sweepCrashedSessions(h.ctx);
+    await h.summaries(); // the worker's summary phase after its flush (ADR-0027)
     const swept = h.events.slice(before);
     expect(swept.map((e) => e.type)).toEqual(['turn_outcome', 'turn', 'turn_outcome', 'session_end', 'turn_summary', 'turn_summary']);
     expect(byType(swept, 'turn')[0]).toMatchObject({ turn_id: 'cc-fixture-turn-2', outcome: { status: 'abandoned' } });

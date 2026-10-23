@@ -1,6 +1,6 @@
 {
   "name": "@soukupl/ai-obs",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "ai-obs collector: zero-dependency CLI that captures AI coding-agent usage from harness hooks",
   "type": "module",
   "license": "UNLICENSED",
@@ -21,6 +21,7 @@
     "test": "vitest run --root ../.. --project collector"
   },
   "devDependencies": {
+    "@ai-obs/db": "workspace:*",
     "@ai-obs/protocol": "workspace:*"
   }
 }

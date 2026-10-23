@@ -1,5 +1,6 @@
 import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { turnStartedEvent } from '../../events.js';
 import { readJsonFile, writeJsonAtomic } from '../../fsutil.js';
 import type { IngestEvent } from '../../protocol-types.js';
 import type { CollectorContext, HarnessAdapter, HookInvocation } from '../types.js';
@@ -93,14 +94,14 @@ export function createCodexAdapter(deps: CodexAdapterDeps = {}): HarnessAdapter 
     ctx.state.set(state.sessionId, state);
   }
 
+  /** Hands the waiting digests to the post-flush summariser (ADR-0027); they leave the state only once staged. */
   async function summarizeDigests(ctx: CollectorContext, state: CodexSessionState, capturedAt: number): Promise<void> {
     if (!state.digests.length) return;
     const key = await ctx.streamFor(state, capturedAt);
-    const digests = state.digests;
+    if (!ctx.scheduleSummaries(state.digests, key)) return; // kept for the next due hook
     state.digests = [];
     delete state.digestsSince;
     ctx.state.set(state.sessionId, state);
-    await ctx.summarizeTurns(digests, key);
   }
 
   async function onSubagentStop(p: Obj, ctx: CollectorContext, home: string, receivedAt: number, cwd: string): Promise<void> {
@@ -235,6 +236,8 @@ export function createCodexAdapter(deps: CodexAdapterDeps = {}): HarnessAdapter 
       if (hook === 'userpromptsubmit') {
         const prompt = str(p.prompt);
         if (prompt && state.open?.turnId !== str(p.turn_id)) finalizePrev(state, env, { prompt }, receivedAt);
+        // live status (ADR-0027): the session is working until this turn's `turn` arrives
+        out.push(turnStartedEvent({ harness: ctx.harness, sessionId, turnId: str(p.turn_id), startedAt: receivedAt }));
       } else if (hook === 'stop') {
         const turnId = str(p.turn_id);
         const isOpen = () => state.open && (!turnId || state.open.turnId === turnId);

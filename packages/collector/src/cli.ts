@@ -8,7 +8,7 @@ import type { CliDeps, Io } from './commands/common.js';
 
 export type { CliDeps, Io } from './commands/common.js';
 
-export const COMMANDS = ['init', 'token', 'use', 'doctor', 'status', 'flush', 'uninstall', 'hook'] as const;
+export const COMMANDS = ['init', 'token', 'use', 'doctor', 'status', 'flush', 'uninstall', 'live', 'hook'] as const;
 export type Command = (typeof COMMANDS)[number];
 
 const defaultIo: Io = {
@@ -38,6 +38,7 @@ Commands:
   use --reset-projects               set an unreadable projects.json aside and start an empty one
   doctor                             check config, tokens, server, project, harnesses, hooks and queue
   status                             show tokens, this project's token, queue and last delivery
+  live [--cwd] [--once]              watch this machine's running sessions: status, elapsed, tokens, ≈ cost (local only; q quits)
   flush [--wait <seconds>]           send queued events now (also retries a rejected token)
   uninstall [--purge [--yes]] [--project-dir <dir>]
                                      remove hooks (--purge: also delete ~/.ai-obs: tokens, assignments, queue)
@@ -114,6 +115,8 @@ export async function main(argv: string[], io: Io = defaultIo, deps: Partial<Cli
         return await (await import('./commands/flush.js')).flushCommand(args, io, full);
       case 'uninstall':
         return await (await import('./commands/uninstall.js')).uninstallCommand(args, io, full);
+      case 'live':
+        return await (await import('./commands/live.js')).liveCommand(args, io, full);
     }
   } catch (err) {
     if (err instanceof UsageError) {

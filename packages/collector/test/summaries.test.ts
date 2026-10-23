@@ -1,13 +1,18 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync, writeFileSync } from 'node:fs';
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildDigest } from '../src/analysis/digest.js';
 import {
   buildSummaryPrompt,
+  countStagedDigests,
+  listStagedDigests,
   parseSummaryResponse,
   pendingSummariesPath,
+  runSummaryBatch,
   runSummaryCommand,
   scrubPaths,
-  summarizeAndQueue,
+  stagedSummariesDir,
+  stageDigests,
+  SUMMARY_CHUNK,
   summarizeWithCommand,
 } from '../src/analysis/summaries.js';
 import { createContext } from '../src/context.js';
@@ -96,7 +101,7 @@ describe('runSummaryCommand', () => {
   });
 });
 
-describe('summarizeAndQueue', () => {
+describe('staged summaries (ADR-0027)', () => {
   const KEY: StreamKey = { kind: 'project', pk: 'github.com/acme/billing', bind: OPEN };
   const OTHER: StreamKey = { kind: 'project', pk: 'github.com/acme/web', bind: OPEN };
 
@@ -105,7 +110,13 @@ describe('summarizeAndQueue', () => {
     const config = writeTestConfig(paths);
     const queued: IngestEvent[] = [];
     const calls: Array<{ events: IngestEvent[]; key: StreamKey | null }> = [];
-    const adapter = fakeAdapter({ summarize: async (d) => summarize(d) });
+    let summarizeCalls = 0;
+    const adapter = fakeAdapter({
+      summarize: async (d) => {
+        summarizeCalls++;
+        return summarize(d);
+      },
+    });
     const ctx = createContext({
       adapter,
       config,
@@ -118,54 +129,186 @@ describe('summarizeAndQueue', () => {
       },
       log: nullLogger,
     });
-    return { paths, ctx, queued, calls, adapter };
+    /** the worker's summary phase, committing into ctx.queue */
+    const run = (opts: { retry?: boolean; commit?: boolean; deadline?: number; chunkTimeoutMs?: number } = {}) =>
+      runSummaryBatch(adapter, ctx, {
+        ...(opts.retry ? { retry: true } : {}),
+        ...(opts.deadline !== undefined ? { deadline: opts.deadline } : {}),
+        ...(opts.chunkTimeoutMs !== undefined ? { chunkTimeoutMs: opts.chunkTimeoutMs } : {}),
+        commit: async (gs) => {
+          if (opts.commit === false) return false;
+          for (const g of gs) ctx.queue.enqueue(g.events, g.key);
+          return true;
+        },
+      });
+    const pendingFile = pendingSummariesPath(paths.state, 'claude-code');
+    return { paths, ctx, queued, calls, adapter, run, pendingFile, summarizeCalls: () => summarizeCalls };
   }
 
   it('enqueues turn_summary events only (never digests) into the session stream', async () => {
-    const { ctx, queued, calls } = ctxFor(async () => new Map([['turn-aaa', 'Added JWT refresh'], ['turn-bbb', 'Fixed flaky test']]));
-    await ctx.summarizeTurns(digests, KEY);
+    const { ctx, queued, calls, run } = ctxFor(async () => new Map([['turn-aaa', 'Added JWT refresh'], ['turn-bbb', 'Fixed flaky test']]));
+    expect(ctx.scheduleSummaries(digests, KEY)).toBe(true);
+    await run();
     expect(calls.map((c) => c.key)).toEqual([KEY]);
     expect(queued.map((e) => e.type)).toEqual(['turn_summary', 'turn_summary']);
     expect(JSON.stringify(queued)).not.toContain('Add JWT refresh Add JWT');
+    expect(listStagedDigests(ctx.paths.state, 'claude-code')).toEqual([]);
   });
 
-  it('stores failed digests and retries them on the next call', async () => {
+  it('stageDigests: one file per call (mode 0600, attempts 0, the key); a null key or no digests writes nothing', () => {
+    const paths = tmpHome();
+    stageDigests(paths.state, 'claude-code', digests, KEY, 1_000, nullLogger);
+    stageDigests(paths.state, 'claude-code', [digests[1]!], OTHER, 2_000, nullLogger);
+    stageDigests(paths.state, 'claude-code', [digests[0]!], null, 3_000, nullLogger);
+    stageDigests(paths.state, 'claude-code', [], KEY, 4_000, nullLogger);
+    const files = listStagedDigests(paths.state, 'claude-code');
+    expect(files).toHaveLength(2);
+    expect(files.every((f) => f.startsWith(stagedSummariesDir(paths.state, 'claude-code')))).toBe(true);
+    expect(files.map((f) => statSync(f).mode & 0o777)).toEqual([0o600, 0o600]);
+    const first = JSON.parse(readFileSync(files[0]!, 'utf8')) as Array<Record<string, unknown>>;
+    expect(first.map((d) => [d.turnId, d.attempts, d.firstFailedAt, d.key])).toEqual([
+      ['turn-aaa', 0, 1_000, KEY],
+      ['turn-bbb', 0, 1_000, KEY],
+    ]);
+    expect(countStagedDigests(paths.state, 'claude-code')).toBe(3);
+    expect(countStagedDigests(paths.state, 'codex')).toBe(0);
+  });
+
+  it('stores failed digests and retries them on the next run', async () => {
     let fail = true;
-    const { ctx, queued, paths } = ctxFor(async (d) => {
+    const { ctx, queued, run, pendingFile } = ctxFor(async (d) => {
       if (fail) throw new Error('rate limited');
       return new Map((d as Array<{ turnId: string }>).map((x) => [x.turnId, `S ${x.turnId}`]));
     });
-    await ctx.summarizeTurns(digests, KEY);
+    ctx.scheduleSummaries(digests, KEY);
+    await run();
     expect(queued).toHaveLength(0);
-    const pending = JSON.parse(readFileSync(pendingSummariesPath(paths.state, 'claude-code'), 'utf8')) as unknown[];
-    expect(pending).toHaveLength(2);
+    expect(JSON.parse(readFileSync(pendingFile, 'utf8')) as unknown[]).toHaveLength(2);
+    expect(listStagedDigests(ctx.paths.state, 'claude-code')).toEqual([]);
 
     fail = false;
-    await ctx.summarizeTurns([buildDigest({ turnId: 'turn-ccc', prompt: 'p', toolNames: [], lastAssistantMessage: 'm' })], KEY);
+    ctx.scheduleSummaries([buildDigest({ turnId: 'turn-ccc', prompt: 'p', toolNames: [], lastAssistantMessage: 'm' })], KEY);
+    await run();
     expect(queued.map((e) => (e as { turn_id: string }).turn_id).sort()).toEqual(['turn-aaa', 'turn-bbb', 'turn-ccc']);
-    expect(JSON.parse(readFileSync(pendingSummariesPath(paths.state, 'claude-code'), 'utf8'))).toEqual([]);
+    expect(JSON.parse(readFileSync(pendingFile, 'utf8'))).toEqual([]);
+  });
+
+  it('a digest staged again merges by turnId and keeps its attempts', async () => {
+    const { ctx, run, pendingFile } = ctxFor(async () => new Map());
+    const failedAt = Date.now() - 3600_000;
+    writeJsonAtomic(pendingFile, [{ ...digests[0], attempts: 2, firstFailedAt: failedAt, key: KEY }]);
+    ctx.scheduleSummaries([digests[0]!], KEY);
+    await run();
+    const pending = JSON.parse(readFileSync(pendingFile, 'utf8')) as Array<{ turnId: string; attempts: number; firstFailedAt: number }>;
+    expect(pending.map((p) => [p.turnId, p.attempts, p.firstFailedAt])).toEqual([['turn-aaa', 3, failedAt]]);
+  });
+
+  it('a refused commit leaves the staged and pending files byte-identical', async () => {
+    const { ctx, run, pendingFile, queued } = ctxFor(async (d) => new Map((d as Array<{ turnId: string }>).map((x) => [x.turnId, `S ${x.turnId}`])));
+    writeJsonAtomic(pendingFile, [{ ...digests[1], attempts: 1, firstFailedAt: Date.now(), key: OTHER }]);
+    ctx.scheduleSummaries([digests[0]!], KEY);
+    const [staged] = listStagedDigests(ctx.paths.state, 'claude-code');
+    const before = [readFileSync(staged!, 'utf8'), readFileSync(pendingFile, 'utf8')];
+    expect(await run({ commit: false })).toBeNull();
+    expect([readFileSync(staged!, 'utf8'), readFileSync(pendingFile, 'utf8')]).toEqual(before);
+    expect(queued).toEqual([]);
+  });
+
+  it('nothing staged and no retry: null, the model is not called', async () => {
+    const { run, pendingFile, summarizeCalls } = ctxFor(async () => new Map([['turn-aaa', 'x']]));
+    writeJsonAtomic(pendingFile, [{ ...digests[0], attempts: 1, firstFailedAt: Date.now(), key: KEY }]);
+    expect(await run()).toBeNull();
+    expect(summarizeCalls()).toBe(0);
+    expect(await run({ retry: true })).toEqual({ summarized: 1, pending: 0 });
+  });
+
+  it('a chunk that hangs counts as a failed attempt; the batch still commits and clears the staged files', async () => {
+    const { ctx, run, pendingFile } = ctxFor(() => new Promise(() => {}));
+    ctx.scheduleSummaries(digests, KEY);
+    expect(await run({ chunkTimeoutMs: 50 })).toEqual({ summarized: 0, pending: 2 });
+    const pending = JSON.parse(readFileSync(pendingFile, 'utf8')) as Array<{ turnId: string; attempts: number }>;
+    expect(pending.map((p) => [p.turnId, p.attempts])).toEqual([
+      ['turn-aaa', 1],
+      ['turn-bbb', 1],
+    ]);
+    expect(listStagedDigests(ctx.paths.state, 'claude-code')).toEqual([]);
+  });
+
+  it('past the deadline no chunk starts: what was summarised is committed, the rest waits as pending without an attempt', async () => {
+    const many = Array.from({ length: SUMMARY_CHUNK + 3 }, (_, i) => buildDigest({ turnId: `turn-${String(i).padStart(3, '0')}`, prompt: 'p', toolNames: [], lastAssistantMessage: 'm' }));
+    let deadline = Number.POSITIVE_INFINITY;
+    const { ctx, adapter, pendingFile, queued, summarizeCalls } = ctxFor(async (d) => {
+      deadline = 0; // the first chunk used up the time
+      return new Map((d as Array<{ turnId: string }>).map((x) => [x.turnId, `S ${x.turnId}`]));
+    });
+    ctx.scheduleSummaries(many, KEY);
+    const res = await runSummaryBatch(adapter, ctx, {
+      get deadline() {
+        return deadline;
+      },
+      commit: async (gs) => {
+        for (const g of gs) ctx.queue.enqueue(g.events, g.key);
+        return true;
+      },
+    });
+    expect(res).toEqual({ summarized: SUMMARY_CHUNK, pending: 3 });
+    expect(summarizeCalls()).toBe(1);
+    expect(queued).toHaveLength(SUMMARY_CHUNK);
+    const pending = JSON.parse(readFileSync(pendingFile, 'utf8')) as Array<{ attempts: number }>;
+    expect(pending.map((p) => p.attempts)).toEqual([0, 0, 0]);
+    expect(listStagedDigests(ctx.paths.state, 'claude-code')).toEqual([]);
+  });
+
+  it('a staged digest older than 7 days is dropped like a pending one', async () => {
+    const { ctx, run, pendingFile, summarizeCalls } = ctxFor(async () => new Map([['turn-aaa', 'x']]));
+    stageDigests(ctx.paths.state, 'claude-code', [digests[0]!], KEY, Date.now() - 8 * 24 * 3600_000, nullLogger);
+    expect(await run()).toEqual({ summarized: 0, pending: 0 });
+    expect(summarizeCalls()).toBe(0);
+    expect(JSON.parse(readFileSync(pendingFile, 'utf8'))).toEqual([]);
+    expect(listStagedDigests(ctx.paths.state, 'claude-code')).toEqual([]);
   });
 
   it('gives up after 5 attempts', async () => {
-    const { ctx, paths } = ctxFor(async () => new Map());
-    for (let i = 0; i < 6; i++) await ctx.summarizeTurns(i === 0 ? digests : [], KEY);
-    expect(JSON.parse(readFileSync(pendingSummariesPath(paths.state, 'claude-code'), 'utf8'))).toEqual([]);
+    const { ctx, run, pendingFile } = ctxFor(async () => new Map());
+    ctx.scheduleSummaries(digests, KEY);
+    for (let i = 0; i < 6; i++) await run({ retry: true });
+    expect(JSON.parse(readFileSync(pendingFile, 'utf8'))).toEqual([]);
   });
 
-  it('summarizeAndQueue reports counts', async () => {
-    const { ctx, adapter } = ctxFor(async () => new Map([['turn-aaa', 'ok']]));
-    expect(await summarizeAndQueue(adapter, digests, ctx, KEY)).toEqual({ summarized: 1, pending: 1 });
+  it('a turn_summary keeps its event id across runs (time = the digest\'s firstFailedAt)', async () => {
+    const { ctx, run } = ctxFor(async () => new Map([['turn-aaa', 'Added JWT refresh']]));
+    ctx.scheduleSummaries([digests[0]!], KEY);
+    const ids: string[][] = [];
+    for (const commit of [false, true]) {
+      await runSummaryBatch(fakeAdapter({ summarize: async () => new Map([['turn-aaa', 'Added JWT refresh']]) }), ctx, {
+        commit: async (gs) => {
+          ids.push(gs.flatMap((g) => g.events.map((e) => e.event_id)));
+          return commit;
+        },
+      });
+    }
+    expect(ids[0]).toHaveLength(1);
+    expect(ids[1]).toEqual(ids[0]);
+    expect(await run()).toBeNull(); // committed: nothing staged any more
   });
 
-  it('retried digests keep their own stream; summaries are enqueued grouped by stream', async () => {
+  it('reports counts', async () => {
+    const { ctx, run } = ctxFor(async () => new Map([['turn-aaa', 'ok']]));
+    ctx.scheduleSummaries(digests, KEY);
+    expect(await run()).toEqual({ summarized: 1, pending: 1 });
+  });
+
+  it('retried digests keep their own stream; summaries are grouped by stream', async () => {
     let fail = true;
-    const { ctx, calls } = ctxFor(async (d) => {
+    const { ctx, calls, run } = ctxFor(async (d) => {
       if (fail) throw new Error('rate limited');
       return new Map((d as Array<{ turnId: string }>).map((x) => [x.turnId, `S ${x.turnId}`]));
     });
-    await ctx.summarizeTurns(digests, KEY);
+    ctx.scheduleSummaries(digests, KEY);
+    await run();
     fail = false;
-    await ctx.summarizeTurns([buildDigest({ turnId: 'turn-ccc', prompt: 'p', toolNames: [], lastAssistantMessage: 'm' })], OTHER);
+    ctx.scheduleSummaries([buildDigest({ turnId: 'turn-ccc', prompt: 'p', toolNames: [], lastAssistantMessage: 'm' })], OTHER);
+    await run();
     const byKey = calls.map((c) => [c.key, c.events.map((e) => (e as { turn_id: string }).turn_id).sort()]);
     expect(byKey).toEqual([
       [KEY, ['turn-aaa', 'turn-bbb']],
@@ -175,11 +318,22 @@ describe('summarizeAndQueue', () => {
 
   it('drops pending digests written by 0.1.x (no stream) and new digests of an unrecorded session', async () => {
     const summarize = async (d: unknown[]) => new Map((d as Array<{ turnId: string }>).map((x) => [x.turnId, `S ${x.turnId}`]));
-    const { ctx, calls, paths } = ctxFor(summarize);
-    writeJsonAtomic(pendingSummariesPath(paths.state, 'claude-code'), [{ ...digests[0], attempts: 1, firstFailedAt: Date.now() }]);
-    await ctx.summarizeTurns([digests[1]!], null);
+    const { ctx, calls, run, pendingFile } = ctxFor(summarize);
+    writeJsonAtomic(pendingFile, [{ ...digests[0], attempts: 1, firstFailedAt: Date.now() }]);
+    expect(ctx.scheduleSummaries([digests[1]!], null)).toBe(true);
+    expect(listStagedDigests(ctx.paths.state, 'claude-code')).toEqual([]);
+    await run({ retry: true });
     expect(calls).toEqual([]);
-    expect(JSON.parse(readFileSync(pendingSummariesPath(paths.state, 'claude-code'), 'utf8'))).toEqual([]);
+    expect(JSON.parse(readFileSync(pendingFile, 'utf8'))).toEqual([]);
+  });
+
+  it('an unreadable staged file is dropped', async () => {
+    const { ctx, run } = ctxFor(async () => new Map());
+    ctx.scheduleSummaries(digests, KEY);
+    const [staged] = listStagedDigests(ctx.paths.state, 'claude-code');
+    writeFileSync(staged!, '{not json');
+    expect(await run()).toEqual({ summarized: 0, pending: 0 });
+    expect(listStagedDigests(ctx.paths.state, 'claude-code')).toEqual([]);
   });
 });
 

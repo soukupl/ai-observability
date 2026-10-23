@@ -20,7 +20,8 @@ const MESSAGE_KEEP = 300;
 
 export type SlimEntry =
   /** `command`: the typed slash command (`/name`, without the slash) when the prompt is one */
-  | { k: 'prompt'; at: number; uuid: string; text: string; human: boolean; command: string | null }
+  /** `promptId`: Claude Code's `promptId`, also sent as `prompt_id` by UserPromptSubmit (ADR-0027); null when absent */
+  | { k: 'prompt'; at: number; uuid: string; text: string; human: boolean; command: string | null; promptId: string | null }
   | { k: 'interrupt'; at: number }
   /** Meta entry that expands the typed slash command before it (a skill / custom command; built-ins have none) */
   | { k: 'expansion'; at: number }
@@ -302,7 +303,7 @@ function slimUser(o: Obj, m: Obj, at: number): SlimEntry | null {
   const origin = isObj(o.origin) ? str(o.origin.kind) : null;
   const human = (origin === null || origin === 'human') && !/^<task-notification>/.test(text.trimStart());
   const command = COMMAND_RE.exec(text.slice(0, 2000))?.[1] ?? null;
-  return { k: 'prompt', at, uuid: str(o.uuid) ?? `${at}`, text: text.slice(0, PROMPT_KEEP), human, command };
+  return { k: 'prompt', at, uuid: str(o.uuid) ?? `${at}`, text: text.slice(0, PROMPT_KEEP), human, command, promptId: str(o.promptId) };
 }
 
 /**

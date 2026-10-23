@@ -39,7 +39,7 @@ export interface HarnessAdapter {
   /**
    * Summarizes turns with the harness's cheapest model (one batched headless call). Implement with
    * summarizeWithCommand() from analysis/summaries.ts. Returns turnId → summary (≤ 140 chars) for the
-   * turns it could summarize. Do not call directly: use ctx.summarizeTurns(), which retries and enqueues.
+   * turns it could summarize. Do not call directly: use ctx.scheduleSummaries(); the worker summarizes after its flush, retries and enqueues.
    */
   summarize(digests: TurnDigest[], ctx: CollectorContext): Promise<Map<string, string>>;
 }
@@ -131,10 +131,10 @@ export interface CollectorContext {
   streamFor(holder: StreamHolder, capturedAt: number): Promise<StreamKey | null>;
   now(): Date;
   /**
-   * Summarize turns with this adapter's summarize(), enqueue `turn_summary` events into `key`'s stream,
-   * and keep failed digests (locally, with their key) for retry on the next call. Never throws.
+   * Hands due digests to the post-flush summariser (ADR-0027): writes them to state/summaries/staged/<harness>/<ulid>.json and returns true;
+   * null key: dropped (logged), true; false = write failed (keep them in state, retry at the next due hook). Synchronous; never throws.
    */
-  summarizeTurns(digests: TurnDigest[], key: StreamKey | null): Promise<void>;
+  scheduleSummaries(digests: readonly TurnDigest[], key: StreamKey | null): boolean;
 }
 
 /** Session state that pins a stream: the session's first cwd and, once bound, its stream (C15). */

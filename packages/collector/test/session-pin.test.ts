@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createClaudeCodeAdapter } from '../src/adapters/claude-code/index.js';
 import { newSessionState as newCodexState } from '../src/adapters/codex/session.js';
 import type { CollectorContext, HarnessAdapter, HookInvocation } from '../src/adapters/types.js';
+import { runSummaryBatch } from '../src/analysis/summaries.js';
 import { identityOf, loadConfig, saveConfig, type CollectorConfig, type TokenEntry } from '../src/config.js';
 import { createContext } from '../src/context.js';
 import { nullLogger } from '../src/log.js';
@@ -80,6 +81,15 @@ function claudeHarness(specs: Parameters<typeof writeTestTokens>[1]) {
   return { paths, config, adapter, ctx, store, calls, hook, projectDir };
 }
 
+/** The worker's summary phase after its flush (ADR-0027): the staged digests' summaries go to their pinned stream. */
+const summaries = (adapter: HarnessAdapter, ctx: CollectorContext) =>
+  runSummaryBatch(adapter, ctx, {
+    commit: async (gs) => {
+      for (const g of gs) ctx.queue.enqueue(g.events, g.key);
+      return true;
+    },
+  });
+
 const pkOf = (k: StreamKey | null) => (k?.kind === 'project' ? k.pk : null);
 
 describe('session pinning (C12, C15)', () => {
@@ -91,6 +101,7 @@ describe('session pinning (C12, C15)', () => {
     await h.hook('Stop', at(31.5), '/work/other-repo'); // the user cd'd elsewhere
     utimesSync(h.ctx.state.path(SESSION), new Date(Date.now() - 25 * 3600_000), new Date(Date.now() - 25 * 3600_000));
     await h.adapter.sweepCrashedSessions(h.ctx);
+    await summaries(h.adapter, h.ctx);
 
     const types = h.calls.flatMap((c) => c.events.map((e) => e.type));
     expect(types).toContain('session_start');
@@ -204,6 +215,7 @@ describe('session pinning (C12, C15)', () => {
     await hook('SessionStart', '/work/first', '2026-10-05T09:59:57Z'); // no rollout yet
     copyFixtures(env);
     await hook('SessionEnd', '/work/acme-app', '2026-10-05T10:15:00Z');
+    await summaries(env.adapter, ctx);
     expect(calls.length).toBeGreaterThan(0);
     expect(calls.flatMap((c) => c.events.map((e) => e.type))).toEqual(expect.arrayContaining(['session_start', 'turn', 'session_end', 'turn_summary']));
     expect(new Set(calls.map((c) => pkOf(c.key)))).toEqual(new Set(['github.com/acme/first']));
