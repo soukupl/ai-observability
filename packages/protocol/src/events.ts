@@ -41,6 +41,18 @@ export const sessionStartEvent = z.object({
   at: timestamp,
 });
 
+/**
+ * Liveness (ADR-0027): the main agent started a turn (prompt-submit hook). turn_id = the turn's key when known, else
+ * null (server correlates by session + time). started_at = hook receive time.
+ */
+export const turnStartedEvent = z.object({
+  ...base,
+  type: z.literal('turn_started'),
+  session_id: nonEmptyId,
+  turn_id: nonEmptyId.nullable(),
+  started_at: timestamp,
+});
+
 export const turnEvent = z
   .object({
     ...base,
@@ -145,6 +157,7 @@ export const sessionEndEvent = z.object({
 
 export const ingestEvent = z.discriminatedUnion('type', [
   sessionStartEvent,
+  turnStartedEvent,
   turnEvent,
   runEvent,
   turnOutcomeEvent,

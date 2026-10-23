@@ -92,6 +92,14 @@
       "session_id": "sess-1",
       "title": "Auth middleware JWT refresh",
       "source": "custom"
+    },
+    {
+      "event_id": "01J9ZQ8Y3N4X5V6W7Z8A9B0C1B",
+      "type": "turn_started",
+      "harness": "claude-code",
+      "session_id": "sess-1",
+      "turn_id": "turn-1",
+      "started_at": "2026-10-05T10:00:06Z"
     }
   ]
 }

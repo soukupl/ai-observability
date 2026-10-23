@@ -10,6 +10,7 @@ import type {
   SessionTitleEvent,
   TurnEvent,
   TurnOutcomeEvent,
+  TurnStartedEvent,
   TurnSummaryEvent,
 } from '@ai-obs/protocol';
 import { assertOwner, OwnerConflictError, rows, type BatchContext } from './context';
@@ -45,6 +46,16 @@ import { propagateTurnOwner, replaceUsage } from './usage-rows';
  * provisional patch is ignored (DP-09). Runs take the turn lock too, so a run racing its turn is
  * always linked (DP-13). Revision ordering of re-sent turns is NOT enforced: the last arrival wins
  * (needs a revision on the wire and a column app_ingest can read; see the DP-09 note in the report).
+ *
+ * Live status (ADR-0027): agent_sessions.current_turn_started_at (C) is non-null while the main agent works on a turn,
+ * and last_seen_at is the newest event time of the session. turn_started sets C = greatest(stored, started_at) and
+ * creates the session on the fly like a turn does (owner guard, parked title); when the session had ended before
+ * started_at (a resume), it re-opens it (ended_at and end_reason := null). A turn clears C when C <= its ended_at,
+ * otherwise C stays (a newer prompt is already running); session_end clears C only when C <= its time and then also
+ * sets ended_at/end_reason (an older end delivered after a newer prompt's turn_started, e.g. in one backlog batch, is ignored). last_seen_at is bumped by session_start
+ * (at), turn_started (started_at), turn (ended_at) and session_end (at) to greatest(stored, least(time, now())), so a
+ * collector clock running ahead cannot keep a session fresh; run and the patches carry no session time and leave both
+ * alone. app_ingest may read and write these liveness columns (and read ended_at) only (0017).
  */
 
 const outcomeMarker = (key: string) => `outcome-patch:${key}`;
@@ -61,11 +72,17 @@ async function lockSessionKey(tx: Tx, ctx: BatchContext, key: string): Promise<v
   await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`session:${ctx.companyId}:${key}`}, 0))`);
 }
 
-/** The session keys an event writes (session_start, turn, session_title, session_end); pure. */
+/** The session keys an event writes (session_start, turn_started, turn, session_title, session_end); pure. */
 export function batchSessionKeys(events: readonly IngestEvent[]): string[] {
   const keys = new Set<string>();
   for (const e of events) {
-    if (e.type === 'session_start' || e.type === 'turn' || e.type === 'session_title' || e.type === 'session_end') {
+    if (
+      e.type === 'session_start' ||
+      e.type === 'turn_started' ||
+      e.type === 'turn' ||
+      e.type === 'session_title' ||
+      e.type === 'session_end'
+    ) {
       keys.add(sessionKey(e.harness, e.session_id));
     }
   }
@@ -87,6 +104,9 @@ async function applyPendingSessionPatch(tx: Tx, sessionId: string): Promise<void
 
 const durationMs = (startedAt: string, endedAt: string) => Math.max(0, Date.parse(endedAt) - Date.parse(startedAt));
 const json = (v: unknown) => JSON.stringify(v ?? {});
+/** Event time for last_seen_at, capped at the server clock (a collector clock running ahead cannot keep a session fresh). */
+const seenAt = (iso: string) => sql`least(${iso}::timestamptz, now())`;
+const bumpSeen = (iso: string) => sql`last_seen_at = greatest(agent_sessions.last_seen_at, ${seenAt(iso)})`;
 
 export async function applySessionStart(tx: Tx, ctx: BatchContext, e: SessionStartEvent): Promise<void> {
   const project = e.project ? await upsertProject(tx, ctx, e.project) : null;
@@ -95,15 +115,16 @@ export async function applySessionStart(tx: Tx, ctx: BatchContext, e: SessionSta
   const [session] = await rows<{ id: string }>(
     tx,
     sql`insert into agent_sessions (company_id, team_id, user_id, machine_id, project_id, external_id, harness,
-          harness_version, started_at)
+          harness_version, started_at, last_seen_at)
         values (${ctx.companyId}::uuid, ${teamId}::uuid, ${ctx.userId}::uuid, ${ctx.machineRowId}::uuid,
           ${project?.id ?? null}::uuid, ${sessionKey(e.harness, e.session_id)}, ${e.harness},
-          ${e.harness_version ?? null}, ${e.at}::timestamptz)
+          ${e.harness_version ?? null}, ${e.at}::timestamptz, ${seenAt(e.at)})
         on conflict (company_id, external_id) do update set
           team_id = ${teamId}::uuid, user_id = coalesce(${ctx.userId}::uuid, agent_sessions.user_id),
           machine_id = ${ctx.machineRowId}::uuid, started_at = ${e.at}::timestamptz,
           project_id = coalesce(${project?.id ?? null}::uuid, agent_sessions.project_id)
           ${e.harness_version ? sql`, harness_version = ${e.harness_version}` : sql``}
+          , ${bumpSeen(e.at)}
         where ${sessionOwnerGuard(ctx)}
         returning id`,
   );
@@ -132,32 +153,80 @@ export async function applySessionEnd(tx: Tx, ctx: BatchContext, e: SessionEndEv
   const [done] = await rows<{ id: string }>(
     tx,
     sql`insert into agent_sessions (company_id, team_id, user_id, machine_id, external_id, harness,
-          started_at, ended_at, end_reason)
+          started_at, ended_at, end_reason, last_seen_at)
         values (${ctx.companyId}::uuid, ${teamId}::uuid, ${ctx.userId}::uuid, ${ctx.machineRowId}::uuid,
-          ${sessionKey(e.harness, e.session_id)}, ${e.harness}, ${e.at}::timestamptz, ${e.at}::timestamptz, ${e.reason})
-        on conflict (company_id, external_id) do update set ended_at = ${e.at}::timestamptz, end_reason = ${e.reason}
+          ${sessionKey(e.harness, e.session_id)}, ${e.harness}, ${e.at}::timestamptz, ${e.at}::timestamptz, ${e.reason},
+          ${seenAt(e.at)})
+        on conflict (company_id, external_id) do update set
+          ended_at = case when agent_sessions.current_turn_started_at is null
+              or agent_sessions.current_turn_started_at <= ${e.at}::timestamptz
+            then ${e.at}::timestamptz else agent_sessions.ended_at end,
+          current_turn_started_at = case when agent_sessions.current_turn_started_at <= ${e.at}::timestamptz
+            then null else agent_sessions.current_turn_started_at end,
+          ${bumpSeen(e.at)}
         where ${sessionOwnerGuard(ctx)}
         returning id`,
   );
   if (!done) throw new OwnerConflictError('session');
+  // end_reason in its own statement (app_ingest cannot read it, 0017). An end older than a turn that already started
+  // (a backlog batch orders turn_started before session_end) left ended_at alone, so it matches no row here.
+  await tx.execute(sql`update agent_sessions set end_reason = ${e.reason}
+    where id = ${done.id}::uuid and ended_at = ${e.at}::timestamptz`);
   await applyPendingSessionPatch(tx, done.id);
+}
+
+/**
+ * Live status (ADR-0027): the main agent started a turn. Marks the session working since started_at (the newest start
+ * wins), creates it on the fly when it has not arrived (like a turn) and re-opens it when it had ended before started_at
+ * (a resumed session keeps its id and sends no new session_start).
+ */
+export async function applyTurnStarted(tx: Tx, ctx: BatchContext, e: TurnStartedEvent): Promise<void> {
+  const key = sessionKey(e.harness, e.session_id);
+  const teamId = await teamFor(tx, ctx, null);
+  await lockSessionKey(tx, ctx, key);
+  const started = sql`${e.started_at}::timestamptz`;
+  const [row] = await rows<{ id: string }>(
+    tx,
+    sql`insert into agent_sessions (company_id, team_id, user_id, machine_id, external_id, harness, started_at,
+          current_turn_started_at, last_seen_at)
+        values (${ctx.companyId}::uuid, ${teamId}::uuid, ${ctx.userId}::uuid, ${ctx.machineRowId}::uuid, ${key},
+          ${e.harness}, ${started}, ${started}, ${seenAt(e.started_at)})
+        on conflict (company_id, external_id) do update set
+          current_turn_started_at = greatest(agent_sessions.current_turn_started_at, ${started}),
+          ${bumpSeen(e.started_at)}
+        where ${sessionOwnerGuard(ctx)}
+        returning id`,
+  );
+  if (!row) throw new OwnerConflictError('session');
+  // Re-open a resumed session. A separate statement because app_ingest cannot read end_reason (0017 grants it the
+  // liveness columns and ended_at only); it touches no row unless the session had ended before this start.
+  await tx.execute(sql`update agent_sessions set ended_at = null, end_reason = null
+    where id = ${row.id}::uuid and ended_at < ${started}`);
+  await applyPendingSessionPatch(tx, row.id);
 }
 
 /** ON CONFLICT ... WHERE for agent_sessions: only the owner (or anyone, while unowned) may overwrite. */
 const sessionOwnerGuard = (ctx: BatchContext) =>
   sql`(agent_sessions.user_id is null or agent_sessions.user_id = ${ctx.userId}::uuid)`;
 
-/** The session a turn belongs to; created on the fly when the turn arrives before session_start. */
+/**
+ * The session a turn belongs to; created on the fly when the turn arrives before session_start. Also keeps the live
+ * status (ADR-0027): bumps last_seen_at to the turn's end and clears current_turn_started_at when the turn ended at or
+ * after it (a later prompt's start stays).
+ */
 async function sessionForTurn(tx: Tx, ctx: BatchContext, e: TurnEvent): Promise<{ id: string; projectId: string | null }> {
   const key = sessionKey(e.harness, e.session_id);
   const teamId = await teamFor(tx, ctx, null);
   await lockSessionKey(tx, ctx, key);
   const [row] = await rows<{ id: string; project_id: string | null }>(
     tx,
-    sql`insert into agent_sessions (company_id, team_id, user_id, machine_id, external_id, harness, started_at)
+    sql`insert into agent_sessions (company_id, team_id, user_id, machine_id, external_id, harness, started_at,
+          last_seen_at)
         values (${ctx.companyId}::uuid, ${teamId}::uuid, ${ctx.userId}::uuid, ${ctx.machineRowId}::uuid, ${key},
-          ${e.harness}, ${e.started_at}::timestamptz)
-        on conflict (company_id, external_id) do update set external_id = ${key}
+          ${e.harness}, ${e.started_at}::timestamptz, ${seenAt(e.ended_at)})
+        on conflict (company_id, external_id) do update set ${bumpSeen(e.ended_at)},
+          current_turn_started_at = case when agent_sessions.current_turn_started_at <= ${e.ended_at}::timestamptz
+            then null else agent_sessions.current_turn_started_at end
         where ${sessionOwnerGuard(ctx)}
         returning id, project_id`,
   );

@@ -5,8 +5,8 @@ import type { IngestBatchInput, IngestEventInput } from '@ai-obs/protocol';
 import { generateToken } from '../../src/lib/ingest/tokens';
 
 /**
- * The shared protocol fixture (7 events: session_start, turn, run, turn_outcome, turn_summary, session_end,
- * session_title).
+ * The shared protocol fixture (8 events: session_start, turn, run, turn_outcome, turn_summary, session_end,
+ * session_title, turn_started).
  */
 export function protocolFixture(): IngestBatchInput {
   return JSON.parse(
@@ -69,6 +69,11 @@ export const ev = {
   }),
   title: (sessionId: string, title: string, source: 'custom' | 'ai' = 'ai'): IngestEventInput => ({
     event_id: ulid(), type: 'session_title', harness: 'claude-code', session_id: sessionId, title, source,
+  }),
+  /** Live status (ADR-0027): a main-agent prompt was submitted. */
+  turnStarted: (sessionId: string, startedAt = '2026-10-05T09:00:30Z', turnId: string | null = null): IngestEventInput => ({
+    event_id: ulid(), type: 'turn_started', harness: 'claude-code', session_id: sessionId, turn_id: turnId,
+    started_at: startedAt,
   }),
 };
 

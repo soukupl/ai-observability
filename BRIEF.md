@@ -51,6 +51,7 @@ The design is now being implemented; see README.md for the build.
 | 25 | Agent groups & timeline | Sub-agent runs carry an optional `agent_group` and `orchestration_id`; the Agents view groups types by it and draws a git-graph timeline (one lane per session, coloured by project, one UTC day, hour zoom) | [0019](docs/adr/0019-agent-groups-and-timeline.md) |
 | 26 | Agent flow | Runs carry an optional `stage_index`, `flow_key` and incoming `links` (`item` / `sequence`); `sequence` links are also derived on read for older Agent-tool runs; an "Agent flow" card (lanes = workflow runs / a turn's spawns, rows = stages, arrows = links) under the timeline on the Agents page and turn detail | [0020](docs/adr/0020-agent-flow-links.md) |
 | 27 | Agent flows view | `/flows` lists whole flows of ≥ 2 sub-agent runs of one turn (a workflow run, a turn's legacy workflow runs, or Agent-tool runs joined by links) with steps, stages, duration, tokens, ≈ cost, models and outcome (CSV); a detail page per flow shows its steps, flow chart, skills & MCP calls, time by stage and phases per step | [0020](docs/adr/0020-agent-flow-links.md) (amendment 2026-10-08) |
+| 28 | Live sessions | `turn_started` event; working / idle / stale with elapsed time on `/sessions` "Active now" (10 s polling) and the session page; local `ai-obs live` terminal | [0027](docs/adr/0027-live-session-status.md) |
 
 ## 3. Scope
 
@@ -74,7 +75,7 @@ The design is now being implemented; see README.md for the build.
 - LLM judging of outcomes; user ratings (`/obs good|bad`).
 - Blocking or rate-limiting the harness (budgets only notify).
 - Storing prompts, responses, code, diffs or file paths.
-- Real-time streaming (minutes of latency is acceptable).
+- Real-time streaming beyond 10 s polling of session status (ADR-0027); in-turn progress is a later follow-up.
 - Collectors for harnesses other than Claude Code and Codex (format is ready for them).
 - Per-person ranking views.
 
@@ -219,7 +220,8 @@ provisional outcome and later sends a `turn_outcome` patch event.
   assistant message) and makes **one batched headless call** to the harness's cheapest model
   (`claude -p --model haiku …` / `codex exec -m <mini model> …`) at `SessionEnd`, or earlier once
   10 turns are waiting or the first waiting turn is 10 minutes old (ADR-0023), so a long session does
-  not leave its turns without summaries for hours.
+  not leave its turns without summaries for hours. The call runs after the hook's events are flushed, in the
+  background worker under its own lock, so a finished turn is never delayed by it (ADR-0027).
 - Output: ≤ 140-char summary per turn, sent as `turn_summary` patch events. Only the summary leaves
   the machine.
 - Recursion guard: the child process gets `AI_OBS_SUMMARIZING=1`; all hook handlers exit immediately
@@ -260,6 +262,7 @@ provisional outcome and later sends a `turn_outcome` patch event.
       "stage_index": 1, "flow_key": "data",                             // optional (ADR-0020)
       "links": [{ "from_run_id": "agent-id-0", "kind": "item" }],       // optional, ≤ 32 incoming (ADR-0020)
       "usage": [ … ], "phases_ms": { … }, "outcome": { … } },
+    { "event_id": "ulid", "type": "turn_started", "session_id": "…", "turn_id": "… or null", "started_at": "…" },   // ADR-0027
     { "event_id": "ulid", "type": "turn_outcome", "turn_id": "…", "outcome": { "status": "failed", "signals": ["next_prompt_correction"] } },
     { "event_id": "ulid", "type": "turn_summary", "turn_id": "…", "summary": "Added JWT refresh to auth middleware" },
     { "event_id": "ulid", "type": "session_end", "session_id": "…", "reason": "exit", "at": "…" }

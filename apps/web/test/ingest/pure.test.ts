@@ -70,10 +70,11 @@ describe('usage', () => {
 });
 
 describe('orderEvents', () => {
-  it('applies sessions, turns, runs by depth, patches in arrival order, then session ends', () => {
+  it('applies sessions, turn starts, turns, runs by depth, patches in arrival order, then session ends', () => {
     const ev = (type: string, extra: object = {}) => ({ type, event_id: `${type}${JSON.stringify(extra)}`, ...extra }) as unknown as IngestEvent;
     const input = [
       ev('session_end'),
+      ev('turn_started'),
       ev('turn_summary', { n: 1 }),
       ev('run', { depth: 2 }),
       ev('turn_outcome', { n: 2 }),
@@ -84,6 +85,7 @@ describe('orderEvents', () => {
     ];
     expect(orderEvents(input).map((e) => e.event_id)).toEqual([
       'session_start{}',
+      'turn_started{}',
       'turn{}',
       'run{"depth":1}',
       'run{"depth":2}',

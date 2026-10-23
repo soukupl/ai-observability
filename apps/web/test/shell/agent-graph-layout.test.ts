@@ -4,6 +4,7 @@ import {
   backgroundEnds,
   branchPath,
   branchY,
+  emptyGraphMessage,
   formatClock,
   GROUP_COLORS,
   groupColorIndex,
@@ -289,5 +290,12 @@ describe('formatting and zoom', () => {
     expect(zoomWindow(at(23, 30), at(24), '2026-10-07')).toEqual({ from: '23:30', to: '24:00' });
     expect(zoomWindow(at(9, 0, 10), at(9, 0, 20), '2026-10-07')).toBeNull();
     expect(zoomWindow(at(9), at(10), 'nope')).toBeNull();
+  });
+});
+
+describe('emptyGraphMessage', () => {
+  it('names the window for a plain graph and the running turn on a live session page', () => {
+    expect(emptyGraphMessage(undefined)).toBe('No turns in this window.');
+    expect(emptyGraphMessage(1_760_000_000_000)).toBe('No finished turn yet.');
   });
 });

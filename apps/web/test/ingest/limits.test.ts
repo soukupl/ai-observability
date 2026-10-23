@@ -14,6 +14,7 @@ import {
   normalizeRunLinks,
   normalizeOrchestrationId,
   normalizeTools,
+  timeWindowProblem,
 } from '../../src/lib/ingest/limits';
 import { batch, ev } from './fixtures';
 
@@ -177,5 +178,23 @@ describe('enforceLimits', () => {
     const longType = `my-plugin:${'x'.repeat(60)}`;
     const d = enforceLimits(run({ agent_type: longType, agent_group: longType }));
     expect(d.ok && d.event.type === 'run' && [d.event.agent_type, d.event.agent_group]).toEqual(['other', 'other']);
+  });
+});
+
+describe('turn_started (ADR-0027)', () => {
+  const now = Date.parse('2026-10-06T12:00:00Z');
+  const started = (at: string) => parse(ev.turnStarted('s', at, 't'));
+
+  it('uses the turn time window with started = ended = started_at', () => {
+    expect(timeWindowProblem(started('2026-10-05T09:00:30Z'), 30, now)).toBeNull();
+    expect(timeWindowProblem(started('2026-09-05T23:59:00Z'), 30, now)).toMatch(/retention/);
+    expect(timeWindowProblem(started(new Date(now + 2 * 86_400_000).toISOString()), 30, now)).toBe(
+      'timestamp is more than a day in the future',
+    );
+  });
+
+  it('enforceLimits passes it through unchanged', () => {
+    const e = started('2026-10-05T09:00:30Z');
+    expect(enforceLimits(e)).toEqual({ ok: true, event: e });
   });
 });

@@ -143,6 +143,7 @@ const INGEST_TYPE_LABEL: Record<string, string> = {
   turn_summary: 'patches',
   session_title: 'patches',
   session_start: 'sessions',
+  turn_started: 'sessions',
   session_end: 'sessions',
 };
 

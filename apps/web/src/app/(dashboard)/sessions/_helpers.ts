@@ -1,4 +1,5 @@
 import type { AgentGraphProps } from '@/components/charts/AgentGraph';
+import type { ActiveSession } from '../../../lib/live/status';
 import { agentRunLabel } from '../../../lib/queries/agent-groups';
 import type { Outcomes } from '../../../lib/queries/sqlutil';
 import type { SessionDetail, SessionRow } from '../../../lib/queries/sessions';
@@ -105,4 +106,36 @@ export function sessionGraph(d: Pick<SessionDetail, 'session' | 'turns' | 'runs'
     projectLegend: [{ label: project, colorIndex: 0 }],
     ariaLabel: `Session timeline: ${d.turns.length} turn${d.turns.length === 1 ? '' : 's'} and ${runs.length} sub-agent run${runs.length === 1 ? '' : 's'}`,
   };
+}
+
+/**
+ * Serializable DataTable rows of the "Active now" strip (ADR-0027); `elapsedOf` gives the ticking elapsed time. No
+ * user fields unless the row carries them.
+ */
+export function toActiveNowRows(rows: ActiveSession[], elapsedOf: (r: ActiveSession) => number) {
+  return rows.map((r) => ({
+    id: r.id,
+    href: sessionHref(r.id),
+    title: r.title,
+    state: r.state,
+    elapsedMs: elapsedOf(r),
+    user: r.userName ?? (r.userId ? 'former member' : null),
+    project: r.projectName ?? (r.projectId ? 'unknown project' : null),
+    harness: r.harness,
+    turns: r.turns,
+    runs: r.runs,
+    tokens: r.tokens,
+    cost: r.cost,
+    lastOutcome: r.lastOutcome,
+  }));
+}
+
+/**
+ * The session graph of a live session (ADR-0027): the axis reaches past `nowMs` (padded by 2% of the span, at least a
+ * second) and the graph draws a "now" line there. `nowMs` undefined (not live) returns the graph unchanged.
+ */
+export function liveGraph(g: Omit<AgentGraphProps, 'onZoom'>, nowMs: number | undefined): Omit<AgentGraphProps, 'onZoom'> {
+  if (nowMs === undefined) return g;
+  const pad = Math.max(1000, Math.round((Math.max(nowMs, g.toMs) - g.fromMs) * 0.02));
+  return { ...g, toMs: Math.max(g.toMs, nowMs + pad), nowMs };
 }

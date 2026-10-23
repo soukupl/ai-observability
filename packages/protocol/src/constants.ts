@@ -67,6 +67,7 @@ export type KnownHarness = (typeof HARNESSES)[number];
 
 export const EVENT_TYPES = [
   'session_start',
+  'turn_started',
   'turn',
   'run',
   'turn_outcome',

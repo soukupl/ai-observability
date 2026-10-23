@@ -8,6 +8,10 @@ A tiny zero-dependency collector (`ai-obs`) reads exact numbers from Claude Code
 local transcripts and pushes batched, idempotent events to the ingest API. Prompts, code, diffs and
 file paths never leave the developer's machine.
 
+Running sessions show live: the dashboard's **Active now** strip (`/sessions`) and the session page tell working from
+idle with a ticking timer (the collector's `turn_started` event, polled every 10 s), and `ai-obs live` shows the sessions
+on your own machine in a terminal, from local files only (see [packages/collector/README.md](packages/collector/README.md)).
+
 - Requirements: [BRIEF.md](BRIEF.md) · Architecture: [ARCHITECTURE.md](ARCHITECTURE.md) · Decisions: [docs/adr/](docs/adr/README.md)
 
 ## Quick start
@@ -100,7 +104,7 @@ restart (safe, just slower).
 |---|---|---|
 | `packages/protocol` | `@ai-obs/protocol` | Ingest schema v1: types, zod schemas, `validateBatch()`, shared constants, `fixtures/` |
 | `packages/db` | `@ai-obs/db` | Drizzle schema, `migrations/` (incl. roles + RLS), `dbFor()`, `withRlsContext()`, migrate + seed — see [packages/db/README.md](packages/db/README.md) |
-| `packages/collector` | `ai-obs` | Zero-runtime-dependency CLI: `init`, `token`, `use`, `doctor`, `status`, `flush`, `uninstall`, `hook` |
+| `packages/collector` | `ai-obs` | Zero-runtime-dependency CLI: `init`, `token`, `use`, `doctor`, `status`, `flush`, `live`, `uninstall`, `hook` |
 | `apps/web` | `@ai-obs/web` | Next.js App Router + Tailwind + Recharts: dashboard, admin, super admin, `/api/v1/*` |
 | `apps/worker` | `@ai-obs/worker` | Rollups, budgets, retention, e-mail jobs |
 | `docs/adr` | – | Architecture Decision Records |

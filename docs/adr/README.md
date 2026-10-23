@@ -26,3 +26,4 @@
 - [ADR-0024: Personal flow flags, print-to-PDF flow reports, ingest statistics and client-side chart zoom](0024-flow-flags-report-ingest-stats-zoom.md)
 - [ADR-0025: One detail page for a turn and its agent flows](0025-turn-page-holds-its-flows.md)
 - [ADR-0026: Sessions view over harness sessions; session titles as a patch event](0026-sessions-view-and-titles.md)
+- [ADR-0027: Live session status: turn_started, Active now, ai-obs live](0027-live-session-status.md)

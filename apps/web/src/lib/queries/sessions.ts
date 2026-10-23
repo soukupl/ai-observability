@@ -9,8 +9,9 @@ import { listProjects, listTeams } from './lookups';
 import { dims, turnConds } from './providers';
 import { addDays, rawRange, rangeFor, type ResolvedRange } from './range';
 import { canSeeUsers, type QueryCtx } from './scope';
-import { costTokens, num, rows, tokensOf, where, type Outcomes, type TokenTotals } from './sqlutil';
+import { costTokens, num, numOrNull, rows, tokensOf, where, type Outcomes, type TokenTotals } from './sqlutil';
 import { mergeUses } from './turns';
+import { IDLE_MAX_MS, sessionStatus, WORKING_MAX_MS, type ActiveSession, type ActiveSessionsPayload, type LiveSessionPayload } from '../live/status';
 
 /**
  * Sessions view (ADR-0026, docs/briefs/sessions-view.md): one row per harness session (`agent_sessions`) with its
@@ -21,6 +22,9 @@ import { mergeUses } from './turns';
  * A session's span runs from its first activity (the session start or its first turn, whichever is earlier) to its
  * last (the latest of its last turn end, last run end and `ended_at`): Workflow agents outlive the turn that launched
  * them (ADR-0019).
+ *
+ * Live status (ADR-0027): `current_turn_started_at`, `last_seen_at` and the last turn end feed `sessionStatus`
+ * (lib/live/status.ts); `listActiveSessions` / `getLiveSession` serve the "Active now" strip and the live session page.
  */
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -100,6 +104,14 @@ export interface SessionRow {
   cost: CostValue;
   outcomes: Outcomes;
   isMine: boolean;
+  /** `current_turn_started_at` (ADR-0027): non-null = a turn started and may still be running. */
+  currentTurnStartedMs: number | null;
+  /** End of the last finished turn; null when the session has none. */
+  lastTurnEndedMs: number | null;
+  /** The latest signal: max(lastActivityMs, `last_seen_at`). */
+  lastSeenMs: number;
+  /** Outcome of the latest turn; null when the session has none. */
+  lastOutcome: Outcome | null;
   /** Present ONLY when the viewer may see individuals (canSeeUsers). */
   userId?: string | null;
   userName?: string | null;
@@ -127,7 +139,8 @@ const MS = (col: string) => sql.raw(`(extract(epoch from ${col}) * 1000)::bigint
 
 /**
  * One row per session of `cand` (a query returning `session_id`), with whole-session totals (every visible turn and
- * run of the session, not only those of the filter range). `span` limits to sessions whose span overlaps it.
+ * run of the session, not only those of the filter range). `span` limits to sessions whose span overlaps it. A session
+ * without a turn yet is kept (zero totals), so live and detail reads see it; the list finds sessions through turns.
  */
 function sessionSql(ctx: QueryCtx, cand: SQL, opts: { span?: { fromIso: string; toIso: string }; withUsers: boolean; tail: SQL }): SQL {
   const own = ctx.agg ? sql`and s.user_id = ${ctx.viewer.id}::uuid` : sql``;
@@ -145,7 +158,8 @@ function sessionSql(ctx: QueryCtx, cand: SQL, opts: { span?: { fromIso: string; 
         sum(t.reasoning_tokens)::bigint as reasoning_tokens,
         (array_agg(t.summary order by t.started_at, t.id) filter (where t.summary is not null and t.summary <> ''))[1] as first_summary,
         (array_agg(t.project_id order by t.started_at, t.id) filter (where t.project_id is not null))[1] as turn_project_id,
-        (array_agg(t.team_id order by t.started_at, t.id) filter (where t.team_id is not null))[1] as turn_team_id
+        (array_agg(t.team_id order by t.started_at, t.id) filter (where t.team_id is not null))[1] as turn_team_id,
+        (array_agg(t.outcome order by t.started_at desc, t.id desc))[1] as last_outcome
       from turns t join cand c on c.session_id = t.session_id
       where t.company_id = ${ctx.viewer.companyId}::uuid
       group by t.session_id
@@ -163,11 +177,13 @@ function sessionSql(ctx: QueryCtx, cand: SQL, opts: { span?: { fromIso: string; 
         greatest(st.last_turn_end, rs.last_run_end, s.ended_at) as span_end,
         s.ended_at, st.turns, coalesce(rs.runs, 0) as runs, coalesce(rs.workflows, 0) as workflows,
         st.success, st.failed, st.abandoned, st.unknown, st.input_tokens, st.output_tokens, st.cache_read_tokens,
-        st.cache_write_tokens, st.reasoning_tokens, st.first_summary
-      from agent_sessions s join st on st.session_id = s.id left join rs on rs.session_id = s.id
+        st.cache_write_tokens, st.reasoning_tokens, st.first_summary,
+        s.current_turn_started_at, s.last_seen_at, st.last_turn_end, st.last_outcome
+      from agent_sessions s join cand c on c.session_id = s.id left join st on st.session_id = s.id left join rs on rs.session_id = s.id
       where s.company_id = ${ctx.viewer.companyId}::uuid ${own}
     )
     select x.*, ${MS('x.span_start')} as span_start_ms, ${MS('x.span_end')} as span_end_ms, ${MS('x.ended_at')} as ended_ms,
+      ${MS('x.current_turn_started_at')} as current_turn_started_ms, ${MS('x.last_seen_at')} as last_seen_ms, ${MS('x.last_turn_end')} as last_turn_end_ms,
       (x.user_id is not distinct from ${ctx.viewer.id}::uuid) as is_mine, count(*) over () as total ${userCols}
     from x ${userJoin} ${span}
     ${opts.tail}`;
@@ -211,6 +227,10 @@ export function mapSessionRow(r: Record<string, unknown>, lk: Lookups, withUsers
     cost: ZERO_COST,
     outcomes: { success: num(r.success), failed: num(r.failed), abandoned: num(r.abandoned), unknown: num(r.unknown) },
     isMine: Boolean(r.is_mine),
+    currentTurnStartedMs: numOrNull(r.current_turn_started_ms),
+    lastTurnEndedMs: numOrNull(r.last_turn_end_ms),
+    lastSeenMs: Math.max(lastActivityMs, numOrNull(r.last_seen_ms) ?? 0),
+    lastOutcome: (r.last_outcome as Outcome | null | undefined) ?? null,
   };
   if (withUsers) {
     row.userId = (r.user_id as string | null) ?? null;
@@ -340,6 +360,113 @@ async function finishRows(ctx: QueryCtx, list: Record<string, unknown>[], lk: Lo
     rows: list.map((r) => ({ ...mapSessionRow(r, lk, withUsers, nowMs), cost: costs.get(String(r.id)) ?? ZERO_COST, flows: flowCount.get(String(r.id)) ?? 0 })),
     flowsTruncated: fl.truncated,
   };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Live sessions (ADR-0027)
+// ---------------------------------------------------------------------------------------------
+
+/** Most sessions the "Active now" strip lists. */
+export const LIVE_MAX_SESSIONS = 100;
+
+const NO_LOOKUPS: Lookups = { team: new Map(), project: new Map() };
+
+/**
+ * Sessions that may be running: no `session_end` and a signal within WORKING_MAX_MS (the longest a session stays
+ * live), narrowed in SQL to those that can still be working (a turn started within WORKING_MAX_MS) or idle (a signal
+ * within IDLE_MAX_MS), so stale sessions cannot crowd running ones out of the strip's row limit. The status check on
+ * the rows stays the exact one. Rows without `last_seen_at` (written before migration 0017) never qualify.
+ */
+function liveCandidates(ctx: QueryCtx, nowMs: number): SQL {
+  const own = ctx.agg ? sql`and s.user_id = ${ctx.viewer.id}::uuid` : sql``;
+  return sql`select s.id as session_id from agent_sessions s where s.company_id = ${ctx.viewer.companyId}::uuid ${own}
+    and s.ended_at is null and s.last_seen_at >= ${new Date(nowMs - WORKING_MAX_MS).toISOString()}::timestamptz
+    and ((s.current_turn_started_at is not null and s.current_turn_started_at >= ${new Date(nowMs - WORKING_MAX_MS).toISOString()}::timestamptz)
+      or s.last_seen_at > ${new Date(nowMs - IDLE_MAX_MS).toISOString()}::timestamptz)`;
+}
+
+/**
+ * The viewer's running sessions (working or idle; never stale or ended), working first, then the most recent state
+ * change. Same visibility as the sessions list (ADR-0026): aggregates-only mode lists only the viewer's own sessions.
+ * Not narrowed by the page filters. No flows.
+ */
+export async function listActiveSessions(ctx: QueryCtx, now: Date = ctx.now): Promise<ActiveSessionsPayload> {
+  const nowMs = now.getTime();
+  const withUsers = !ctx.agg && canSeeUsers(ctx.viewer);
+  const [lk, list] = await Promise.all([
+    lookups(ctx),
+    rows<Record<string, unknown>>(
+      ctx.tx,
+      sessionSql(ctx, liveCandidates(ctx, nowMs), {
+        withUsers,
+        tail: sql`order by greatest(x.last_seen_at, x.span_end, x.span_start) desc, x.id limit ${LIVE_MAX_SESSIONS + 1}`,
+      }),
+    ),
+  ]);
+  const live = list
+    .slice(0, LIVE_MAX_SESSIONS)
+    .map((r) => {
+      const s = mapSessionRow(r, lk, withUsers, nowMs);
+      return { s, status: sessionStatus(s, nowMs) };
+    })
+    .filter((x) => x.status.state === 'working' || x.status.state === 'idle');
+  const costs = await usageCosts(ctx, live.map((x) => x.s.id), 'session');
+  const out: ActiveSession[] = live.map(({ s, status }) => {
+    const row: ActiveSession = {
+      id: s.id,
+      title: s.title,
+      harness: s.harness,
+      projectId: s.projectId,
+      projectName: s.projectName,
+      state: status.state as ActiveSession['state'],
+      sinceMs: status.sinceMs,
+      elapsedMs: status.elapsedMs,
+      turns: s.turns,
+      runs: s.runs,
+      tokens: s.tokens.total,
+      cost: costs.get(s.id) ?? ZERO_COST,
+      lastOutcome: s.lastOutcome,
+      isMine: s.isMine,
+    };
+    if (withUsers) {
+      row.userId = s.userId ?? null;
+      row.userName = s.userName ?? null;
+    }
+    return row;
+  });
+  out.sort((a, b) => (a.state === b.state ? 0 : a.state === 'working' ? -1 : 1) || b.sinceMs - a.sinceMs || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return { nowMs, ownOnly: ctx.agg, truncated: list.length > LIVE_MAX_SESSIONS, rows: out };
+}
+
+/** A session row → its live payload at `nowMs`; `rev` changes whenever the server-rendered page is out of date. */
+export function toLiveSessionPayload(s: SessionRow, nowMs: number): LiveSessionPayload {
+  const status = sessionStatus(s, nowMs);
+  return {
+    nowMs,
+    status,
+    currentTurnStartedMs: s.currentTurnStartedMs,
+    turns: s.turns,
+    runs: s.runs,
+    workflows: s.workflows,
+    tokens: s.tokens.total,
+    cost: s.cost,
+    outcomes: s.outcomes,
+    lastActivityMs: s.lastActivityMs,
+    endedMs: s.endedMs,
+    title: s.title,
+    rev: [s.turns, s.runs, s.workflows, s.lastActivityMs, s.endedMs ?? '', s.title, status.state, s.currentTurnStartedMs ?? ''].join('|'),
+  };
+}
+
+/** One session's live state (the session page polls it); null when missing or not visible. */
+export async function getLiveSession(ctx: QueryCtx, sessionId: string): Promise<LiveSessionPayload | null> {
+  const id = parseSessionId(sessionId);
+  if (!id) return null;
+  const [head] = await rows<Record<string, unknown>>(ctx.tx, sessionSql(ctx, sql`select ${id}::uuid as session_id`, { withUsers: false, tail: sql`` }));
+  if (!head) return null;
+  const nowMs = ctx.now.getTime();
+  const costs = await usageCosts(ctx, [id], 'session');
+  return toLiveSessionPayload({ ...mapSessionRow(head, NO_LOOKUPS, false, nowMs), cost: costs.get(id) ?? ZERO_COST }, nowMs);
 }
 
 // ---------------------------------------------------------------------------------------------

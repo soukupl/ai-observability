@@ -127,6 +127,11 @@ export function allocateSubRows(
   return { subRowOf, laneSubRows, laneOfRun, overflow };
 }
 
+/** The empty state of the graph; a live session page (`nowMs` set) may have a turn still running (ADR-0027). */
+export function emptyGraphMessage(nowMs: number | undefined): string {
+  return nowMs === undefined ? 'No turns in this window.' : 'No finished turn yet.';
+}
+
 /**
  * Background tail of each turn: the latest end of its runs when that is after the turn's own end (workflow agents run
  * in the background and outlive the turn that launched them). Turns without such runs are absent.

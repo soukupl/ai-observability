@@ -270,16 +270,16 @@ export const MAX_FUTURE_MS = 86_400_000;
 const startOfUtcDayMs = (ms: number) => ms - (((ms % 86_400_000) + 86_400_000) % 86_400_000);
 
 /**
- * The event time window (DP-05, DP-08): a turn or run that started before the company's retention cutoff
+ * The event time window (DP-05, DP-08): a turn, run or turn_started that started before the company's retention cutoff
  * (00:00 UTC, `retentionDays` ago: the same cutoff the worker's retention pass deletes by) would be
  * stored just to be deleted again and would make already-folded rollup days wrong; one that starts or
  * ends more than a day in the future would be counted in month-to-date budgets. Rejected with a reason.
  * Null = inside the window (or not a timed event).
  */
 export function timeWindowProblem(event: IngestEvent, retentionDays: number, now: number): string | null {
-  if (event.type !== 'turn' && event.type !== 'run') return null;
+  if (event.type !== 'turn' && event.type !== 'run' && event.type !== 'turn_started') return null;
   const started = Date.parse(event.started_at);
-  const ended = Date.parse(event.ended_at);
+  const ended = event.type === 'turn_started' ? started : Date.parse(event.ended_at);
   if (started < startOfUtcDayMs(now) - retentionDays * 86_400_000) return 'started_at is before the retention window';
   if (started > now + MAX_FUTURE_MS || ended > now + MAX_FUTURE_MS) return 'timestamp is more than a day in the future';
   return null;

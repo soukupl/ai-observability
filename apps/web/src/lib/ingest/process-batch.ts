@@ -8,6 +8,7 @@ import {
   applySessionTitle,
   applyTurn,
   applyTurnOutcome,
+  applyTurnStarted,
   applyTurnSummary,
   lockBatchSessions,
 } from './apply-events';
@@ -15,15 +16,16 @@ import { OwnerConflictError, rows, type BatchContext, type TokenContext } from '
 import { enforceLimits, timeWindowProblem } from './limits';
 import { resolveAttribution, upsertMachine } from './resolve';
 
-/** Apply order inside a batch: sessions, turns, runs (parents first), patches, session ends. */
+/** Apply order inside a batch: sessions, turn starts, turns, runs (parents first), patches, session ends. */
 const TYPE_ORDER: Record<IngestEvent['type'], number> = {
   session_start: 0,
-  turn: 1,
-  run: 2,
-  turn_outcome: 3,
-  turn_summary: 3,
-  session_title: 3,
-  session_end: 4,
+  turn_started: 1,
+  turn: 2,
+  run: 3,
+  turn_outcome: 4,
+  turn_summary: 4,
+  session_title: 4,
+  session_end: 5,
 };
 
 /**
@@ -46,6 +48,8 @@ async function applyEvent(tx: Tx, ctx: BatchContext, e: IngestEvent): Promise<vo
   switch (e.type) {
     case 'session_start':
       return applySessionStart(tx, ctx, e);
+    case 'turn_started':
+      return applyTurnStarted(tx, ctx, e);
     case 'turn':
       return applyTurn(tx, ctx, e, e.event_id);
     case 'run':

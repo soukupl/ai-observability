@@ -133,13 +133,13 @@ Request handling, in order:
    `mcp:<server>/<tool>`), so it is never stored.
    Tool keys are lower-cased and restricted to `[a-z0-9_]{1,64}` (anything else → `other`, `mcp__*` → `mcp`), agent
    types to `[A-Za-z0-9_.:-]{1,64}` (else `other`) and outcome signals to the known set, so an older collector cannot
-   store paths or internal names. A turn or run that started before the company's retention cutoff (plan maximum
-   applied to `settings.retentionDays`, 00:00 UTC) or that starts or ends more than a day in the future is rejected.
+   store paths or internal names. A turn, run or `turn_started` that started before the company's retention cutoff (plan maximum
+   applied to `settings.retentionDays`, 00:00 UTC) or that starts or ends more than a day in the future is rejected (for `turn_started`, `started_at` counts as both).
 5. **Apply** in one transaction under `withIngestContext(db, companyId)`, in chunks of 25 events per savepoint
    (a batch of 500 uses about 20 subtransaction ids, DP-14), together with the events' `ingest_events` rows, so a
    duplicate `event_id` is counted in `duplicates` and changes nothing. A failing chunk is rolled back and its events
    retried one per savepoint, so an event the DB refuses is rejected (`"could not be stored"`) alone, without being
-   marked as seen. Events are applied in the order session_start → turn → run (by depth) → patches (`turn_outcome`, `turn_summary`,
+   marked as seen. Events are applied in the order session_start → turn_started → turn → run (by depth) → patches (`turn_outcome`, `turn_summary`,
    `session_title`; arrival order) → session_end.
    Ledger keys are `<user id, else token:<token id>>:<event_id>`: retries de-duplicate across one user's tokens and
    machines, and nobody can pre-claim another sender's event ids (SEC-3).
@@ -160,7 +160,7 @@ Resolution rules:
 - **Machine** upserted by `machine.id`. **Project** upserted by key; the display name is only set on insert
   (admin renames stick). Hashed keys (`sha256:…`) never get a name; in a company with hashed naming a
   plain key is hashed server-side (`sha256:` + hex SHA-256 of the key, which collectors must match) and its name dropped.
-- **Sessions**: a turn or `session_end` for an unknown session creates it; `session_start` sets
+- **Sessions**: a `turn_started`, turn or `session_end` for an unknown session creates it; `session_start` sets
   `started_at`, project, version, and back-fills the project (and mapped team) of turns that came first.
 - **Session titles** (ADR-0026): `session_title` sets `agent_sessions.title` / `title_source` (`custom` | `ai`; the
   latest patch wins; only the session's owner, or anyone while it has none). A title for a session that has not
@@ -171,6 +171,19 @@ Resolution rules:
   advisory lock on the session key; `processBatch` takes every session lock of the batch first, in sorted order
   (`lockBatchSessions`), so session locks always precede turn locks and concurrent batches cannot deadlock.
   The ingest role (`app_ingest`) can write titles but not read them.
+- **Live status** (ADR-0027): `agent_sessions.current_turn_started_at` (C; null = idle) and `last_seen_at`, both
+  nullable and not backfilled (a row from before migration 0017 never shows as live). `turn_started` sets C to the
+  greater of the stored value and `started_at`, creates an unknown session, applies a parked title, and re-opens a
+  session that ended before it (`ended_at` and `end_reason` back to null; one from before `ended_at` leaves it ended).
+  A `turn` clears C when C is at or before the turn's `ended_at`; `session_end` clears C (and sets `ended_at` and
+  `end_reason`) only when C is at or before its time, so an older end that arrives after a newer prompt's
+  `turn_started` (one backlog batch orders `turn_started` first) does not end the resumed session. `last_seen_at` is
+  `greatest(stored, least(event time, now()))`, bumped by `session_start` (at), `turn_started` (`started_at`), `turn`
+  (`ended_at`) and `session_end` (at); `run`, `turn_outcome`, `turn_summary` and `session_title` do not bump it. Migration
+  0017 gives the ingest role (in addition to its earlier grants) SELECT on `current_turn_started_at`, `last_seen_at`
+  and `ended_at` of `agent_sessions` and UPDATE on the first two; `started_at`, `title` and `end_reason` stay
+  unreadable for it, so the re-open and the `end_reason` write are their own statements (`UPDATE ... WHERE ended_at <
+  started_at`, `UPDATE ... SET end_reason`). The index `agent_sessions_company_last_seen_idx` serves the live query.
 - **Runs** before their turn keep `turn_id` null and are linked (with team / user) when the turn arrives;
   children before their parent are linked when the parent arrives.
 - **Run links** (ADR-0020): a run event stores `stage_index` and `flow_key` (trimmed, ≤ 128, path-like or free text →
@@ -336,7 +349,7 @@ Two more cards (brief `docs/briefs/dashboard-followups-2026-10-10.md`):
 
 - **Ingest** (`IngestCard.tsx`, right after the KPI tiles): what the collectors delivered, company-wide and not filtered:
   the last event received (relative, UTC in the sub line), events in the last 24 h (by type: turns, runs, patches =
-  `turn_outcome` + `turn_summary` + `session_title`, sessions, other) and in the last 7 days. `getIngestStats` (`lib/queries/ingest-stats.ts`)
+  `turn_outcome` + `turn_summary` + `session_title`, sessions = `session_start` + `turn_started` + `session_end`, other) and in the last 7 days. `getIngestStats` (`lib/queries/ingest-stats.ts`)
   reads `agg_ingest_stats()` (migration 0015, SECURITY DEFINER over `ingest_events`, which keeps 30 days) inside a
   savepoint, so a deployment without the migration shows "Ingest stats unavailable" instead of failing the page;
   `ingestSummary` / `relativeAgo` in `helpers.ts` shape the card.
@@ -489,7 +502,7 @@ error rate (errors / calls not refused), denied calls and the latency bucket of 
 over ≥ 20 calls); the CSV adds `errors`, `denied`, `latency_ms` and the five bucket counts. Hashed names (company project-naming mode) are shortened to
 `sha256:12345678…` (`formatUsageName`). Turn detail lists the turn's skills (typed / by the model) and MCP calls per server.
 
-### Sessions (`/sessions`, `/sessions/[id]`, ADR-0026)
+### Sessions (`/sessions`, `/sessions/[id]`, ADR-0026, ADR-0027)
 
 A session is one harness session (`agent_sessions`; the id `claude --resume` / `codex resume` takes) with its turns
 and, through them, their sub-agent runs, workflows (`orchestration_id`) and flows. Read from raw rows under RLS in
@@ -512,6 +525,49 @@ else `Session <first 8 chars of the id>`.
   in the audit log). The session filter ignores the date range and the filter bar; it reads under RLS only.
 - **Privacy**: in aggregates-only mode leads and admins see only their own sessions (RLS plus an explicit
   `user_id = viewer` condition); in full mode visibility follows `/turns`.
+
+**Live status** (ADR-0027). Status comes from `sessionStatus` in `src/lib/live/status.ts` (pure, type imports only, so
+client components can use it): *ended* when `ended_at` is set; *working* when `current_turn_started_at` is set and later
+than the last turn end (stale after `WORKING_MAX_MS` = 2 h; the 30-minute rule never stales it, there is no heartbeat);
+otherwise *idle* since the last turn end (or the session start), *stale* once the latest signal (the greatest of
+`last_seen_at`, last activity, start and last turn end) is at least `IDLE_MAX_MS` = 30 min old. The collector holds the
+same literals (`LIVE_IDLE_STALE_MS`, `LIVE_WORKING_STALE_MS`); each side has a test for them. Collectors older than 0.4.0
+send no `turn_started`, so their sessions never show as working. The "open" badge on the list (`SESSION_OPEN_MS`,
+30 min) is unchanged.
+
+- **Active now** (top of `/sessions`, above the filter bar, `(list)/ActiveNow.tsx`): working and idle sessions, working
+  first, then the most recent state change; at most 100 (`LIVE_MAX_SESSIONS`; when cut it says "Showing the 100 most
+  recent."). It is not narrowed by the page filters. Candidates are sessions with `ended_at` null and `last_seen_at` in
+  the last 2 h, so rows with a null `last_seen_at` (written before migration 0017) never appear. Visibility is the rule
+  above: in aggregates-only mode only the viewer's own sessions (the description says so), and the User column and user
+  keys only for full-mode leads and admins. Columns: Session (link), Status, For, User, Project, Harness, Turns,
+  Sub-agents, Tokens, ≈ Cost, Last outcome. Empty: "No sessions running." Query: `listActiveSessions`
+  (`lib/queries/sessions.ts`).
+- **Live session page** (`/sessions/[id]` while the status is not `ended`; stale counts as live): a "Now" card first
+  (Status badge: info = working, neutral = idle, warn = stale; ticking Elapsed; Turn: "Turn N started <UTC time>",
+  "waiting for the next prompt" or "no signal: the harness may have closed without an end event"; So far: turns,
+  tokens, ≈ cost), and a "now" line on the agent graph whose axis extends past the server's now by 2 % of the span
+  (at least 1 s). A running turn's tokens arrive only when the turn ends. The page calls `router.refresh()` when the
+  polled `rev` differs from the rendered one (`rev` = turns, runs, workflows, last activity, end, title, state and
+  `current_turn_started_at`; never flows or cost). A session with no finished turn has a detail page too
+  (`sessionSql` left-joins turns; its Turns card says "No finished turn yet."), but `/sessions` lists sessions only
+  through turns, so such a session appears only in Active now.
+- **Routes** (`src/app/api/live/sessions`, logic in `handlers.ts`): `GET /api/live/sessions?company=<companyId>`
+  returns `{nowMs, ownOnly, truncated, rows}` and `GET /api/live/sessions/<uuid>?company=<companyId>` returns
+  `{nowMs, status, currentTurnStartedMs, turns, runs, workflows, tokens, cost, outcomes, lastActivityMs, endedMs, title,
+  rev}`. Both run under `withDashboardContext` (same RLS and visibility as the pages), are read-only and write no audit
+  row. Errors are JSON with `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`: 401 `unauthorized`, 403
+  `forbidden` (no company), 409 `company_changed` (`?company` missing or not the active company), 404 `not_found`
+  (detail only: bad uuid, missing or not visible). No telemetry query runs on 401, 403 or 409 (the session lookup still does).
+- **Polling** (`components/live-poll.ts`): every 10 s (`POLL_MS`) on a `setTimeout` chain; the first fetch comes one
+  interval after mount; no fetch while the tab is hidden, and on becoming visible it fetches at once if the last fetch
+  is at least 10 s old. It stops for good on 401, 403, 404 or 409 and shows a message (company changed: "The active
+  company changed in another tab. Reload this page."; signed out: "Signed out. Reload the page to sign in again."; not
+  visible: "This session is no longer visible."; forbidden: "Not available."). Any other failure keeps the last data,
+  shows "Couldn't refresh; retrying." and retries. Elapsed timers tick every 1 s (`TICK_MS`) on the client clock,
+  offset from the payload's server `nowMs`. Polling keeps the login session sliding (ADR-0027).
+- `SessionRow` gained `currentTurnStartedMs`, `lastTurnEndedMs`, `lastSeenMs` (the greater of last activity and
+  `last_seen_at`) and `lastOutcome` (outcome of the latest turn). CSV exports are unchanged.
 
 ### Turns explorer (`/turns`, `/turns/[id]`)
 

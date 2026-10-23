@@ -54,7 +54,7 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
   describe('protocol fixture', () => {
     it('accepts a valid batch and stores the turn, run, patches and session', async () => {
       const res = await post(w.tokens.alice, protocolFixture());
-      expect(res).toEqual({ status: 200, body: { accepted: 7, duplicates: 0, rejected: [] } });
+      expect(res).toEqual({ status: 200, body: { accepted: 8, duplicates: 0, rejected: [] } });
 
       const [s] = await q(sql`select s.*, p.key from agent_sessions s join projects p on p.id = s.project_id
         where s.external_id = 'claude-code:sess-1'`);
@@ -63,6 +63,14 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
         title: 'Auth middleware JWT refresh', title_source: 'custom',
       });
       expect(s!.ended_at).not.toBeNull();
+      // Live status (ADR-0027): the turn and session_end cleared the turn start; last seen = session_end.
+      expect(
+        await q(sql`select current_turn_started_at is null as idle, last_seen_at = '2026-10-05T10:30:00Z'::timestamptz as seen
+          from agent_sessions where external_id = 'claude-code:sess-1'`),
+      ).toEqual([{ idle: true, seen: true }]);
+      expect(
+        await q(sql`select type from ingest_events where event_id = ${`${w.users.alice}:01J9ZQ8Y3N4X5V6W7Z8A9B0C1B`}`),
+      ).toEqual([{ type: 'turn_started' }]);
 
       const [t] = await q(sql`select *, input_tokens::int, output_tokens::int, cache_read_tokens::int,
         cache_write_tokens::int, reasoning_tokens::int, requests::int, duration_ms::int
@@ -124,7 +132,7 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
           (select count(*) from agent_sessions) s, (select max(updated_at) from turns) tu, (select count(*) from ingest_events) e`);
       const before = await snapshot();
       const res = await post(w.tokens.alice, protocolFixture());
-      expect(res).toEqual({ status: 200, body: { accepted: 0, duplicates: 7, rejected: [] } });
+      expect(res).toEqual({ status: 200, body: { accepted: 0, duplicates: 8, rejected: [] } });
       expect(await snapshot()).toEqual(before);
     });
 
@@ -550,6 +558,7 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
       for (const [id, create] of [
         ['ti-early-start', ev.sessionStart('ti-early-start')],
         ['ti-early-turn', ev.turn('ti-early-turn', 'ti-early-turn-t')],
+        ['ti-early-ts', ev.turnStarted('ti-early-ts')],
         ['ti-early-end', { ...ev.sessionStart('ti-early-end'), type: 'session_end', reason: 'exit' } as unknown as IngestEventInput],
       ] as const) {
         expect((await post(w.tokens.alice, batch([ev.title(id, `Title of ${id}`)]))).body).toMatchObject({ accepted: 1, rejected: [] });
@@ -592,6 +601,156 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
       await expect(denied(sql`select title from agent_sessions`)).rejects.toMatchObject(denial);
       await expect(denied(sql`select title from pending_session_patches`)).rejects.toMatchObject(denial);
       await expect(denied(sql`delete from pending_session_patches`)).rejects.toMatchObject(denial);
+    });
+  });
+
+  describe('live session status (ADR-0027)', () => {
+    const T = (hms: string) => `2026-10-05T${hms}Z`;
+    const utc = (col: string) => sql.raw(`to_char(${col} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as ${col}`);
+    const live = async (id: string) =>
+      (
+        await q<{
+          current_turn_started_at: string | null;
+          last_seen_at: string | null;
+          ended_at: string | null;
+          end_reason: string | null;
+          started_at: string;
+        }>(sql`select ${utc('current_turn_started_at')}, ${utc('last_seen_at')}, ${utc('ended_at')}, end_reason,
+            ${utc('started_at')}
+          from agent_sessions where external_id = ${`claude-code:${id}`}`)
+      )[0];
+    const turnAt = (sessionId: string, turnId: string, startedAt: string, endedAt: string) =>
+      ({ ...ev.turn(sessionId, turnId), started_at: startedAt, ended_at: endedAt }) as IngestEventInput;
+    const sessionEnd = (sessionId: string, at: string): IngestEventInput => ({
+      event_id: ulid(), type: 'session_end', harness: 'claude-code', session_id: sessionId, reason: 'exit', at,
+    });
+    const accepted = async (token: string, events: IngestEventInput[]) =>
+      expect((await post(token, batch(events))).body).toEqual({ accepted: events.length, duplicates: 0, rejected: [] });
+
+    it('a turn_started marks the session working; its turn (started before the hook) clears it', async () => {
+      await accepted(w.tokens.alice, [ev.sessionStart('lv-a')]);
+      expect(await live('lv-a')).toMatchObject({ current_turn_started_at: null, last_seen_at: T('09:00:00') });
+      await accepted(w.tokens.alice, [ev.turnStarted('lv-a', T('09:01:05'), 'lv-a-t')]);
+      expect(await live('lv-a')).toMatchObject({ current_turn_started_at: T('09:01:05'), last_seen_at: T('09:01:05') });
+      await accepted(w.tokens.alice, [turnAt('lv-a', 'lv-a-t', T('09:01:00'), T('09:03:00'))]);
+      expect(await live('lv-a')).toMatchObject({ current_turn_started_at: null, last_seen_at: T('09:03:00') });
+    });
+
+    it('an earlier turn arriving after a newer turn_started does not clear it (separate batches or one)', async () => {
+      await accepted(w.tokens.alice, [ev.turnStarted('lv-b1', T('09:05:00'))]);
+      await accepted(w.tokens.alice, [turnAt('lv-b1', 'lv-b1-t', T('09:01:00'), T('09:03:00'))]);
+      expect(await live('lv-b1')).toMatchObject({ current_turn_started_at: T('09:05:00'), last_seen_at: T('09:05:00') });
+
+      await accepted(w.tokens.alice, [turnAt('lv-b2', 'lv-b2-t', T('09:01:00'), T('09:03:00')), ev.turnStarted('lv-b2', T('09:05:00'))]);
+      expect(await live('lv-b2')).toMatchObject({ current_turn_started_at: T('09:05:00'), last_seen_at: T('09:05:00') });
+    });
+
+    it('in one batch the turn_started is applied before the turn that ends it', async () => {
+      await accepted(w.tokens.alice, [turnAt('lv-c', 'lv-c-t', T('09:04:00'), T('09:06:00')), ev.turnStarted('lv-c', T('09:05:00'))]);
+      expect(await live('lv-c')).toMatchObject({ current_turn_started_at: null, last_seen_at: T('09:06:00') });
+    });
+
+    it('the newest start wins; a replay is a duplicate with one ledger row per event', async () => {
+      const first = ev.turnStarted('lv-d', T('09:05:00'));
+      const older = ev.turnStarted('lv-d', T('09:04:00'));
+      await accepted(w.tokens.alice, [first]);
+      await accepted(w.tokens.alice, [older]);
+      expect(await live('lv-d')).toMatchObject({ current_turn_started_at: T('09:05:00'), last_seen_at: T('09:05:00') });
+
+      const ledger = () =>
+        q(sql`select event_id, type from ingest_events
+          where event_id in (${`${w.users.alice}:${first.event_id}`}, ${`${w.users.alice}:${older.event_id}`}) order by event_id`);
+      const before = await ledger();
+      expect(before.map((r) => r.type)).toEqual(['turn_started', 'turn_started']);
+      expect((await post(w.tokens.alice, batch([older]))).body).toEqual({ accepted: 0, duplicates: 1, rejected: [] });
+      expect(await ledger()).toEqual(before);
+      expect(await live('lv-d')).toMatchObject({ current_turn_started_at: T('09:05:00') });
+    });
+
+    it('creates an unknown session on the fly with its parked title; another user cannot touch it', async () => {
+      await accepted(w.tokens.alice, [ev.title('lv-e', 'Parked live')]);
+      await accepted(w.tokens.alice, [ev.turnStarted('lv-e', T('09:07:00'))]);
+      const created = await live('lv-e');
+      expect(created).toEqual({
+        current_turn_started_at: T('09:07:00'), last_seen_at: T('09:07:00'), ended_at: null, end_reason: null,
+        started_at: T('09:07:00'),
+      });
+      expect(await q(sql`select user_id, title from agent_sessions where external_id = 'claude-code:lv-e'`)).toEqual([
+        { user_id: w.users.alice, title: 'Parked live' },
+      ]);
+
+      const res = await post(w.tokens.bob, batch([ev.turnStarted('lv-e', T('09:08:00'))]));
+      expect(res.body.rejected).toEqual([expect.objectContaining({ reason: OWNED })]);
+      expect(await live('lv-e')).toEqual(created);
+    });
+
+    it('session_end clears the turn start; a later turn_started re-opens a resumed session', async () => {
+      await accepted(w.tokens.alice, [ev.turnStarted('lv-f', T('09:01:00'))]);
+      await accepted(w.tokens.alice, [sessionEnd('lv-f', T('09:10:00'))]);
+      expect(await live('lv-f')).toMatchObject({
+        current_turn_started_at: null, last_seen_at: T('09:10:00'), ended_at: T('09:10:00'), end_reason: 'exit',
+      });
+      // A late start from before the end does not re-open it.
+      await accepted(w.tokens.alice, [ev.turnStarted('lv-f', T('09:05:00'))]);
+      expect(await live('lv-f')).toMatchObject({ ended_at: T('09:10:00'), end_reason: 'exit', last_seen_at: T('09:10:00') });
+      // Resume (same session id, no new session_start).
+      await accepted(w.tokens.alice, [ev.turnStarted('lv-f', T('09:20:00'))]);
+      expect(await live('lv-f')).toMatchObject({
+        current_turn_started_at: T('09:20:00'), last_seen_at: T('09:20:00'), ended_at: null, end_reason: null,
+      });
+    });
+
+    it('an older session_end in the same batch as a resume turn_started does not end the resumed session', async () => {
+      await accepted(w.tokens.alice, [ev.turnStarted('lv-resume', T('09:01:00'))]);
+      // Backlog flush: the server orders turn_started before session_end, so the older end is applied last.
+      await accepted(w.tokens.alice, [ev.turnStarted('lv-resume', T('09:20:00')), sessionEnd('lv-resume', T('09:10:00'))]);
+      expect(await live('lv-resume')).toMatchObject({
+        current_turn_started_at: T('09:20:00'), last_seen_at: T('09:20:00'), ended_at: null, end_reason: null,
+      });
+      // A newer end still ends it.
+      await accepted(w.tokens.alice, [sessionEnd('lv-resume', T('09:30:00'))]);
+      expect(await live('lv-resume')).toMatchObject({
+        current_turn_started_at: null, last_seen_at: T('09:30:00'), ended_at: T('09:30:00'), end_reason: 'exit',
+      });
+    });
+
+    it('last_seen_at ignores runs and patches and is capped at the server clock', async () => {
+      await accepted(w.tokens.alice, [
+        ev.sessionStart('lv-g'),
+        turnAt('lv-g', 'lv-g-t', T('09:01:00'), T('09:03:00')),
+        ev.run('lv-g-t', 'lv-g-r', null, 1),
+        ev.title('lv-g', 'Live title'),
+        ev.summary('lv-g-t', 'Did a thing'),
+      ]);
+      expect(await live('lv-g')).toMatchObject({ current_turn_started_at: null, last_seen_at: T('09:03:00') });
+
+      const future = new Date(Date.now() + 3_600_000).toISOString();
+      await accepted(w.tokens.alice, [ev.turnStarted('lv-g', future)]);
+      expect(
+        await q(sql`select last_seen_at <= now() as capped, last_seen_at > '2026-10-05T09:03:00Z'::timestamptz as bumped,
+            current_turn_started_at = ${future}::timestamptz as raw
+          from agent_sessions where external_id = 'claude-code:lv-g'`),
+      ).toEqual([{ capped: true, bumped: true, raw: true }]);
+    });
+
+    it('rejects a turn_started more than a day in the future', async () => {
+      const far = ev.turnStarted('lv-h', new Date(Date.now() + 2 * 86_400_000).toISOString());
+      expect((await post(w.tokens.alice, batch([far]))).body).toEqual({
+        accepted: 0, duplicates: 0, rejected: [{ event_id: far.event_id, reason: 'timestamp is more than a day in the future' }],
+      });
+      expect(await live('lv-h')).toBeUndefined();
+    });
+
+    it('app_ingest can read the liveness columns and ended_at only', async () => {
+      const run = (query: ReturnType<typeof sql>) =>
+        db.transaction(async (tx) => {
+          await tx.execute(sql`select set_config('app.company_id', ${w.companyId}, true)`);
+          await tx.execute(query);
+        });
+      const denial = { cause: expect.objectContaining({ code: '42501' }) };
+      await expect(run(sql`select current_turn_started_at, last_seen_at, ended_at from agent_sessions`)).resolves.toBeUndefined();
+      await expect(run(sql`select started_at from agent_sessions`)).rejects.toMatchObject(denial);
+      await expect(run(sql`select title from agent_sessions`)).rejects.toMatchObject(denial);
     });
   });
 
@@ -951,8 +1110,14 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
     });
 
     it('batchSessionKeys: the sessions a batch writes, once each, sorted', () => {
-      const b = parsed([ev.turn('k-b', 'k-t1'), ev.sessionStart('k-a'), ev.turn('k-b', 'k-t2'), ev.run('k-t1', 'k-r', null, 1)]);
-      expect(batchSessionKeys(b.events)).toEqual(['claude-code:k-a', 'claude-code:k-b']);
+      const b = parsed([
+        ev.turn('k-b', 'k-t1'),
+        ev.sessionStart('k-a'),
+        ev.turn('k-b', 'k-t2'),
+        ev.run('k-t1', 'k-r', null, 1),
+        ev.turnStarted('k-c'),
+      ]);
+      expect(batchSessionKeys(b.events)).toEqual(['claude-code:k-a', 'claude-code:k-b', 'claude-code:k-c']);
     });
 
     it('uses one savepoint per chunk, not per event, and isolates a failing event within its chunk', async () => {

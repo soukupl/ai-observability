@@ -9,6 +9,7 @@ import type {
   sessionTitleEvent,
   turnEvent,
   turnOutcomeEvent,
+  turnStartedEvent,
   turnSummaryEvent,
 } from './events.js';
 import type { mcp, mcpStats, outcome, phasesMs, project, skills, usageEntry } from './primitives.js';
@@ -22,6 +23,8 @@ export type McpCounts = z.infer<typeof mcp>;
 export type McpStats = z.infer<typeof mcpStats>;
 
 export type SessionStartEvent = z.infer<typeof sessionStartEvent>;
+/** Liveness: a turn started (ADR-0027). */
+export type TurnStartedEvent = z.infer<typeof turnStartedEvent>;
 export type TurnEvent = z.infer<typeof turnEvent>;
 export type RunEvent = z.infer<typeof runEvent>;
 /** One incoming edge of a run (ADR-0020). */

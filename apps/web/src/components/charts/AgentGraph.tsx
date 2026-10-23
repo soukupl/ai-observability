@@ -8,6 +8,7 @@ import {
   branchPath,
   branchY,
   DAY_MS,
+  emptyGraphMessage,
   formatClock,
   formatDuration,
   groupColorIndex,
@@ -45,6 +46,8 @@ export interface AgentGraphProps {
   /** Called with a dragged range on the time axis, snapped to whole minutes (≥ 1 minute). */
   onZoom?: (fromMs: number, toMs: number) => void;
   ariaLabel: string;
+  /** Draws a 'now' line at this time when inside the axis (live session page, ADR-0027). */
+  nowMs?: number;
 }
 
 /** Lane label gutter; narrower on phones so the plot keeps most of the first screen. It stays put on horizontal scroll. */
@@ -75,7 +78,7 @@ function Row({ k, v }: { k: string; v: ReactNode }) {
  * short on screen for a fork are pills on their row. A dashed trunk tail marks agents still running after their turn
  * ended. Drag on the time axis to zoom.
  */
-export function AgentGraph({ lanes, turns, runs, fromMs, toMs, projectLegend, groupOrder, onZoom, ariaLabel }: AgentGraphProps) {
+export function AgentGraph({ lanes, turns, runs, fromMs, toMs, projectLegend, groupOrder, onZoom, ariaLabel, nowMs }: AgentGraphProps) {
   const t = useChartTheme();
   const clipId = `agent-graph-clip-${useId().replace(/[^a-zA-Z0-9_-]/g, '')}`;
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -114,7 +117,7 @@ export function AgentGraph({ lanes, turns, runs, fromMs, toMs, projectLegend, gr
   if (turns.length === 0) {
     return (
       <div className="rounded-md border border-dashed border-zinc-300 px-4 py-10 text-center text-sm text-zinc-500 dark:border-zinc-700 dark:text-zinc-400">
-        No turns in this window.
+        {emptyGraphMessage(nowMs)}
       </div>
     );
   }
@@ -211,6 +214,14 @@ export function AgentGraph({ lanes, turns, runs, fromMs, toMs, projectLegend, gr
               );
             })}
             <line x1={gutter} x2={gutter + plotW} y1={axisH - 6} y2={axisH - 6} stroke={t.axis} strokeWidth={1} />
+            {nowMs !== undefined && nowMs >= fromMs && nowMs <= toMs && (
+              <g pointerEvents="none" aria-hidden>
+                <line x1={scale.x(nowMs)} x2={scale.x(nowMs)} y1={axisH - 6} y2={plotBottom} stroke={t.axis} strokeWidth={1.5} />
+                <text x={scale.x(nowMs) - 3} y={plotBottom - 4} textAnchor="end" fontSize={11} fill={t.axis}>
+                  now
+                </text>
+              </g>
+            )}
 
             <g clipPath={`url(#${clipId})`}>
               {/* Baselines: idle time on the lane */}

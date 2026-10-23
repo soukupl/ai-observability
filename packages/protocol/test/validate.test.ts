@@ -92,6 +92,32 @@ describe('validateBatch', () => {
     expect(res.rejected).toHaveLength(3);
   });
 
+  it('accepts turn_started with and without a turn key and rejects a missing or bad session, key or timestamp', () => {
+    const base = fixture().events[7]!;
+    const { turn_id: _turnId, ...noTurnId } = base as { turn_id: unknown };
+    const { started_at: _startedAt, ...noStartedAt } = base as { started_at: unknown };
+    const res = validateBatch(
+      withEvents([
+        base,
+        { ...base, event_id: '01J9ZQ8Y3N4X5V6W7Z8A9B0C85', turn_id: null },
+        { ...base, event_id: '01J9ZQ8Y3N4X5V6W7Z8A9B0C86', turn_id: '' },
+        { ...noTurnId, event_id: '01J9ZQ8Y3N4X5V6W7Z8A9B0C87' },
+        { ...base, event_id: '01J9ZQ8Y3N4X5V6W7Z8A9B0C88', started_at: 'yesterday' },
+        { ...base, event_id: '01J9ZQ8Y3N4X5V6W7Z8A9B0C89', session_id: '' },
+        { ...noStartedAt, event_id: '01J9ZQ8Y3N4X5V6W7Z8A9B0C90' },
+      ]),
+    );
+    if (!res.ok) throw new Error(res.error);
+    expect(res.events.map((e) => e.type === 'turn_started' && e.turn_id)).toEqual(['turn-1', null]);
+    expect(res.rejected.map((r) => r.event_id)).toEqual([
+      '01J9ZQ8Y3N4X5V6W7Z8A9B0C86',
+      '01J9ZQ8Y3N4X5V6W7Z8A9B0C87',
+      '01J9ZQ8Y3N4X5V6W7Z8A9B0C88',
+      '01J9ZQ8Y3N4X5V6W7Z8A9B0C89',
+      '01J9ZQ8Y3N4X5V6W7Z8A9B0C90',
+    ]);
+  });
+
   it('accepts hashed project keys and rejects local paths', () => {
     const start = fixture().events[0]!;
     const hashed = { ...start, project: { key: `sha256:${'a'.repeat(64)}` } };

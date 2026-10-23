@@ -9,8 +9,9 @@ import { parseFilters } from '@/lib/filters';
 import { loadFilterOptions } from '@/lib/queries/lookups';
 import { withDashboardContext } from '@/lib/queries/page';
 import { canSeeUsers, usesAggregateFunctions } from '@/lib/queries/scope';
-import { listSessions, SESSION_PAGE_SIZE } from '@/lib/queries/sessions';
+import { listActiveSessions, listSessions, SESSION_PAGE_SIZE } from '@/lib/queries/sessions';
 import { parseSessionPage, sessionsListHref, toSessionTableRows } from '../_helpers';
+import { ActiveNow } from './ActiveNow';
 
 export const metadata = { title: 'Sessions' };
 
@@ -21,9 +22,10 @@ export default async function SessionsPage({ searchParams }: { searchParams: Sea
   const sp = await searchParams;
   const filters = parseFilters(sp, { allowUser: canSeeUsers(user) });
   const page = parseSessionPage(sp);
-  const { options, list } = await withDashboardContext(user, async (ctx) => ({
+  const { options, list, active } = await withDashboardContext(user, async (ctx) => ({
     options: await loadFilterOptions(ctx),
     list: await listSessions(ctx, filters, { page, pageSize: SESSION_PAGE_SIZE }),
+    active: await listActiveSessions(ctx),
   }));
 
   const showUser = canSeeUsers(user) && !usesAggregateFunctions(user);
@@ -55,6 +57,7 @@ export default async function SessionsPage({ searchParams }: { searchParams: Sea
         title="Sessions"
         description="Harness sessions (what claude --resume lists), newest first: their turns, sub-agents, workflows and flows together. A session is listed when it was active in the range and has a turn matching the filters; its figures cover the whole session. Costs are ≈ at API list prices."
       />
+      <ActiveNow initial={active} companyId={user.companyId} showUser={showUser} />
       <FilterBar filters={filters} options={options} />
       {list.ownOnly && (
         <p role="note" className="mb-3 text-xs text-amber-700 dark:text-amber-400">

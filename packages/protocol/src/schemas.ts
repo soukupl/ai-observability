@@ -9,6 +9,7 @@ export {
   sessionTitleEvent,
   turnEvent,
   turnOutcomeEvent,
+  turnStartedEvent,
   turnSummaryEvent,
 } from './events.js';
 export { outcome, phasesMs, project, projectKey, usageEntry } from './primitives.js';

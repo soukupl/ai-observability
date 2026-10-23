@@ -120,6 +120,13 @@
       "when": 1791874250770,
       "tag": "0016_session_titles",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1792791229410,
+      "tag": "0017_live_session_status",
+      "breakpoints": true
     }
   ]
 }

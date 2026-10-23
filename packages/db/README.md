@@ -27,6 +27,7 @@ Design: [BRIEF §7](../../BRIEF.md), [ADR-0006](../../docs/adr/0006-tenant-isola
 | `migrations/0014_company_memberships_tokens.sql` | ADR-0022. Generated SQL replaced in full by a hand-written migration (only the snapshot / journal are drizzle's): new `company_memberships` (role, primary team via a composite FK `ON DELETE SET NULL (primary_team_id)`, `last_active_at`) backfilled from `users`, `auth_sessions.active_company_id`, `users` reduced to identity, `turns.team_id` / `runaway_alerts.team_id` nullable; team memberships and per-user budgets FK to the membership, tokens / machines / telemetry FK to `users(id)` (removal keeps history); `token_kind` = `user` / `company` (the old `team` kind is retyped to `company`), `ingest_tokens.team_id` dropped and **every existing token revoked**; new users / ingest_tokens policies, column-level `users` SELECT for app_web; the functions and triggers listed below. Refuses to run while a super admin also has a company |
 | `migrations/0015_flow_flags_ingest_stats.sql` | ADR-0024. Generated `flow_flags` (a user's private "for later" bookmarks of agent flows: company × user × turn × flow key unique, name snapshot, optional note, FK to the turn with cascade); hand-written RLS (`web_own`: app_web reads, inserts, updates the note and deletes its own rows only; no worker grant, retention cascades through the turn), the `ingest_events (company_id, received_at)` index and `agg_ingest_stats()` for the Overview's ingest card |
 | `migrations/0016_session_titles.sql` | ADR-0026. Generated `agent_sessions.title` / `title_source` (≤ 140, `custom` \| `ai`) and `pending_session_patches`; hand-written `GRANT UPDATE (title, title_source)` to `app_ingest` (no SELECT: titles are like summaries), RLS / grants on the parked titles as on `pending_turn_patches` (definer all, ingest insert / identity + sender select, worker select / delete), `ingest_apply_pending_session_patch(session_id)` |
+| `migrations/0017_live_session_status.sql` | ADR-0027. Generated `agent_sessions.current_turn_started_at` / `last_seen_at` (nullable, not backfilled) and the partial index `agent_sessions_company_last_seen_idx` (`company_id, last_seen_at` WHERE `ended_at IS NULL`); hand-written `GRANT SELECT (current_turn_started_at, last_seen_at, ended_at)` and `GRANT UPDATE (current_turn_started_at, last_seen_at)` to `app_ingest` (the liveness exception to "identity columns only": ingest's `ON CONFLICT DO UPDATE` reads the stored values) |
 | `src/connections.ts` | `dbFor(kind)` — one pool per service role |
 | `src/rls.ts` | `withRlsContext()` (dashboard), `withIngestContext()` (ingest) |
 | `src/migrate.ts` | Migrate entry point (Docker `migrate` service, `pnpm db:migrate`) |
@@ -59,7 +60,7 @@ Design: [BRIEF §7](../../BRIEF.md), [ADR-0006](../../docs/adr/0006-tenant-isola
 - `agent_sessions.title` / `title_source` are set only by `session_title` patches (ADR-0026). A title that arrives
   before its session is parked the same way in `pending_session_patches` (one row per `(company_id,
   session_external_id)`, sender in `user_id`) and moved onto the session by `ingest_apply_pending_session_patch()`
-  when a session_start, turn or session_end creates it; unclaimed titles are dropped after 30 days by the worker.
+  when a session_start, turn_started, turn or session_end creates it; unclaimed titles are dropped after 30 days by the worker.
 - Tokens: `input_tokens` does not include cache reads or writes. `reasoning_tokens` is the part of
   `output_tokens` spent on thinking, so it is never billed again. A turn's totals are the sum of all
   `usage` rows with that `turn_id`, and every aggregate sums by `turn_id` only. Ingest stores the turn
@@ -126,7 +127,7 @@ and `migrate` turns that role into a LOGIN role. See ADR-0014.
 | Role | Can |
 |---|---|
 | `app_web` | Dashboard reads and admin writes, always bound by RLS (below). It has full DML on `auth_*` / `magic_links`, which have no RLS because they are pre-login identity tables. |
-| `app_ingest` | INSERT and UPDATE on sessions, turns, runs, usage, machines, projects, ingest_events, pending_turn_patches and pending_session_patches where `company_id = app.company_id`. It can SELECT only identity columns (ids, external ids, team/user ids). It has no DELETE (except on `run_links`, whose rows a run event replaces), and it cannot read metrics, summaries, session titles or parked patch values. |
+| `app_ingest` | INSERT and UPDATE on sessions, turns, runs, usage, machines, projects, ingest_events, pending_turn_patches and pending_session_patches where `company_id = app.company_id`. It can SELECT only identity columns (ids, external ids, team/user ids) plus, on `agent_sessions`, the liveness columns `current_turn_started_at`, `last_seen_at` and `ended_at` (0017, ADR-0027). It has no DELETE (except on `run_links`, whose rows a run event replaces), and it cannot read metrics, summaries, session titles or parked patch values. |
 | `app_worker` | Cross-company: reads telemetry, users, company memberships and budgets; writes daily_rollups; deletes expired raw rows, ingest_events, pending_turn_patches, pending_session_patches and expired auth sessions / magic links; updates `budgets.notified_*`; appends to audit_log. It cannot read tokens or auth secrets. |
 | `app_platform` | Super admin: companies (all operations), users and company_memberships (admin contacts only: super admins and admin memberships), first-admin invitations, audit_log (only `platform.%` actions or rows without a company: it cannot read or forge tenant audit rows), model_prices, `platform_company_counts()`, `platform_invitee_status()`. It has **no grants** on telemetry, projects, teams or tokens. |
 | `app_definer` | NOLOGIN. It owns the `SECURITY DEFINER` functions and is never used to connect. |
@@ -213,7 +214,7 @@ await withIngestContext(dbFor('ingest'), tok.company_id, async (tx) => {
 ```
 
 In `ON CONFLICT DO UPDATE`, set columns to bound values, not `excluded.col`. Reading `excluded.col`
-needs SELECT on that column, which `app_ingest` deliberately does not have.
+needs SELECT on that column, which `app_ingest` deliberately does not have (except the three liveness columns of `agent_sessions`, 0017, which ingest reads through the table name, e.g. `agent_sessions.ended_at`).
 
 ## Migrations
 
