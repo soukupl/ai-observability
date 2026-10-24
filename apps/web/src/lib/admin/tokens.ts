@@ -91,7 +91,7 @@ export function expiresAtFor(lifetime: TokenLifetime, now = new Date()): Date | 
  * interactive way is `ai-obs login --server <url>` and approving the code on /device.
  */
 export function collectorCommand(token: string, endpoint: string): string {
-  return `npx @soukupl/ai-obs login --server ${endpoint.replace(/\/+$/, '')} --token ${token}`;
+  return `npx ai-obs-cli login --server ${endpoint.replace(/\/+$/, '')} --token ${token}`;
 }
 
 const lifetime = z.enum(TOKEN_LIFETIMES, { message: 'choose 30, 90, 365 days or none' }).default(DEFAULT_TOKEN_LIFETIME);

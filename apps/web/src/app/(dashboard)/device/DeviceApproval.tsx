@@ -92,7 +92,7 @@ export function DeviceApproval({ origin }: { origin: string }) {
           </button>
         </form>
         <p className={`mt-3 ${noteCls}`}>
-          Start with <code className="font-mono">npx @soukupl/ai-obs login --server {origin}</code>. Prefer a pasted token? Create one on My tokens.
+          Start with <code className="font-mono">npx ai-obs-cli login --server {origin}</code>. Prefer a pasted token? Create one on My tokens.
         </p>
       </Card>
     </div>

@@ -420,7 +420,7 @@ export async function registerServer(input: RegisterInput, io: Io, deps: CliDeps
     else io.out('  you are not a member of any team yet: usage is recorded without a team');
     io.out(`  project naming: ${value.project_naming}`);
     if (compareVersions(COLLECTOR_VERSION, value.min_collector_version) < 0) {
-      io.out(`! this collector (${COLLECTOR_VERSION}) is older than the server minimum ${value.min_collector_version}; update with \`npx @soukupl/ai-obs@latest init\``);
+      io.out(`! this collector (${COLLECTOR_VERSION}) is older than the server minimum ${value.min_collector_version}; update with \`npx ai-obs-cli@latest init\``);
     }
   } else {
     io.out(`! ${input.endpoint} could not check the token now (${unverifiedReason(check)}): it is stored, and nothing is sent until the server answers`);

@@ -1,6 +1,6 @@
 /**
  * The hook as the harness runs it: a real `node bin/ai-obs.js hook …` process over the built dist
- * (skipped until `pnpm --filter @soukupl/ai-obs build` has run). Node startup is included in the timing.
+ * (skipped until `pnpm --filter ai-obs-cli build` has run). Node startup is included in the timing.
  */
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
@@ -38,7 +38,7 @@ function waitForWorker(paths: AiObsPaths): void {
   expect(listJobs(paths.jobs)).toHaveLength(0);
 }
 
-describe.skipIf(!built)('real process (needs `pnpm --filter @soukupl/ai-obs build`)', () => {
+describe.skipIf(!built)('real process (needs `pnpm --filter ai-obs-cli build`)', () => {
   it('one server: `ai-obs hook` exits 0 quickly, prints nothing and leaves a job for the worker', () => {
     const paths = tmpHome();
     writeTestConfig(paths);

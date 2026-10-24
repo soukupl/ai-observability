@@ -29,7 +29,7 @@ export default async function WelcomePage({ searchParams }: { searchParams: Prom
           : `Visibility: aggregates only. Others in ${name} see your usage only inside team and deployment totals; only you see your individual turns.`}
       </Notice>
       <p className="text-sm text-zinc-600 dark:text-zinc-400">
-        To send data, run <code className="font-mono">npx @soukupl/ai-obs login</code> on your computer and approve the code on the page it opens.
+        To send data, run <code className="font-mono">npx ai-obs-cli login</code> on your computer and approve the code on the page it opens.
       </p>
       <Link href={next} className={`${primaryButton} block text-center`}>
         Continue

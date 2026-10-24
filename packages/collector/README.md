@@ -13,8 +13,8 @@ deployment per company, per-user tokens with device login, the project dot file;
 ## Install
 
 ```sh
-npx @soukupl/ai-obs login --server https://obs.example.com   # approve the code in the browser
-npx @soukupl/ai-obs init                                     # user-level hooks (--project: this repository only)
+npx ai-obs-cli login --server https://obs.example.com        # approve the code in the browser
+npx ai-obs-cli init                                          # user-level hooks (--project: this repository only)
 ```
 
 One ai-obs server is one company (a "deployment"). A token belongs to you (or to a service user an admin made) and
@@ -171,9 +171,14 @@ it as JSON `additionalContext`, Codex as plain text (see `src/adapters/codex/FOR
 (`turn_started`, `ai-obs live`, summaries after the flush; ADR-0027). Upgrade the server first (migration 0018 and the
 web / ingest release); a 0.5 collector needs the device-login routes and the new collector-config.
 
+**The package is renamed**: 0.3.0 went out as `@soukupl/ai-obs`; 0.5.0 and every later release are `ai-obs-cli`
+([ADR-0031](../../docs/adr/0031-npm-package-name-ai-obs-cli.md)). The command is still `ai-obs`, the hooks and `~/.ai-obs` are
+unchanged (the hooks run the runtime copied to `~/.ai-obs/app`, never the npm name), and `@soukupl/ai-obs` is deprecated on
+npm with a pointer here.
+
 ```sh
-npx @soukupl/ai-obs@0.5.0 init       # refreshes the runtime and the hooks, and migrates ~/.ai-obs
-npx @soukupl/ai-obs status           # then check server, token expiry and this repository's team
+npx ai-obs-cli@0.5.0 init            # refreshes the runtime and the hooks, and migrates ~/.ai-obs
+npx ai-obs-cli status                # then check server, token expiry and this repository's team
 ```
 
 `ai-obs` is not on PATH after `npx`, so use `npx` for the follow-up commands too.
@@ -647,9 +652,9 @@ last 8 MB). It never writes, and never touches the hook state files or their off
 ## Development
 
 ```sh
-pnpm --filter @soukupl/ai-obs typecheck
-pnpm --filter @soukupl/ai-obs test     # = vitest run --project collector (no network: local http servers, temp homes)
-pnpm --filter @soukupl/ai-obs build    # dist/; the real-process hook tests (test/hook-process.test.ts) run only when dist exists
+pnpm --filter ai-obs-cli typecheck
+pnpm --filter ai-obs-cli test     # = vitest run --project collector (no network: local http servers, temp homes)
+pnpm --filter ai-obs-cli build    # dist/; the real-process hook tests (test/hook-process.test.ts) run only when dist exists
 ```
 
 Test helpers (`test/helpers.ts`): `writeTestConfig` / `writeTestServers` (registered servers with their caches), `writeDotFile`, `ccValue` (a collector-config body), `tokenResponder` (per-token fake server), `okResponder`, `gitRepo`, and `queueStore` / `enqueueFor` (`test/queue-helpers.ts`). The definition-of-done test is `test/servers.integration.test.ts`: local servers with device login, the real CLI (`login`, `link`), hook and worker; `test/login.test.ts` drives the device flow against a `node:http` server.

@@ -41,7 +41,7 @@ export default async function MyTokensPage() {
       />
       <Card title="Log in a computer" description="The usual way: no token to copy.">
         <pre className="overflow-x-auto rounded bg-zinc-100 p-2 text-xs dark:bg-zinc-900">
-          <code>npx @soukupl/ai-obs login --server {server}</code>
+          <code>npx ai-obs-cli login --server {server}</code>
         </pre>
         <p className={`mt-2 ${noteCls}`}>
           It shows a code and opens <Link href="/device" className="text-blue-700 hover:underline dark:text-blue-400">/device</Link>, where you

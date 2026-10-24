@@ -687,7 +687,7 @@ tokens" (`/tokens`) to everyone, "Admin" to admins and "Budgets" (`/admin/budget
 Every token belongs to one user (ADR-0029 T1), prefix `aiobs_u_`. **Device** tokens are minted by `device_exchange` after
 an approval on `/device` (90 days, label = computer name). **Manual** tokens are created by their owner on `/tokens`, or
 by an admin for a service user, with a lifetime of 30, 90 (default), 365 days or none (`expires_at` null). Admins never
-create a person's token (T8). The plaintext and the command `npx @soukupl/ai-obs login --server <APP_URL> --token
+create a person's token (T8). The plaintext and the command `npx ai-obs-cli login --server <APP_URL> --token
 <token>` are returned once in the action state and never written anywhere. Users see and revoke their own tokens, admins
 every token (RLS); the tables mark tokens that expire within 14 days (the collector's nudge window). Audit rows carry the
 prefix, never the secret. Revocation is one-way (a DB trigger).

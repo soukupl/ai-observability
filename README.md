@@ -45,9 +45,9 @@ requests redirect to `/login?error=config` with a clear message (the cause is lo
 ### Connect a developer machine
 
 ```sh
-npx @soukupl/ai-obs login --server https://obs.example.com   # prints a code; approve it at <server>/device in the browser
-npx @soukupl/ai-obs init                                     # hooks for every detected harness (Claude Code, Codex)
-cd path/to/repo && npx @soukupl/ai-obs link --team platform  # once per repository: which team it reports to
+npx ai-obs-cli login --server https://obs.example.com        # prints a code; approve it at <server>/device in the browser
+npx ai-obs-cli init                                          # hooks for every detected harness (Claude Code, Codex)
+cd path/to/repo && npx ai-obs-cli link --team platform       # once per repository: which team it reports to
 git add .ai-obs.json && git commit -m "Report to the platform team"
 ```
 
@@ -72,9 +72,11 @@ Order matters (the brief's release order):
    `app_platform` role of every privilege, and refuses to run while more than one company exists. Set `ADMIN_EMAILS`;
    remove the old `SUPER_ADMIN_EMAILS`, `DATABASE_URL_PLATFORM` and `DB_APP_PLATFORM_PASSWORD`. The cluster role
    `app_platform` itself stays until you drop it by hand (`DROP ROLE app_platform;`) once no database uses it. Existing user tokens stay valid and expire 90 days after the cutover.
-2. **Then the collectors.** Each developer updates to **0.5.0** (`npx @soukupl/ai-obs@latest login --server …`, then `init`); it migrates
+2. **Then the collectors.** Each developer updates to **0.5.0** (`npx ai-obs-cli@latest login --server …`, then `init`); it migrates
    `~/.ai-obs/config.json` to v3, keeps queued data (re-bound to its server) and ignores the old `projects.json`. 0.4.0 was
-   never published, so 0.5.0 also carries the live-session work. Run `ai-obs link --team <slug>` in each repository.
+   never published, so 0.5.0 also carries the live-session work. Run `ai-obs link --team <slug>` in each repository. The npm package is now `ai-obs-cli`
+   ([ADR-0031](docs/adr/0031-npm-package-name-ai-obs-cli.md)): `@soukupl/ai-obs` stays at 0.3.0 and is deprecated, so `npx @soukupl/ai-obs@latest`
+   would not find 0.5.0.
 3. **Last, `MIN_COLLECTOR_VERSION=0.5.0`**, once every collector is on 0.5.0: older ones are then told to upgrade.
 
 **Dev deployment with several companies.** Only the development database has more than one company. Merge them first,
@@ -131,7 +133,7 @@ The Docker-only path (`docker compose up`) does not seed; log in with an `ADMIN_
 To try the collector against your dev server:
 
 ```sh
-pnpm --filter @soukupl/ai-obs build
+pnpm --filter ai-obs-cli build
 export AI_OBS_HOME=/tmp/ai-obs-dev                # scratch state; also point HOME at a scratch dir (init edits ~/.claude and ~/.codex)
 node packages/collector/bin/ai-obs.js login --server http://localhost:3000   # approve at http://localhost:3000/device as alice
 node packages/collector/bin/ai-obs.js init
@@ -149,7 +151,7 @@ picks the server and team. With two or more servers and no dot file, a repositor
 |---|---|---|
 | `packages/protocol` | `@ai-obs/protocol` | Ingest schema v1: types, zod schemas, `validateBatch()`, shared constants, `fixtures/` |
 | `packages/db` | `@ai-obs/db` | Drizzle schema, `migrations/` (incl. roles + RLS), `dbFor()`, `withRlsContext()`, migrate + seed — see [packages/db/README.md](packages/db/README.md) |
-| `packages/collector` | `@soukupl/ai-obs` | Zero-runtime-dependency CLI: `login`, `init`, `link`, `token`, `doctor`, `status`, `flush`, `live`, `uninstall`, `hook` |
+| `packages/collector` | `ai-obs-cli` | Zero-runtime-dependency CLI: `login`, `init`, `link`, `token`, `doctor`, `status`, `flush`, `live`, `uninstall`, `hook` |
 | `apps/web` | `@ai-obs/web` | Next.js App Router + Tailwind + Recharts: dashboard, admin, device login, `/api/v1/*` |
 | `apps/worker` | `@ai-obs/worker` | Rollups, budgets, retention, runaway alerts, e-mail jobs |
 | `docs/adr` | – | Architecture Decision Records |

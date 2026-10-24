@@ -99,7 +99,7 @@ describe('tokens (ADR-0029 T5, T6)', () => {
     expect(tokenState({ revokedMs: null, expiresMs: null }, now)).toBe('active');
   });
   it('the collector command logs in to this server with the pasted token', () => {
-    expect(collectorCommand('aiobs_u_x', 'https://obs.example/')).toBe('npx @soukupl/ai-obs login --server https://obs.example --token aiobs_u_x');
+    expect(collectorCommand('aiobs_u_x', 'https://obs.example/')).toBe('npx ai-obs-cli login --server https://obs.example --token aiobs_u_x');
   });
 });
 

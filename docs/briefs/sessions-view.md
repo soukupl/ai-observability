@@ -76,7 +76,8 @@ retention shows the turns still kept and says so.
   the same handling: shown to whoever may see the session, never in aggregate reads.
 - Codex: no title source known; keeps the phase-1 fallback.
 - Ships as collector 0.3.0, the first npm release, published as `@soukupl/ai-obs` (npm refused `ai-obs` as too
-  similar to `aiobs`); upgrading is `npx @soukupl/ai-obs@latest init` (no `--token`: the tokens are kept).
+  similar to `aiobs`); upgrading is `npx @soukupl/ai-obs@latest init` (no `--token`: the tokens are kept). Renamed to
+  `ai-obs-cli` from 0.5.0 (ADR-0031).
 
 ## Out of scope
 

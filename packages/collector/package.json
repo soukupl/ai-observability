@@ -1,11 +1,11 @@
 {
-  "name": "@soukupl/ai-obs",
+  "name": "ai-obs-cli",
   "version": "0.5.0",
   "description": "ai-obs collector: zero-dependency CLI that captures AI coding-agent usage from harness hooks",
   "type": "module",
   "license": "UNLICENSED",
   "bin": {
-    "ai-obs": "./bin/ai-obs.js"
+    "ai-obs": "bin/ai-obs.js"
   },
   "files": [
     "bin",

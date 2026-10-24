@@ -40,7 +40,7 @@ The design is now being implemented; see README.md for the build.
 | 13 | Cost | Estimated cost at **API list prices** from a dated price table, computed at query time | brief only |
 | 14 | Retention | Per-deployment, 30 days – 24 months raw, **default 13 months**; daily rollups kept forever | [0012](docs/adr/0012-retention-and-rollups.md) |
 | 15 | Delivery | Local file queue + retry; client-generated event IDs; server de-duplicates | [0011](docs/adr/0011-local-queue-idempotent-delivery.md) |
-| 16 | Install | One CLI: `npx @soukupl/ai-obs login --server <url>` (device code, or `--token`), `npx @soukupl/ai-obs init` configures every detected harness, `ai-obs link --team <slug>` writes the repository's dot file `.ai-obs.json` | [0029](docs/adr/0029-per-user-tokens-device-login-expiry.md), [0030](docs/adr/0030-project-dot-file-and-team-resolution.md) |
+| 16 | Install | One CLI: `npx ai-obs-cli login --server <url>` (device code, or `--token`), `npx ai-obs-cli init` configures every detected harness, `ai-obs link --team <slug>` writes the repository's dot file `.ai-obs.json` | [0029](docs/adr/0029-per-user-tokens-device-login-expiry.md), [0030](docs/adr/0030-project-dot-file-and-team-resolution.md) |
 | 17 | Dashboard | All eight views in v1 (see §8) | brief only |
 | 18 | Alerts | Monthly token/cost budgets per team/user, e-mail at 80 % / 100 %, never blocking | brief only |
 | 19 | ~~Billing~~ | ~~Plans + limits~~ — dropped 2026-10-24: self-hosted, no plans, no payments | [0028](docs/adr/0028-one-deployment-one-company.md) |
@@ -123,10 +123,10 @@ mapping, (2) the team named in the repository's dot file, if the user is a membe
 
 ### 5.1 Install and runtime
 
-- `npx @soukupl/ai-obs login --server <url>` — the device flow: the CLI prints `Open <url>/device and enter the code XXXX-XXXX`,
+- `npx ai-obs-cli login --server <url>` — the device flow: the CLI prints `Open <url>/device and enter the code XXXX-XXXX`,
   opens the browser, the user approves, the CLI stores a 90-day token for that server in `~/.ai-obs/config.json` (mode 0600).
   `login --token <t>` stores a pasted token instead. One token per server; a machine may hold several servers.
-- `npx @soukupl/ai-obs init [--project]` — detects installed harnesses and writes hook config (user-level by default, repo-level
+- `npx ai-obs-cli init [--project]` — detects installed harnesses and writes hook config (user-level by default, repo-level
   with `--project`; no token is ever written into a repo). `init --token <t> --endpoint <url>` stays as the non-interactive alias.
 - `ai-obs link --team <slug> [--server <url>] [--local]` — writes the repository's dot file `.ai-obs.json` (`{ "server", "team" }`,
   committed; `--local` writes the git-ignored `.ai-obs.local.json` that overrides it per key), validating the team against the
@@ -366,7 +366,7 @@ Not applicable: self-hosted, no plans, no limits on users or teams, no payments.
 
 **The future MVP build** is done when:
 
-1. `npx @soukupl/ai-obs init` on a machine with Claude Code and Codex configures both; `ai-obs doctor` is green.
+1. `npx ai-obs-cli init` on a machine with Claude Code and Codex configures both; `ai-obs doctor` is green.
 2. A real Claude Code session with a sub-agent and a Codex session appear in the dashboard within
    minutes, with correct tokens (matching transcript totals), model, effort, phases, outcome, summary,
    and the parent → child run tree.

@@ -183,7 +183,7 @@ describe.skipIf(skipReason !== null)(skipReason ? `admin console — SKIPPED: ${
     const m1 = people.m1!;
     const t30 = await as(m1, (tx) => createOwnToken(tx, m1, { name: 'Laptop', lifetime: '30' }, ENDPOINT));
     expect(t30.plaintext).toMatch(/^aiobs_u_/);
-    expect(t30.command).toBe(`npx @soukupl/ai-obs login --server ${ENDPOINT} --token ${t30.plaintext}`);
+    expect(t30.command).toBe(`npx ai-obs-cli login --server ${ENDPOINT} --token ${t30.plaintext}`);
     expect(new Date(t30.expiresAt!).getTime() - Date.now()).toBeGreaterThan(29.9 * DAY);
     const forever = await as(m1, (tx) => createOwnToken(tx, m1, { name: 'Build box', lifetime: 'none' }, ENDPOINT));
     expect(forever.expiresAt).toBeNull();
