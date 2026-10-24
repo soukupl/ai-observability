@@ -36,7 +36,9 @@ docker compose up --build   # postgres -> migrate (one-shot) -> web + worker
 4. **Connect collectors** (below). Service users for CI or shared machines are made in Admin → Service users.
 
 One image serves three entry points: `web` (Next.js standalone, port 3000), `worker` and `migrate`
-(`docker run ai-obs:local migrate`). The image has no demo seed. `SESSION_SECRET` must be a real secret in production:
+(`docker run ai-obs:local migrate`). Instead of building on the server you can use the published image `ghcr.io/soukupl/ai-observability`
+(linux/amd64 and linux/arm64; `:latest` and `:<version>` from releases, `:main` from the main branch): set it as `image:`
+of the `migrate`, `web` and `worker` services and run `docker compose pull && docker compose up -d`. The image has no demo seed. `SESSION_SECRET` must be a real secret in production:
 OAuth cookies are signed with it, and in production the app refuses the `change-me…` placeholder: OAuth and magic-link
 requests redirect to `/login?error=config` with a clear message (the cause is logged once). Without a mounted volume at
 `WORKER_STATE_DIR` the worker re-folds all rollups after a restart (safe, just slower). Compose services: `postgres`,
@@ -174,6 +176,7 @@ Workspace packages are consumed from source in type-checking and tests (custom e
 | `RUN_ONCE=<rollups\|budgets\|retention\|runaways> pnpm --filter @ai-obs/worker once` | Run one worker job and exit (e.g. after `pnpm db:seed` to fill `daily_rollups`) |
 | `pnpm dev:token [email] [label] [days\|none]` | Dev only: create a manual user ingest token (default alice@acme.example, label `dev-token`, 90 days) and print it |
 | `git tag collector-v<version> && git push origin collector-v<version>` | Publish the collector to npm from GitHub Actions (trusted publishing, no token in the repository; see [the collector README, "Releasing"](packages/collector/README.md#releasing)) |
+| `git tag server-v<version> && git push origin server-v<version>` | Publish the server image `ghcr.io/soukupl/ai-observability:<version>` (and `:latest`) for amd64 and arm64 from GitHub Actions; the version must equal `apps/web/package.json`. Pushes to `main` publish `:main`, pull requests only build (ADR-0033) |
 
 ## Configuration
 

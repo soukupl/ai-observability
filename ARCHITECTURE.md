@@ -44,7 +44,8 @@ constants, fixtures) used by the ingest API and, type-only, by the collector; `p
 holds the Drizzle schema, migrations, roles + RLS SQL, the `withRlsContext()` helper and the one-off dev merge script (`db:merge-companies`).
 
 All backend services run as Docker containers defined in one Compose file (`web`, `worker`, `migrate`,
-`postgres`, plus `mailpit` in the dev profile). The collector is not containerized; it runs on the
+`postgres`, plus `mailpit` in the dev profile). The image is built for amd64 and arm64 and published to
+`ghcr.io/soukupl/ai-observability` by `.github/workflows/docker-image.yml` (ADR-0033). The collector is not containerized; it runs on the
 developer's machine inside the harness.
 
 ## Data flow
