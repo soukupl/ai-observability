@@ -1,3 +1,6 @@
+---
+spoor_id: cc235e30-cc67-4f16-9bec-3851be8ff481
+---
 # ADR-0007: Per-user and team ingest tokens; turn-to-team attribution
 
 - **Status:** Superseded 2026-10-24 by [ADR-0029](0029-per-user-tokens-device-login-expiry.md) (partly superseded by ADR-0022 on 2026-10-08)

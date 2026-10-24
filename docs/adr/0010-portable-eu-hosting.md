@@ -1,3 +1,6 @@
+---
+spoor_id: 9e8c1cfb-2627-4b9b-9474-6e48a7aac79f
+---
 # ADR-0010: Portable, EU-hosted, self-hostable deployment
 
 - **Status:** Accepted; amended 2026-10-24 by [ADR-0028](0028-one-deployment-one-company.md) (no official SaaS, self-hosted only)

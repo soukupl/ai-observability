@@ -1,3 +1,6 @@
+---
+spoor_id: 9cfcf62c-1c04-4d7b-822e-fee3deba5477
+---
 # ADR-0008: Privacy modes — project naming and individual visibility
 
 - **Status:** Accepted
