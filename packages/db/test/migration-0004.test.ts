@@ -1,10 +1,10 @@
 import { sql } from 'drizzle-orm';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { adminDbUrl, testDbName, testDbUrl } from './test-db.js';
 import { createDb, type Database } from '../src/client.js';
 import { DB_ROLES } from '../src/connections.js';
-import { PLAN_LIMITS } from '../src/schema/settings.js';
-import { withIngestContext } from '../src/rls.js';
+import { LEGACY_PLATFORM_ROLE, legacyIngestContext } from './legacy-context.js';
 import { migrateTo } from './migrate-to.js';
 
 /**
@@ -14,18 +14,16 @@ import { migrateTo } from './migrate-to.js';
  * Own database (ai_obs_m0004_test), migrated up to 0004 only (migrateTo): these are the 0004 semantics, which
  * migration 0014 (ADR-0022: memberships, company + user tokens) later replaced.
  */
-const base = new URL(process.env.TEST_DATABASE_URL || 'postgres://ai_obs:ai_obs@localhost:5432/ai_obs_test');
-base.pathname = '/ai_obs_m0004_test';
-const URL_ = base.toString();
-const adminUrl = new URL(URL_);
-adminUrl.pathname = '/postgres';
+const DB = testDbName('m0004');
+const URL_ = testDbUrl('m0004');
+const adminUrl = new URL(adminDbUrl());
 
 async function prepare(): Promise<string | null> {
   const admin = postgres(adminUrl.toString(), { max: 1, connect_timeout: 3, onnotice: () => {} });
   try {
     await admin`select 1`;
-    await admin.unsafe('drop database if exists "ai_obs_m0004_test" with (force)');
-    await admin.unsafe('create database "ai_obs_m0004_test"');
+    await admin.unsafe(`drop database if exists "${DB}" with (force)`);
+    await admin.unsafe(`create database "${DB}"`);
     return null;
   } catch (err) {
     return `Postgres not reachable (${(err as { code?: string }).code || (err as Error).message})`;
@@ -66,7 +64,7 @@ describe.skipIf(skip !== null)(skip ? `migration 0004 - SKIPPED: ${skip}` : 'mig
     closers.push(c);
     ({ db: ingest, close: c } = createDb({ url: URL_, role: DB_ROLES.ingest, max: 1 }));
     closers.push(c);
-    ({ db: platform, close: c } = createDb({ url: URL_, role: DB_ROLES.platform, max: 1 }));
+    ({ db: platform, close: c } = createDb({ url: URL_, role: LEGACY_PLATFORM_ROLE, max: 1 }));
     closers.push(c);
 
     await owner.transaction(async (tx) => {
@@ -95,7 +93,7 @@ describe.skipIf(skip !== null)(skip ? `migration 0004 - SKIPPED: ${skip}` : 'mig
   afterAll(async () => {
     await Promise.all(closers.map((c) => c()));
     const admin = postgres(adminUrl.toString(), { max: 1, onnotice: () => {} });
-    await admin.unsafe('drop database if exists "ai_obs_m0004_test" with (force)').catch(() => {});
+    await admin.unsafe(`drop database if exists "${DB}" with (force)`).catch(() => {});
     await admin.end({ timeout: 1 }).catch(() => {});
   }, 30_000);
 
@@ -144,15 +142,15 @@ describe.skipIf(skip !== null)(skip ? `migration 0004 - SKIPPED: ${skip}` : 'mig
     expect(r!.id).toBeNull();
   });
 
-  it('company_has_user_capacity mirrors PLAN_LIMITS (free / team numbers; business unlimited)', async () => {
+  it('company_has_user_capacity encodes the plan limits of that time (free 3, team 50; business unlimited)', async () => {
+    // PLAN_LIMITS left the code with the plans (ADR-0028); the 0004 numbers are pinned here.
     const [r] = await rows<{ def: string }>(owner, sql`select pg_get_functiondef('company_has_user_capacity(uuid)'::regprocedure) as def`);
-    expect(r!.def).toContain(`< ${PLAN_LIMITS.free.users}`);
-    expect(r!.def).toContain(`< ${PLAN_LIMITS.team.users}`);
-    expect(PLAN_LIMITS.business.users).toBeNull();
+    expect(r!.def).toContain('< 3');
+    expect(r!.def).toContain('< 50');
   });
 
   it('SEC-4: a user token stops resolving when its user leaves the team it is bound to; kind team is unaffected', async () => {
-    const look = async (h: string) => withIngestContext(ingest, ids.co, async (tx) => [...(await tx.execute(sql`select * from lookup_ingest_token(${h})`))]);
+    const look = async (h: string) => legacyIngestContext(ingest, ids.co, async (tx) => [...(await tx.execute(sql`select * from lookup_ingest_token(${h})`))]);
     expect(await look('h-bob')).toHaveLength(1);
     expect(await look('h-team')).toHaveLength(1);
     await owner.transaction(async (tx) => {
@@ -165,7 +163,7 @@ describe.skipIf(skip !== null)(skip ? `migration 0004 - SKIPPED: ${skip}` : 'mig
 
   it('SEC-10: a git e-mail matches only a member of the token team', async () => {
     const match = (email: string, team: string) =>
-      withIngestContext(ingest, ids.co, async (tx) => [...(await tx.execute(sql`select * from ingest_match_user_by_email(${email}, ${team}::uuid)`))]);
+      legacyIngestContext(ingest, ids.co, async (tx) => [...(await tx.execute(sql`select * from ingest_match_user_by_email(${email}, ${team}::uuid)`))]);
     expect(await match('alice@big.test', ids.teamA)).toHaveLength(1); // primary team + membership
     expect(await match('carl@big.test', ids.teamA)).toHaveLength(1); // membership only
     expect(await match('alice@big.test', ids.teamB)).toHaveLength(0); // other team of the company
@@ -184,12 +182,12 @@ describe.skipIf(skip !== null)(skip ? `migration 0004 - SKIPPED: ${skip}` : 'mig
     const owned = await turn('cc:owned', ids.alice);
     const free = await turn('cc:free', null);
     const park = (key: string, user: string | null) =>
-      withIngestContext(ingest, ids.co, (tx) => tx.execute(sql`insert into pending_turn_patches (company_id, turn_external_id, summary, user_id)
+      legacyIngestContext(ingest, ids.co, (tx) => tx.execute(sql`insert into pending_turn_patches (company_id, turn_external_id, summary, user_id)
         values (${ids.co}::uuid, ${key}, 'parked', ${user}::uuid)`));
     await park('cc:owned', ids.carl);
     await park('cc:free', ids.carl);
     const apply = (id: string) =>
-      withIngestContext(ingest, ids.co, async (tx) => ([...(await tx.execute(sql`select ingest_apply_pending_patch(${id}::uuid) as ok`))][0] as { ok: boolean }).ok);
+      legacyIngestContext(ingest, ids.co, async (tx) => ([...(await tx.execute(sql`select ingest_apply_pending_patch(${id}::uuid) as ok`))][0] as { ok: boolean }).ok);
     expect(await apply(owned)).toBe(false);
     expect(await apply(free)).toBe(true);
     const sums = await asDefiner<{ external_id: string; summary: string | null }>(owner, sql`select external_id, summary from turns where external_id in ('cc:owned', 'cc:free') order by 1`);
@@ -231,7 +229,7 @@ describe.skipIf(skip !== null)(skip ? `migration 0004 - SKIPPED: ${skip}` : 'mig
     expect(all.length).toBeGreaterThan(1);
     expect(new Set(all.map((r) => r.project_salt)).size).toBe(all.length);
     expect(all.every((r) => /^[0-9a-f]{64}$/.test(r.project_salt))).toBe(true);
-    const salt = (co: string) => withIngestContext(ingest, co, async (tx) => ([...(await tx.execute(sql`select ingest_project_salt() as s`))][0] as { s: string }).s);
+    const salt = (co: string) => legacyIngestContext(ingest, co, async (tx) => ([...(await tx.execute(sql`select ingest_project_salt() as s`))][0] as { s: string }).s);
     const a = await salt(ids.co);
     expect(a).toMatch(/^[0-9a-f]{64}$/);
     expect(await salt(ids.free)).not.toBe(a);

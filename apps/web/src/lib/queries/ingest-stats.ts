@@ -2,7 +2,7 @@ import { sql } from 'drizzle-orm';
 import type { QueryCtx } from './scope';
 import { num, rows } from './sqlutil';
 
-/** One event type of the ingest ledger (`ingest_events`), company-wide (docs/briefs/dashboard-followups-2026-10-10.md). */
+/** One event type of the ingest ledger (`ingest_events`), deployment-wide (docs/briefs/dashboard-followups-2026-10-10.md). */
 export interface IngestStatRow {
   type: string;
   events24h: number;
@@ -16,7 +16,7 @@ let warned = false;
 /**
  * Events received from collectors per type: counts of the last 24 h / 7 days and the last arrival, through
  * `agg_ingest_stats()` (SECURITY DEFINER, migration 0015; the ledger is not readable by app_web directly). Not filtered:
- * ingest is a company-wide fact. Returns null when the function is missing (a deployment that has not run migration
+ * ingest is a deployment-wide fact. Returns null when the function is missing (a deployment that has not run migration
  * 0015 yet) so the page still renders; the failed statement is rolled back to a savepoint so the page's transaction
  * stays usable.
  */

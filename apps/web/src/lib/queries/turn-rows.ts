@@ -7,7 +7,7 @@ import { AGG_PAGE, num, rows, where } from './sqlutil';
 /**
  * Lightweight turn rows for stats the agg_* functions cannot give directly (an overall median, or
  * stats under the effort filter). Direct path: SELECT; agg path: agg_turn_list pages (no user_id).
- * Capped so a huge company never loads everything; `truncated` says the cap was hit.
+ * Capped so a huge deployment never loads everything; `truncated` says the cap was hit.
  */
 export interface TurnRow {
   id: string;

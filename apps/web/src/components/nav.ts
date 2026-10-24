@@ -1,4 +1,4 @@
-/** Sidebar entries of the dashboard views (BRIEF §8). Admin and Super are added by AppShell by role. */
+/** Sidebar entries of the dashboard views (BRIEF §8). Admin (or Budgets for leads) is added by role. */
 export interface NavItem {
   href: string;
   label: string;
@@ -17,19 +17,15 @@ export const VIEW_NAV: readonly NavItem[] = [
   { href: '/sessions', label: 'Sessions', title: 'Harness sessions with their turns, workflows and flows' },
   { href: '/turns', label: 'Turns', title: 'Explore single turns with their run timeline' },
 ];
-export const ADMIN_NAV: NavItem = { href: '/admin', label: 'Admin', title: 'Teams, members, tokens, settings, budgets' };
-export const TOKENS_NAV: NavItem = { href: '/tokens', label: 'My tokens', title: 'Create and revoke your own ingest tokens' };
-export const LEAD_NAV: NavItem = { href: '/admin/tokens', label: 'Company tokens', title: 'Company tokens and budgets' };
-export const SUPER_NAV: NavItem = { href: '/super', label: 'Super admin', title: 'Companies and plans' };
+export const ADMIN_NAV: NavItem = { href: '/admin', label: 'Admin', title: 'Settings, teams, members, tokens, service users, budgets' };
+export const TOKENS_NAV: NavItem = { href: '/tokens', label: 'My tokens', title: 'Your collector logins and tokens: create, see expiry, revoke' };
+/** Team leads reach only the budgets of their teams under /admin (ADR-0029 T8: no tokens page for leads). */
+export const LEAD_NAV: NavItem = { href: '/admin/budgets', label: 'Budgets', title: 'Monthly budgets of the teams you lead' };
 
-/**
- * Links for a user: the dashboard views + "My tokens" for company users, + Admin for company admins (or
- * "Company tokens" for team leads, who reach only the token and budget pages), + Super for super admins.
- */
-export function navFor(user: { companyRole: 'admin' | 'member'; isSuperAdmin: boolean; company: unknown | null; teams?: { role: string }[] }): NavItem[] {
-  const items = user.company ? [...VIEW_NAV, TOKENS_NAV] : [];
-  if (user.company && user.companyRole === 'admin') items.push(ADMIN_NAV);
-  else if (user.company && user.teams?.some((t) => t.role === 'lead')) items.push(LEAD_NAV);
-  if (user.isSuperAdmin) items.push(SUPER_NAV);
+/** Links for a user: the dashboard views + "My tokens", + Admin for admins, or Budgets for team leads. */
+export function navFor(user: { role: 'admin' | 'member'; teams?: { role: string }[] }): NavItem[] {
+  const items = [...VIEW_NAV, TOKENS_NAV];
+  if (user.role === 'admin') items.push(ADMIN_NAV);
+  else if (user.teams?.some((t) => t.role === 'lead')) items.push(LEAD_NAV);
   return items;
 }

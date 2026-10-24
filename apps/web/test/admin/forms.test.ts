@@ -1,13 +1,13 @@
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 /**
- * D10 source guard: every mutating form is bound to its company. A new form or action that skips the
- * binding fails here instead of acting on the wrong company after a switch in another tab.
+ * Source guards for the single-deployment console (ADR-0028): the company-era machinery (D10 form binding, the
+ * company switcher, the super console, plans, the platform DB role) must not come back, and every admin action goes
+ * through the session gate + RLS transaction (runAdmin / messageAction).
  */
 const src = join(__dirname, '../../src');
-const roots = [join(src, 'app/admin'), join(src, 'app/(dashboard)/tokens')];
 
 function walk(dir: string): string[] {
   return readdirSync(dir).flatMap((f) => {
@@ -16,39 +16,80 @@ function walk(dir: string): string[] {
   });
 }
 const rel = (p: string) => relative(src, p);
+const sources = walk(src).filter((p) => /\.tsx?$/.test(p));
 
-describe('company-bound forms (D10)', () => {
-  it('only ActionForm and TokenCreateForm contain a <form, and both render <CompanyField', () => {
-    const withForm = roots.flatMap(walk).filter((p) => /\.tsx?$/.test(p) && readFileSync(p, 'utf8').includes('<form'));
-    expect(withForm.map(rel).sort()).toEqual(['app/admin/_components/ActionForm.tsx', 'app/admin/_components/TokenCreateForm.tsx']);
-    for (const p of withForm) expect(readFileSync(p, 'utf8')).toContain('<CompanyField');
+describe('single deployment: no company-era code', () => {
+  it('the removed surfaces are gone', () => {
+    for (const p of [
+      'app/super',
+      'lib/platform',
+      'app/(auth)/signup',
+      'app/api/auth/signup',
+      'app/(dashboard)/invitations',
+      'components/CompanySwitcher.tsx',
+      'components/company-switcher-model.ts',
+      'lib/admin/plans.ts',
+      'lib/admin/company.ts',
+      'app/admin/_components/CompanyScope.tsx',
+    ])
+      expect(existsSync(join(src, p)), p).toBe(false);
   });
 
-  it('each page provides the company scope from its own user; the shared admin layout does not', () => {
-    // A shared layout is not re-rendered on client navigation between /admin/* pages, so a scope there would
-    // keep the company of the first page while later pages render another company's rows.
-    expect(readFileSync(join(src, 'app/admin/layout.tsx'), 'utf8')).not.toMatch(/<CompanyScopeProvider\b/);
-    const pages = roots.flatMap(walk).filter((p) => p.endsWith('page.tsx'));
-    expect(pages.length).toBeGreaterThan(5);
-    for (const p of pages) {
+  it('nothing uses the platform DB role, SUPER_ADMIN_EMAILS, plans or the D10 company field', () => {
+    const banned: [RegExp, string][] = [
+      [/dbFor\(\s*['"]platform['"]\s*\)/, "dbFor('platform')"],
+      [/SUPER_ADMIN_EMAILS/, 'SUPER_ADMIN_EMAILS'],
+      [/requireSuperAdmin|isSuperAdmin/, 'super admin'],
+      [/_companyId|CompanyField|CompanyScopeProvider/, 'D10 company binding'],
+      [/lib\/admin\/plans|PLAN_LIMITS/, 'plans'],
+      [/\bcompanyMemberships\b|company_memberships/, 'company memberships'],
+    ];
+    for (const p of sources) {
       const text = readFileSync(p, 'utf8');
-      if (!/<(ActionForm|TokenCreateForm|TokenTable|Confirm)\b/.test(text)) continue;
-      expect(text, rel(p)).toMatch(/<CompanyScopeProvider companyId=\{user\.companyId\}>/);
+      for (const [re, what] of banned) expect(re.test(text), `${rel(p)} uses ${what}`).toBe(false);
     }
   });
+});
 
-  it('every exported admin action passes its FormData to runAdmin / messageAction', () => {
+describe('admin actions', () => {
+  it('every exported action runs through runAdmin / messageAction with a gate', () => {
     const dir = join(src, 'lib/admin/actions');
     const files = readdirSync(dir).filter((f) => f.endsWith('.ts'));
     expect(files.length).toBeGreaterThan(0);
     for (const f of files) {
       const text = readFileSync(join(dir, f), 'utf8');
+      expect(text.startsWith("'use server';"), f).toBe(true);
       const actions = text.split(/^export async function /m).slice(1);
       expect(actions.length).toBeGreaterThan(0);
       for (const body of actions) {
         const name = body.slice(0, body.indexOf('('));
-        expect(body, `${f}: ${name}`).toMatch(/(runAdmin|messageAction)\('(admin|user)', fd, /);
+        expect(body, `${f}: ${name}`).toMatch(/(runAdmin|messageAction)\('(admin|user)', /);
       }
     }
+  });
+
+  it('service users, tokens of others, model prices and settings are admin-gated', () => {
+    const gateOf = (file: string, fn: string) => {
+      const text = readFileSync(join(src, 'lib/admin/actions', file), 'utf8');
+      const body = text.split(`export async function ${fn}(`)[1] ?? '';
+      return /(runAdmin|messageAction)\('(admin|user)'/.exec(body)?.[2];
+    };
+    expect(gateOf('service-users.ts', 'createServiceUserAction')).toBe('admin');
+    expect(gateOf('service-users.ts', 'disableServiceUserAction')).toBe('admin');
+    expect(gateOf('tokens.ts', 'createServiceTokenAction')).toBe('admin');
+    expect(gateOf('tokens.ts', 'createOwnTokenAction')).toBe('user');
+    expect(gateOf('settings.ts', 'saveModelPriceAction')).toBe('admin');
+    expect(gateOf('settings.ts', 'updateSettingsAction')).toBe('admin');
+  });
+
+  it('the device page acts only through the device_* definer functions under the user context', () => {
+    const actions = readFileSync(join(src, 'lib/auth/device-actions.ts'), 'utf8');
+    expect(actions).toMatch(/requireUser\(\)/);
+    expect(actions).toMatch(/withUserDb\(user,/);
+    const lib = readFileSync(join(src, 'lib/auth/device.ts'), 'utf8');
+    expect(lib).toMatch(/device_lookup\(/);
+    expect(lib).toMatch(/device_approve\(/);
+    expect(lib).toMatch(/device_deny\(/);
+    expect(lib).not.toMatch(/from\s+device_codes|update\s+device_codes/i);
   });
 });

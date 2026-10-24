@@ -3,7 +3,8 @@ import type { CollectorConfig } from '../config.js';
 import type { Logger } from '../log.js';
 import type { AiObsPaths } from '../paths.js';
 import type { HarnessName, ProjectRef } from '../protocol-types.js';
-import type { QueueStore, StreamKey } from '../queue.js';
+import type { QueueStore } from '../queue.js';
+import type { StreamKey } from '../routing.js';
 import type { SessionStateStore } from '../state.js';
 
 /**
@@ -109,7 +110,7 @@ export interface CollectorContext {
   /**
    * Append events (build them with src/events.ts) to the session's stream, from `streamFor()`. A null
    * key drops them (logged). Project keys and usage names stay plain: the sender names / hashes them
-   * for the receiving token (C3).
+   * for the receiving server (C3).
    */
   readonly queue: Pick<QueueStore, 'enqueue'>;
   /** per-session JSON state: ~/.ai-obs/state/<harness>/<session>.json */
@@ -121,12 +122,12 @@ export interface CollectorContext {
    */
   projectKey(cwd: string): Promise<ProjectRef>;
   /**
-   * The session's stream, pinned once per session (C12, C15): a pinned token-bound project stream is
-   * returned as is; a pinned open one joins the project's explicit choice once there is one; an
-   * unresolved one is retried and adopted (keeping its token binding); otherwise the key of
-   * `holder.pkCwd` is resolved and bound with the routing in force at `capturedAt` (the `received_at`
-   * of the session's first hook). Sets `holder.stream` (the caller saves the holder). Null = do not
-   * record (no cwd, or `ai-obs use --none`).
+   * The session's stream, pinned once per session (C12, C15): (project key, server endpoint, team) from the
+   * repository's dot file (`.ai-obs.json` / `.ai-obs.local.json`) at the session's first hook, else the only
+   * registered server. A pinned stream with a server is returned as is (a dot file changed mid-session never
+   * retargets it); one recorded while no server was chosen joins the repository's server once there is one; an
+   * unresolved one (git timed out) is retried and adopted with its server and team. Sets `holder.stream` (the
+   * caller saves the holder). Null = do not record (no cwd, or not logged in to any server).
    */
   streamFor(holder: StreamHolder, capturedAt: number): Promise<StreamKey | null>;
   now(): Date;

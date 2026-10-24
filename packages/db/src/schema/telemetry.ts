@@ -4,7 +4,6 @@ import {
   bigint,
   boolean,
   check,
-  foreignKey,
   index,
   integer,
   jsonb,
@@ -17,26 +16,19 @@ import {
 import { count, createdAt, pk, tokenColumns, tstz, updatedAt, workColumns } from './columns.js';
 import { attributionEnum, outcomeEnum } from './enums.js';
 import { machines, projects } from './ingest.js';
-import { companies, teams, users } from './tenancy.js';
+import { teams, users } from './tenancy.js';
 
 /*
  * Raw telemetry (BRIEF §7). Metadata only: never prompts, responses, code, diffs or file paths.
  * team_id / user_id are denormalized onto every table so RLS can filter each row on its own.
- * `external_id` columns hold the collector's ids; the unique (company_id, external_id) pairs make
- * ingest upserts idempotent.
+ * `external_id` columns hold the collector's ids; unique external ids make ingest upserts idempotent.
  */
-
-const companyRef = () =>
-  uuid('company_id')
-    .notNull()
-    .references(() => companies.id, { onDelete: 'cascade' });
 
 /** One harness session from start to exit. */
 export const agentSessions = pgTable(
   'agent_sessions',
   {
     id: pk(),
-    companyId: companyRef(),
     teamId: uuid('team_id').references(() => teams.id, { onDelete: 'set null' }),
     userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }),
     machineId: uuid('machine_id').references(() => machines.id, { onDelete: 'set null' }),
@@ -63,11 +55,10 @@ export const agentSessions = pgTable(
     createdAt: createdAt(),
   },
   (t) => [
-    unique('agent_sessions_company_external_uq').on(t.companyId, t.externalId),
-    unique('agent_sessions_company_id_uq').on(t.companyId, t.id),
-    index('agent_sessions_company_started_idx').on(t.companyId, t.startedAt),
-    // The live query ("Active now"): open sessions of a company seen recently (ADR-0027).
-    index('agent_sessions_company_last_seen_idx').on(t.companyId, t.lastSeenAt).where(sql`${t.endedAt} is null`),
+    unique('agent_sessions_external_uq').on(t.externalId),
+    index('agent_sessions_started_idx').on(t.startedAt),
+    // The live query ("Active now"): open sessions seen recently (ADR-0027).
+    index('agent_sessions_last_seen_idx').on(t.lastSeenAt).where(sql`${t.endedAt} is null`),
     check('agent_sessions_title_len', sql`char_length(${t.title}) <= 140`),
     check('agent_sessions_title_source', sql`${t.titleSource} in ('custom', 'ai')`),
   ],
@@ -78,12 +69,11 @@ export const turns = pgTable(
   'turns',
   {
     id: pk(),
-    companyId: companyRef(),
-    teamId: uuid('team_id'),
-    /** null = company-token event that matched no member (attribution 'unverified'). */
+    teamId: uuid('team_id').references(() => teams.id),
+    /** null only on old company-token turns that matched no member (attribution 'unverified'); new turns always have one. */
     userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }),
     attribution: attributionEnum('attribution').notNull(),
-    sessionId: uuid('session_id'),
+    sessionId: uuid('session_id').references(() => agentSessions.id, { onDelete: 'cascade' }),
     projectId: uuid('project_id').references(() => projects.id, { onDelete: 'set null' }),
     externalId: text('external_id').notNull(),
     harness: text('harness').notNull(),
@@ -97,21 +87,16 @@ export const turns = pgTable(
     updatedAt: updatedAt(),
   },
   (t) => [
-    unique('turns_company_external_uq').on(t.companyId, t.externalId),
-    unique('turns_company_id_uq').on(t.companyId, t.id),
-    index('turns_company_started_idx').on(t.companyId, t.startedAt),
-    index('turns_company_team_started_idx').on(t.companyId, t.teamId, t.startedAt),
-    index('turns_company_user_started_idx').on(t.companyId, t.userId, t.startedAt),
-    index('turns_company_project_started_idx').on(t.companyId, t.projectId, t.startedAt),
+    unique('turns_external_uq').on(t.externalId),
+    index('turns_started_idx').on(t.startedAt),
+    index('turns_team_started_idx').on(t.teamId, t.startedAt),
+    index('turns_user_started_idx').on(t.userId, t.startedAt),
+    index('turns_project_started_idx').on(t.projectId, t.startedAt),
     index('turns_session_idx').on(t.sessionId),
     // The worker's rollup watermark selects turns changed since its last pass.
     index('turns_updated_idx').on(t.updatedAt),
     check('turns_summary_len', sql`char_length(${t.summary}) <= 140`),
     check('turns_user_attribution', sql`(${t.userId} is null) = (${t.attribution} = 'unverified')`),
-    foreignKey({ columns: [t.companyId, t.teamId], foreignColumns: [teams.companyId, teams.id] }),
-    foreignKey({ columns: [t.companyId, t.sessionId], foreignColumns: [agentSessions.companyId, agentSessions.id] }).onDelete(
-      'cascade',
-    ),
   ],
 );
 
@@ -123,10 +108,9 @@ export const runs = pgTable(
   'runs',
   {
     id: pk(),
-    companyId: companyRef(),
     teamId: uuid('team_id').references(() => teams.id, { onDelete: 'set null' }),
     userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }),
-    turnId: uuid('turn_id'),
+    turnId: uuid('turn_id').references((): AnyPgColumn => turns.id, { onDelete: 'cascade' }),
     turnExternalId: text('turn_external_id').notNull(),
     parentRunId: uuid('parent_run_id').references((): AnyPgColumn => runs.id, { onDelete: 'cascade' }),
     parentExternalId: text('parent_external_id'),
@@ -145,14 +129,12 @@ export const runs = pgTable(
     createdAt: createdAt(),
   },
   (t) => [
-    unique('runs_company_turn_external_uq').on(t.companyId, t.turnExternalId, t.externalId),
-    unique('runs_company_id_uq').on(t.companyId, t.id),
-    index('runs_company_started_idx').on(t.companyId, t.startedAt),
+    unique('runs_turn_external_uq').on(t.turnExternalId, t.externalId),
+    index('runs_started_idx').on(t.startedAt),
     index('runs_turn_idx').on(t.turnId),
     index('runs_parent_idx').on(t.parentRunId),
     // The worker's rollup watermark also selects runs created since its last pass.
     index('runs_created_idx').on(t.createdAt),
-    foreignKey({ columns: [t.companyId, t.turnId], foreignColumns: [turns.companyId, turns.id] }).onDelete('cascade'),
   ],
 );
 
@@ -166,11 +148,10 @@ export const runLinks = pgTable(
   'run_links',
   {
     id: pk(),
-    companyId: companyRef(),
-    turnId: uuid('turn_id'),
+    turnId: uuid('turn_id').references(() => turns.id, { onDelete: 'cascade' }),
     turnExternalId: text('turn_external_id').notNull(),
-    fromRunId: uuid('from_run_id'),
-    toRunId: uuid('to_run_id'),
+    fromRunId: uuid('from_run_id').references(() => runs.id, { onDelete: 'cascade' }),
+    toRunId: uuid('to_run_id').references(() => runs.id, { onDelete: 'cascade' }),
     fromExternalId: text('from_external_id').notNull(),
     toExternalId: text('to_external_id').notNull(),
     /** 'item' (same workflow item, next stage) | 'sequence' (next sibling Agent-tool spawn). */
@@ -178,14 +159,11 @@ export const runLinks = pgTable(
     createdAt: createdAt(),
   },
   (t) => [
-    unique('run_links_edge_uq').on(t.companyId, t.turnExternalId, t.fromExternalId, t.toExternalId, t.kind),
-    index('run_links_company_turn_idx').on(t.companyId, t.turnId),
+    unique('run_links_edge_uq').on(t.turnExternalId, t.fromExternalId, t.toExternalId, t.kind),
+    index('run_links_turn_idx').on(t.turnId),
     index('run_links_to_idx').on(t.toRunId),
     index('run_links_from_idx').on(t.fromRunId),
     check('run_links_kind', sql`${t.kind} in ('item', 'sequence')`),
-    foreignKey({ columns: [t.companyId, t.turnId], foreignColumns: [turns.companyId, turns.id] }).onDelete('cascade'),
-    foreignKey({ columns: [t.companyId, t.fromRunId], foreignColumns: [runs.companyId, runs.id] }).onDelete('cascade'),
-    foreignKey({ columns: [t.companyId, t.toRunId], foreignColumns: [runs.companyId, runs.id] }).onDelete('cascade'),
   ],
 );
 
@@ -194,11 +172,10 @@ export const usage = pgTable(
   'usage',
   {
     id: pk(),
-    companyId: companyRef(),
     teamId: uuid('team_id').references(() => teams.id, { onDelete: 'set null' }),
     userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }),
-    turnId: uuid('turn_id'),
-    runId: uuid('run_id'),
+    turnId: uuid('turn_id').references(() => turns.id, { onDelete: 'cascade' }),
+    runId: uuid('run_id').references(() => runs.id, { onDelete: 'cascade' }),
     /** Start of the owning turn / run; selects the effective model_prices row. */
     startedAt: tstz('started_at').notNull(),
     model: text('model').notNull(),
@@ -206,13 +183,11 @@ export const usage = pgTable(
     ...tokenColumns(),
   },
   (t) => [
-    unique('usage_owner_model_uq').on(t.companyId, t.turnId, t.runId, t.model, t.effort).nullsNotDistinct(),
-    index('usage_company_started_idx').on(t.companyId, t.startedAt),
+    unique('usage_owner_model_uq').on(t.turnId, t.runId, t.model, t.effort).nullsNotDistinct(),
+    index('usage_started_idx').on(t.startedAt),
     index('usage_turn_idx').on(t.turnId),
     index('usage_run_idx').on(t.runId),
     check('usage_has_owner', sql`${t.turnId} is not null or ${t.runId} is not null`),
-    foreignKey({ columns: [t.companyId, t.turnId], foreignColumns: [turns.companyId, turns.id] }).onDelete('cascade'),
-    foreignKey({ columns: [t.companyId, t.runId], foreignColumns: [runs.companyId, runs.id] }).onDelete('cascade'),
   ],
 );
 
@@ -225,7 +200,6 @@ export const pendingTurnPatches = pgTable(
   'pending_turn_patches',
   {
     id: pk(),
-    companyId: companyRef(),
     /** turns.external_id of the turn the patch is for (`<harness>:<turn_id>`). */
     turnExternalId: text('turn_external_id').notNull(),
     outcome: outcomeEnum('outcome'),
@@ -233,14 +207,14 @@ export const pendingTurnPatches = pgTable(
     outcomeProvisional: boolean('outcome_provisional'),
     summary: text('summary'),
     /**
-     * The verified/matched sender of the patch (null = unverified). ingest_apply_pending_patch() applies it
+     * The sender of the patch (null only on rows parked by old company tokens). ingest_apply_pending_patch() applies it
      * only when the turn has no owner or the same owner (SEC-3); deleting the user deletes the parked patch.
      */
     userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }),
     receivedAt: tstz('received_at').notNull().defaultNow(),
   },
   (t) => [
-    unique('pending_turn_patches_company_turn_uq').on(t.companyId, t.turnExternalId),
+    unique('pending_turn_patches_turn_uq').on(t.turnExternalId),
     index('pending_turn_patches_received_idx').on(t.receivedAt),
     check('pending_turn_patches_summary_len', sql`char_length(${t.summary}) <= 140`),
   ],
@@ -255,7 +229,6 @@ export const pendingSessionPatches = pgTable(
   'pending_session_patches',
   {
     id: pk(),
-    companyId: companyRef(),
     /** agent_sessions.external_id of the session the patch is for (`<harness>:<session_id>`). */
     sessionExternalId: text('session_external_id').notNull(),
     title: text('title').notNull(),
@@ -265,7 +238,7 @@ export const pendingSessionPatches = pgTable(
     receivedAt: tstz('received_at').notNull().defaultNow(),
   },
   (t) => [
-    unique('pending_session_patches_company_session_uq').on(t.companyId, t.sessionExternalId),
+    unique('pending_session_patches_session_uq').on(t.sessionExternalId),
     index('pending_session_patches_received_idx').on(t.receivedAt),
     check('pending_session_patches_title_len', sql`char_length(${t.title}) <= 140`),
     check('pending_session_patches_title_source', sql`${t.titleSource} in ('custom', 'ai')`),
@@ -275,17 +248,16 @@ export const pendingSessionPatches = pgTable(
 /**
  * A turn flagged as a runaway by the worker's `runaways` job (docs/briefs/runaway-alerts.md, ADR-0018): one row per
  * turn, written after the turn ended. `reasons`: 'tokens' (far above the user's own normal), 'cost' (≈ cost at or
- * above the company threshold), 'duration' (long and above-normal tokens). `notified_at` = mailed in a digest.
+ * above the deployment threshold), 'duration' (long and above-normal tokens). `notified_at` = mailed in a digest.
  * Deleted with its turn (retention) and with its user.
  */
 export const runawayAlerts = pgTable(
   'runaway_alerts',
   {
     id: pk(),
-    companyId: uuid('company_id')
+    turnId: uuid('turn_id')
       .notNull()
-      .references(() => companies.id, { onDelete: 'cascade' }),
-    turnId: uuid('turn_id').notNull(),
+      .references(() => turns.id, { onDelete: 'cascade' }),
     teamId: uuid('team_id'),
     userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }),
     projectId: uuid('project_id').references(() => projects.id, { onDelete: 'set null' }),
@@ -300,9 +272,8 @@ export const runawayAlerts = pgTable(
     notifiedAt: tstz('notified_at'),
   },
   (t) => [
-    unique('runaway_alerts_company_turn_uq').on(t.companyId, t.turnId),
-    index('runaway_alerts_company_started_idx').on(t.companyId, t.startedAt),
-    foreignKey({ columns: [t.companyId, t.turnId], foreignColumns: [turns.companyId, turns.id] }).onDelete('cascade'),
+    unique('runaway_alerts_turn_uq').on(t.turnId),
+    index('runaway_alerts_started_idx').on(t.startedAt),
   ],
 );
 
@@ -316,22 +287,20 @@ export const flowFlags = pgTable(
   'flow_flags',
   {
     id: pk(),
-    companyId: uuid('company_id')
-      .notNull()
-      .references(() => companies.id, { onDelete: 'cascade' }),
     userId: uuid('user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
-    turnId: uuid('turn_id').notNull(),
+    turnId: uuid('turn_id')
+      .notNull()
+      .references(() => turns.id, { onDelete: 'cascade' }),
     flowKey: text('flow_key').notNull(),
     flowName: text('flow_name').notNull(),
     note: text('note'),
     createdAt: createdAt(),
   },
   (t) => [
-    unique('flow_flags_user_flow_uq').on(t.companyId, t.userId, t.turnId, t.flowKey),
-    index('flow_flags_company_user_created_idx').on(t.companyId, t.userId, t.createdAt),
-    foreignKey({ columns: [t.companyId, t.turnId], foreignColumns: [turns.companyId, turns.id] }).onDelete('cascade'),
+    unique('flow_flags_user_flow_uq').on(t.userId, t.turnId, t.flowKey),
+    index('flow_flags_user_created_idx').on(t.userId, t.createdAt),
     check('flow_flags_key_format', sql`${t.flowKey} ~ '^[A-Za-z0-9_.:-]{1,128}$'`),
     check('flow_flags_name_len', sql`char_length(${t.flowName}) between 1 and 200`),
     check('flow_flags_note_len', sql`${t.note} is null or char_length(${t.note}) <= 500`),

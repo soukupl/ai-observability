@@ -1,3 +1,6 @@
+---
+spoor_id: 67c8b118-3b05-456e-8f75-3725c1fcaee8
+---
 # ADR-0001: Capture telemetry via harness hooks and local transcripts
 
 - **Status:** Accepted

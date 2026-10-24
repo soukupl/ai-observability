@@ -196,7 +196,7 @@ export default async function SessionDetailPage({ params }: Props) {
         </p>
       )}
       {isLive ? (
-        <LiveSessionProvider sessionId={s.id} companyId={user.companyId} initial={live}>
+        <LiveSessionProvider sessionId={s.id} initial={live}>
           {content}
         </LiveSessionProvider>
       ) : (

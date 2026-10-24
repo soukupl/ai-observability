@@ -16,7 +16,7 @@ import {
 
 /*
  * Skill and MCP usage (docs/briefs/skills-and-mcp-stats.md). Adapters count PLAIN names here; the
- * context's queue applies the company's project-naming mode (`hashUsageNames`) before anything is
+ * context's queue applies the deployment's project-naming mode (`hashUsageNames`) before anything is
  * written to the queue, so in hashed mode plain names never leave the worker process.
  */
 
@@ -109,7 +109,7 @@ export function normalizeMcp(mcp: McpCounts | undefined): McpCounts | undefined 
 }
 
 /**
- * Hashed-mode name: `sha256:` + HMAC-SHA256(company salt, input), or plain SHA-256 without a salt (the
+ * Hashed-mode name: `sha256:` + HMAC-SHA256(deployment salt, input), or plain SHA-256 without a salt (the
  * server's fallback for a plain name arriving in hashed mode uses the same plain input). Inputs are
  * namespaced so a skill and a server with the same name get different hashes:
  * `skill:<name>`, `mcp:<server>`, `mcp:<server>/<tool>`.
@@ -145,7 +145,7 @@ export function hashMcp(mcp: McpCounts, salt: string | null | undefined): McpCou
   return out;
 }
 
-/** Applies the company's naming mode to the skill / MCP names of turn and run events (plain mode: unchanged). */
+/** Applies the deployment's naming mode to the skill / MCP names of turn and run events (plain mode: unchanged). */
 export function applyUsageNaming(events: readonly IngestEvent[], naming: ProjectNamingMode, salt: string | null | undefined): IngestEvent[] {
   if (naming !== 'hashed') return [...events];
   return events.map((e) => {

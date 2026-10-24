@@ -1,9 +1,8 @@
 import { NextRequest } from 'next/server';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { oauthStartGet } from '../../src/app/api/auth/[provider]/start/handlers';
-import { signupPost } from '../../src/app/api/auth/signup/handlers';
 import { AuthConfigError, sessionSecret, trustedProxyHops } from '../../src/lib/auth/config';
-import { clientIp } from '../../src/lib/auth/http';
+import { clientIp, respondToLogin } from '../../src/lib/auth/http';
 
 const req = (headers: Record<string, string>) => new NextRequest('http://localhost:3000/api/auth/magic', { headers });
 
@@ -51,7 +50,7 @@ describe('placeholder SESSION_SECRET in production (known issue: bare 500)', () 
     expect(sessionSecret({ NODE_ENV: 'development' })).toBe('ai-obs-insecure-dev-secret');
   });
 
-  it('OAuth start and the sign-up POST redirect to /login?error=config and log once', async () => {
+  it('OAuth start redirects to /login?error=config and logs once', async () => {
     vi.stubEnv('NODE_ENV', 'production');
     vi.stubEnv('APP_URL', 'http://localhost:3000');
     vi.stubEnv('SESSION_SECRET', 'change-me-to-a-long-random-string');
@@ -60,18 +59,7 @@ describe('placeholder SESSION_SECRET in production (known issue: bare 500)', () 
     const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     const start = () => oauthStartGet(new NextRequest('http://localhost:3000/api/auth/github/start'), 'github');
-    const signup = () =>
-      signupPost(
-        new NextRequest('http://localhost:3000/api/auth/signup', {
-          method: 'POST',
-          headers: { origin: 'http://localhost:3000', 'content-type': 'application/x-www-form-urlencoded', cookie: 'ai_obs_signup=x.y' },
-          body: 'name=A&company=B',
-        }),
-        () => {
-          throw new Error('deps must not be reached');
-        },
-      );
-    for (const res of [start(), start(), await signup()]) {
+    for (const res of [start(), start(), start()]) {
       expect(res.status).toBe(303);
       expect(res.headers.get('location')).toBe('http://localhost:3000/login?error=config');
       expect(res.headers.get('set-cookie') ?? '').not.toMatch(/ai_obs_oauth=[^;]/);
@@ -79,5 +67,26 @@ describe('placeholder SESSION_SECRET in production (known issue: bare 500)', () 
     const configLogs = errors.mock.calls.filter((c) => String(c[0]).includes('SESSION_SECRET'));
     expect(configLogs.length).toBe(1); // logged once, not per request
     expect(errors.mock.calls.length).toBe(configLogs.length);
+  });
+});
+
+describe('respondToLogin (ADR-0028 E6)', () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('sets the session cookie and goes to the landing path', () => {
+    vi.stubEnv('APP_URL', 'http://localhost:3000');
+    const res = respondToLogin({ kind: 'session', token: 't'.repeat(43), landing: '/welcome?next=%2Fdevice', userId: 'u', joined: 'invitation' });
+    expect(res.status).toBe(303);
+    expect(res.headers.get('location')).toBe('http://localhost:3000/welcome?next=%2Fdevice');
+    expect(res.headers.get('set-cookie')).toMatch(/ai_obs_session=t{43}; .*HttpOnly/i);
+  });
+
+  it('sends an e-mail no rule admits to the refusal page, other failures to /login?error=', () => {
+    vi.stubEnv('APP_URL', 'http://localhost:3000');
+    expect(respondToLogin({ kind: 'error', code: 'not-invited' }).headers.get('location')).toBe('http://localhost:3000/login/refused?reason=not-invited');
+    expect(respondToLogin({ kind: 'error', code: 'removed' }).headers.get('location')).toBe('http://localhost:3000/login/refused?reason=removed');
+    const failed = respondToLogin({ kind: 'error', code: 'failed' });
+    expect(failed.headers.get('location')).toBe('http://localhost:3000/login?error=failed');
+    expect(failed.headers.get('set-cookie') ?? '').not.toMatch(/ai_obs_session=[^;]/);
   });
 });

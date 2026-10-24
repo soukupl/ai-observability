@@ -7,18 +7,15 @@ import { flagFlowAction, unflagFlowAction } from '@/lib/flows/actions';
 import { IDLE } from '@/lib/admin/types';
 
 /**
- * "Flag for later" / "Remove flag" of one flow (ADR-0024). Posts to the flow actions with the company the page was
- * rendered for (`_companyId`, D10). Flagging opens an optional note field first; the page re-renders with the flag
+ * "Flag for later" / "Remove flag" of one flow (ADR-0024). Flagging opens an optional note field first; the page re-renders with the flag
  * after the action (revalidatePath), so `flag` is the server's truth, not local state.
  */
 export function FlagButton({
-  companyId,
   turnId,
   flowKey,
   startedMs,
   flag,
 }: {
-  companyId: string;
   turnId: string;
   flowKey: string;
   startedMs: number;
@@ -34,7 +31,6 @@ export function FlagButton({
     <div className="flex flex-col items-end gap-1">
       {flag ? (
         <form action={unflagAction} className="flex items-center gap-2">
-          <input type="hidden" name="_companyId" value={companyId} />
           <input type="hidden" name="id" value={flag.id} />
           <span className="text-xs font-medium text-amber-700 dark:text-amber-400" title={flag.note ?? undefined}>
             ⚑ Flagged
@@ -45,7 +41,6 @@ export function FlagButton({
         </form>
       ) : open ? (
         <form action={flagAction} className="flex flex-wrap items-center gap-2">
-          <input type="hidden" name="_companyId" value={companyId} />
           <input type="hidden" name="turnId" value={turnId} />
           <input type="hidden" name="key" value={flowKey} />
           <input type="hidden" name="startedMs" value={startedMs} />

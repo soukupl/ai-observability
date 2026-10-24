@@ -63,7 +63,7 @@ describe('measureUsage', () => {
 });
 
 describe('budget e-mail', () => {
-  const base = { kind: 'cost' as const, used: 85.5, limit: 100, period, companyName: 'Acme <script>', scope: 'team Platform', appUrl: 'https://obs.example' };
+  const base = { kind: 'cost' as const, used: 85.5, limit: 100, period, deploymentName: 'Acme <script>', scope: 'team Platform', appUrl: 'https://obs.example' };
   it('builds the 80 % mail in plain text and HTML', () => {
     const m = buildBudgetEmail({ ...base, threshold: 80 });
     expect(m.subject).toContain('Budget at 80 %');

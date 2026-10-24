@@ -1,6 +1,7 @@
 # ADR-0013: Dashboard login via magic link and Google/GitHub OAuth
 
-- **Status:** Accepted
+- **Status:** Accepted; amended 2026-10-24 by [ADR-0028](0028-one-deployment-one-company.md) (bootstrap by `ADMIN_EMAILS` /
+  `ALLOWED_EMAIL_DOMAINS`, invitations auto-accepted, no sign-up, no super admin)
 - **Date:** 2026-10-05
 - **Deciders:** Ladislav Soukup (owner); options proposed by Claude
 - **Tags:** security, auth
@@ -57,3 +58,19 @@ The schema reserves `identity_providers` per company so SAML/OIDC SSO and SCIM c
 - The session carries `auth_sessions.active_company_id` (validated on every request; the header switcher changes it). The
   last active company is `company_memberships.last_active_at`, so login lands where the user last was.
 - Plan limits count memberships. Consent (SEC-1) is unchanged: nothing is accepted automatically.
+
+## Amendment 2026-10-24 — bootstrap and auto-accepted invitations (ADR-0028)
+
+- **Decided by:** Ladislav Soukup (owner, grilling Q1-Q9 of 2026-10-24 and "go" on
+  `docs/briefs/single-deployment-per-user-tokens.md`); design by Claude Fable 5.1. The body and earlier amendments are kept as history.
+
+- **`ADMIN_EMAILS`** replaces `SUPER_ADMIN_EMAILS`: a listed e-mail becomes admin at its first login. An unknown e-mail
+  becomes a member if it has a pending invitation or its verified domain is in **`ALLOWED_EMAIL_DOMAINS`** (empty by
+  default); otherwise login is refused with a page asking to get an invitation. There is no sign-up and no solo workspace.
+- **Invitations are auto-accepted** at the first magic-link or OAuth login, with a one-time notice naming the
+  deployment's visibility mode; `/invitations` goes. SEC-1 guarded against a look-alike company, which cannot exist with
+  one company per deployment.
+- SEC-5 (super-admin rights tied to the env list) is moot: the super admin is gone. SEC-8 (client IP) is unchanged and now
+  also applies to the public device-login routes ([ADR-0029](0029-per-user-tokens-device-login-expiry.md)).
+- `identity_providers` is dropped; SSO / SAML / SCIM stay out of scope. The active company on the session and the switcher
+  are gone. Magic link and Google / GitHub OAuth are unchanged.

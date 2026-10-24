@@ -2,7 +2,7 @@
  * `ai-obs hook <harness> <hookName>` — the FAST PATH run inside the harness. Budget: < 100 ms.
  * Reads the stdin JSON, writes a job file, spawns the detached worker, exits 0. It never blocks or
  * fails the harness: every error is logged to ~/.ai-obs/log and swallowed. Keep imports minimal.
- * On SessionStart only it may also print the token nudge (nudge.ts); every other hook stays silent on stdout.
+ * On SessionStart only it may also print the nudge (nudge.ts: link / login / expiry / warnings); every other hook stays silent on stdout.
  * The budget is measured in-process from `runHook` entry (Node startup is outside the collector's control).
  */
 import { spawn } from 'node:child_process';

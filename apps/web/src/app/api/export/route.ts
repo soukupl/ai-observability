@@ -20,14 +20,12 @@ const OUTCOMES = ['success', 'failed', 'abandoned', 'unknown'] as const;
 export async function GET(req: Request): Promise<Response> {
   const user = await getCurrentUser();
   if (!user) return new Response('unauthorized', { status: 401 });
-  if (!user.companyId || !user.company) return new Response('forbidden', { status: 403 });
 
   const params = new URL(req.url).searchParams;
   const view = params.get('view');
   if (!isExportView(view)) return new Response('unknown view', { status: 400 });
 
-  const viewer = { ...user, companyId: user.companyId, company: user.company };
-  const filters = parseFilters(params, { allowUser: canSeeUsers(viewer) });
+  const filters = parseFilters(params, { allowUser: canSeeUsers(user) });
   const opts: ExportOptions = {};
   const group = params.get('group');
   if (view === 'phases' && isPhaseGroup(group)) opts.group = group;
@@ -37,12 +35,10 @@ export async function GET(req: Request): Promise<Response> {
   const sessionId = parseSessionId(params.get('session'));
   if ((view === 'turns' || view === 'flows') && sessionId) opts.sessionId = sessionId;
 
-  const companyId = viewer.companyId;
   const { table, range } = await withUserDb(user, async (tx) => {
-    const ctx = await createQueryContext(tx, viewer);
+    const ctx = await createQueryContext(tx, user);
     const table = await buildExportTable(ctx, view, filters, opts);
     await tx.insert(auditLog).values({
-      companyId,
       actorUserId: user.id,
       action: 'export',
       target: view,

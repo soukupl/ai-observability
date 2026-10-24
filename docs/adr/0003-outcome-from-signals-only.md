@@ -1,3 +1,6 @@
+---
+spoor_id: 15035f8b-3b4f-4a0f-bc46-58bc4ca27fd7
+---
 # ADR-0003: Turn outcome is derived from signals only
 
 - **Status:** Accepted

@@ -1,6 +1,7 @@
 import { sql } from 'drizzle-orm';
 import type { WorkerContext } from '../context.js';
 import { DAY_MS, utcDay } from '../lib/dates.js';
+import { loadDeployment } from '../lib/deployment.js';
 import { effectiveRetentionDays, retentionCutoff } from '../lib/retention-policy.js';
 import type { Job } from '../scheduler.js';
 import { recomputeDay } from './rollups.js';
@@ -9,11 +10,14 @@ const BATCH = 2000;
 const INGEST_EVENT_DAYS = 30;
 /** Parked turn patches whose turn never arrived are dropped after this many days (ADR-0015). */
 const PENDING_PATCH_DAYS = 30;
+/** Device-login codes (ADR-0029) are deleted this long after they expired. */
+const DEVICE_CODE_KEEP_MS = DAY_MS;
 const LAST_DAY_KEY = 'retention.lastDay';
 
 export interface RetentionSummary {
   skipped?: boolean;
-  companies: number;
+  /** The deployment's effective window (effectiveRetentionDays). */
+  retentionDays: number;
   turns: number;
   runs: number;
   usage: number;
@@ -22,12 +26,13 @@ export interface RetentionSummary {
   pendingPatches: number;
   magicLinks: number;
   authSessions: number;
+  deviceCodes: number;
 }
 
 const rows = <T>(r: unknown): T[] => r as T[];
 const n = (v: unknown): number => Number(v ?? 0);
 
-async function deleteExpiredForCompany(ctx: WorkerContext, companyId: string, cutoff: Date, signal?: AbortSignal) {
+async function deleteExpired(ctx: WorkerContext, cutoff: Date, signal?: AbortSignal) {
   const cut = cutoff.toISOString();
   const total = { turns: 0, runs: 0, usage: 0, sessions: 0 };
 
@@ -37,11 +42,11 @@ async function deleteExpiredForCompany(ctx: WorkerContext, companyId: string, cu
   const days = rows<{ day: string }>(
     await ctx.db.execute(sql`
       select distinct (started_at at time zone 'UTC')::date::text as day from turns
-      where company_id = ${companyId} and started_at < ${cut}::timestamptz order by 1`),
+      where started_at < ${cut}::timestamptz order by 1`),
   );
   for (const { day } of days) {
     if (signal?.aborted) return total;
-    await recomputeDay(ctx.db, companyId, day);
+    await recomputeDay(ctx.db, day);
   }
 
   // 2. Expired turns with their runs and usage, in bounded batches.
@@ -49,10 +54,10 @@ async function deleteExpiredForCompany(ctx: WorkerContext, companyId: string, cu
     if (signal?.aborted) return total;
     const [r] = rows<{ usage: string; runs: string; turns: string }>(
       await ctx.db.execute(sql`
-        with ids as (select id from turns where company_id = ${companyId} and started_at < ${cut}::timestamptz order by started_at limit ${BATCH}),
-        du as (delete from usage where company_id = ${companyId} and turn_id in (select id from ids) returning 1),
-        dr as (delete from runs where company_id = ${companyId} and turn_id in (select id from ids) returning 1),
-        dt as (delete from turns where company_id = ${companyId} and id in (select id from ids) returning 1)
+        with ids as (select id from turns where started_at < ${cut}::timestamptz order by started_at limit ${BATCH}),
+        du as (delete from usage where turn_id in (select id from ids) returning 1),
+        dr as (delete from runs where turn_id in (select id from ids) returning 1),
+        dt as (delete from turns where id in (select id from ids) returning 1)
         select (select count(*) from du) as usage, (select count(*) from dr) as runs, (select count(*) from dt) as turns`),
     );
     total.usage += n(r?.usage);
@@ -66,9 +71,9 @@ async function deleteExpiredForCompany(ctx: WorkerContext, companyId: string, cu
     if (signal?.aborted) return total;
     const [r] = rows<{ usage: string; runs: string }>(
       await ctx.db.execute(sql`
-        with ids as (select id from runs where company_id = ${companyId} and turn_id is null and started_at < ${cut}::timestamptz limit ${BATCH}),
-        du as (delete from usage where company_id = ${companyId} and run_id in (select id from ids) returning 1),
-        dr as (delete from runs where company_id = ${companyId} and id in (select id from ids) returning 1)
+        with ids as (select id from runs where turn_id is null and started_at < ${cut}::timestamptz limit ${BATCH}),
+        du as (delete from usage where run_id in (select id from ids) returning 1),
+        dr as (delete from runs where id in (select id from ids) returning 1)
         select (select count(*) from du) as usage, (select count(*) from dr) as runs`),
     );
     total.usage += n(r?.usage);
@@ -77,7 +82,7 @@ async function deleteExpiredForCompany(ctx: WorkerContext, companyId: string, cu
   }
   const [orphanUsage] = rows<{ n: string }>(
     await ctx.db.execute(sql`
-      with d as (delete from usage where company_id = ${companyId} and turn_id is null and run_id is null and started_at < ${cut}::timestamptz returning 1)
+      with d as (delete from usage where turn_id is null and run_id is null and started_at < ${cut}::timestamptz returning 1)
       select count(*) as n from d`),
   );
   total.usage += n(orphanUsage?.n);
@@ -87,9 +92,9 @@ async function deleteExpiredForCompany(ctx: WorkerContext, companyId: string, cu
     if (signal?.aborted) return total;
     const [r] = rows<{ n: string }>(
       await ctx.db.execute(sql`
-        with ids as (select s.id from agent_sessions s where s.company_id = ${companyId} and s.started_at < ${cut}::timestamptz
+        with ids as (select s.id from agent_sessions s where s.started_at < ${cut}::timestamptz
                        and not exists (select 1 from turns t where t.session_id = s.id) limit ${BATCH}),
-        d as (delete from agent_sessions where company_id = ${companyId} and id in (select id from ids) returning 1)
+        d as (delete from agent_sessions where id in (select id from ids) returning 1)
         select count(*) as n from d`),
     );
     total.sessions += n(r?.n);
@@ -131,7 +136,16 @@ async function pruneGlobal(ctx: WorkerContext, signal?: AbortSignal) {
     (limit) => sql`with d as (delete from auth_sessions where id in (
         select id from auth_sessions where expires_at < ${now}::timestamptz limit ${limit}) returning 1) select count(*) as n from d`,
   );
-  return { ingestEvents, pendingPatches, magicLinks, authSessions };
+  // Device-login codes (ADR-0029): open codes past their expiry are marked expired (device_create_code does the same on
+  // demand), and every code is deleted a day after it expired. The CLI polling a deleted code gets invalid_grant.
+  await ctx.db.execute(sql`update device_codes set status = 'expired'
+    where status in ('pending', 'approved') and expires_at <= ${now}::timestamptz`);
+  const deviceCut = new Date(ctx.now().getTime() - DEVICE_CODE_KEEP_MS).toISOString();
+  const deviceCodes = await batched(
+    (limit) => sql`with d as (delete from device_codes where id in (
+        select id from device_codes where expires_at < ${deviceCut}::timestamptz limit ${limit}) returning 1) select count(*) as n from d`,
+  );
+  return { ingestEvents, pendingPatches, magicLinks, authSessions, deviceCodes };
 }
 
 /** Whether the nightly pass is due: once per UTC day, not before RETENTION_HOUR_UTC. */
@@ -142,36 +156,32 @@ export function retentionDue(now: Date, lastDay: string | undefined, hourUtc: nu
 /** One retention pass. `force` skips the once-per-day guard (RUN_ONCE). Exported for tests. */
 export async function runRetention(ctx: WorkerContext, opts: { force?: boolean; signal?: AbortSignal } = {}): Promise<RetentionSummary> {
   const now = ctx.now();
-  const empty: RetentionSummary = { companies: 0, turns: 0, runs: 0, usage: 0, sessions: 0, ingestEvents: 0, pendingPatches: 0, magicLinks: 0, authSessions: 0 };
+  const empty: RetentionSummary = {
+    retentionDays: 0, turns: 0, runs: 0, usage: 0, sessions: 0, ingestEvents: 0, pendingPatches: 0, magicLinks: 0, authSessions: 0, deviceCodes: 0,
+  };
   if (!opts.force && !retentionDue(now, ctx.state.get(LAST_DAY_KEY), ctx.config.retentionHourUtc)) return { ...empty, skipped: true };
 
-  const companies = rows<{ id: string; slug: string; plan: 'free' | 'team' | 'business'; settings: { retentionDays?: number } }>(
-    await ctx.db.execute(sql`select id, slug, plan, settings from companies`),
-  );
-  const summary = { ...empty, companies: companies.length };
   let failed = 0;
-  for (const c of companies) {
-    if (opts.signal?.aborted) return summary;
-    const days = effectiveRetentionDays(c.plan, c.settings);
-    try {
-      const r = await deleteExpiredForCompany(ctx, c.id, retentionCutoff(now, days), opts.signal);
-      summary.turns += r.turns;
-      summary.runs += r.runs;
-      summary.usage += r.usage;
-      summary.sessions += r.sessions;
-      if (r.turns + r.runs + r.usage + r.sessions > 0) {
-        ctx.log.info(`retention: company=${c.slug} retentionDays=${days} turns=${r.turns} runs=${r.runs} usage=${r.usage} sessions=${r.sessions}`);
-      }
-    } catch (err) {
-      failed += 1;
-      ctx.log.error(`retention: company ${c.slug} failed`, err);
+  const summary = { ...empty };
+  try {
+    const { settings } = await loadDeployment(ctx.db);
+    const days = effectiveRetentionDays(settings);
+    summary.retentionDays = days;
+    const r = await deleteExpired(ctx, retentionCutoff(now, days), opts.signal);
+    Object.assign(summary, r);
+    if (r.turns + r.runs + r.usage + r.sessions > 0) {
+      ctx.log.info(`retention: retentionDays=${days} turns=${r.turns} runs=${r.runs} usage=${r.usage} sessions=${r.sessions}`);
     }
+  } catch (err) {
+    failed += 1;
+    ctx.log.error('retention: deleting expired raw rows failed', err);
   }
+  if (opts.signal?.aborted) return summary;
   try {
     Object.assign(summary, await pruneGlobal(ctx, opts.signal));
   } catch (err) {
     failed += 1;
-    ctx.log.error('retention: pruning ingest_events / pending patches / auth failed', err);
+    ctx.log.error('retention: pruning ingest_events / pending patches / auth / device codes failed', err);
   }
   if (failed > 0) throw new Error(`retention: ${failed} step(s) failed`);
   if (!opts.signal?.aborted) ctx.state.set(LAST_DAY_KEY, utcDay(now));
@@ -184,6 +194,6 @@ export const createRetentionJob = (ctx: WorkerContext): Job => ({
   async run(signal, opts) {
     const s = await runRetention(ctx, { force: opts?.force, signal });
     if (s.skipped) return 'skipped=already-ran-today-or-not-yet-due';
-    return `companies=${s.companies} turns=${s.turns} runs=${s.runs} usage=${s.usage} sessions=${s.sessions} ingest_events=${s.ingestEvents} pending_patches=${s.pendingPatches} magic_links=${s.magicLinks} auth_sessions=${s.authSessions}`;
+    return `retention_days=${s.retentionDays} turns=${s.turns} runs=${s.runs} usage=${s.usage} sessions=${s.sessions} ingest_events=${s.ingestEvents} pending_patches=${s.pendingPatches} magic_links=${s.magicLinks} auth_sessions=${s.authSessions} device_codes=${s.deviceCodes}`;
   },
 });

@@ -1,9 +1,5 @@
-import Link from 'next/link';
 import type { ReactNode } from 'react';
 import { logout } from '@/lib/auth/actions';
-import type { MembershipSummary } from '@/lib/auth/session';
-import { CompanySwitcher, CompanySwitchList } from './CompanySwitcher';
-import { companySwitcherModel } from './company-switcher-model';
 import { NavLinks } from './NavLinks';
 import { ThemeToggle } from './ThemeToggle';
 import { navFor } from './nav';
@@ -13,32 +9,31 @@ import { VisibilityBanner } from './VisibilityBanner';
 export interface ShellUser {
   email: string;
   name: string | null;
-  companyRole: 'admin' | 'member';
-  isSuperAdmin: boolean;
+  role: 'admin' | 'member';
   teams: { id: string; name: string; role: 'member' | 'lead' }[];
-  /** The active company (null for super admins). */
-  company: { id: string; name: string; settings: { individualVisibility: 'aggregates-only' | 'full' } } | null;
-  /** Every company the user can switch to (ADR-0022); [] for super admins. */
-  memberships: MembershipSummary[];
+  deployment: { name: string; settings: { individualVisibility: 'aggregates-only' | 'full' } };
 }
 
 /**
- * Dashboard frame: sidebar (a menu on phones), top bar with the company switcher, theme toggle and user
- * menu, and the visibility-mode footer line (the banner itself is rendered by the dashboard layout).
- * The company switcher is in the header from md up and in the user menu (the phone placement); both
- * render from companySwitcherModel; the user menu is keyed by the active company so it closes after a
- * switch. `pendingInvitations` adds an "Invitations (n)" link to the user menu.
- * Server component: only NavLinks / ThemeToggle are client code.
+ * Dashboard frame: sidebar (a menu on phones) under the deployment's name, top bar with the theme toggle and the user
+ * menu, and the visibility-mode footer line (the banner itself is rendered by the dashboard layout). One deployment
+ * = one company (ADR-0028), so there is no company switcher. Server component: only NavLinks / ThemeToggle are client
+ * code.
  */
-export function AppShell({ user, pendingInvitations = 0, children }: { user: ShellUser; pendingInvitations?: number; children: ReactNode }) {
+export function AppShell({ user, children }: { user: ShellUser; children: ReactNode }) {
   const items = navFor(user);
-  const switcher = companySwitcherModel(user);
-  const mode = user.company?.settings.individualVisibility;
-  const role = user.isSuperAdmin ? 'super admin' : user.companyRole === 'admin' ? 'admin' : user.teams.some((t) => t.role === 'lead') ? 'lead' : 'member';
+  const mode = user.deployment.settings.individualVisibility;
+  const name = user.deployment.name;
+  const role = user.role === 'admin' ? 'admin' : user.teams.some((t) => t.role === 'lead') ? 'lead' : 'member';
   return (
     <div className="min-h-dvh md:flex">
       <aside className="hidden w-56 shrink-0 border-r border-zinc-200 bg-white p-3 md:block dark:border-zinc-800 dark:bg-zinc-950">
-        <div className="mb-4 px-3 pt-1 text-base font-semibold tracking-tight">ai-obs</div>
+        <div className="mb-4 px-3 pt-1">
+          <div className="truncate text-base font-semibold tracking-tight" data-deployment-name>
+            {name}
+          </div>
+          <div className="text-xs text-zinc-500 dark:text-zinc-400">ai-obs</div>
+        </div>
         <nav aria-label="Main">
           <NavLinks items={items} />
         </nav>
@@ -59,11 +54,10 @@ export function AppShell({ user, pendingInvitations = 0, children }: { user: She
               <NavLinks items={items} closeMenu />
             </nav>
           </details>
-          <span className="font-semibold md:hidden">ai-obs</span>
-          <CompanySwitcher model={switcher} />
+          <span className="min-w-0 truncate font-semibold md:hidden">{name}</span>
           <div className="ml-auto flex items-center gap-2">
             <ThemeToggle />
-            <details key={user.company?.id ?? 'platform'} className="relative">
+            <details className="relative">
               <summary className="flex h-9 cursor-pointer list-none items-center gap-2 rounded-md border border-zinc-200 px-3 text-sm dark:border-zinc-700 [&::-webkit-details-marker]:hidden">
                 <span className="max-w-32 truncate sm:max-w-48">{user.name || user.email}</span>
               </summary>
@@ -71,20 +65,8 @@ export function AppShell({ user, pendingInvitations = 0, children }: { user: She
                 <div className="truncate font-medium">{user.name || user.email}</div>
                 {user.name && <div className="truncate text-xs text-zinc-500 dark:text-zinc-400">{user.email}</div>}
                 <div className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-                  {user.company?.name ? `${user.company.name} · ` : ''}
-                  {role}
+                  {name} · {role}
                 </div>
-                {switcher.mode === 'switcher' && (
-                  <div className="mt-3 border-t border-zinc-100 pt-2 dark:border-zinc-800">
-                    <div className="mb-1 px-3 text-xs font-medium text-zinc-500 dark:text-zinc-400">Switch company</div>
-                    <CompanySwitchList items={switcher.items} />
-                  </div>
-                )}
-                {pendingInvitations > 0 && (
-                  <Link href="/invitations" className="mt-3 block rounded-md px-3 py-1.5 text-sm font-medium hover:bg-zinc-100 dark:hover:bg-zinc-800">
-                    Invitations ({pendingInvitations})
-                  </Link>
-                )}
                 <form action={logout} className="mt-3">
                   <button
                     type="submit"
@@ -103,7 +85,9 @@ export function AppShell({ user, pendingInvitations = 0, children }: { user: She
         </main>
 
         <footer className="border-t border-zinc-200 px-4 py-3 dark:border-zinc-800">
-          <div className="mx-auto max-w-7xl">{mode ? <VisibilityBanner mode={mode} variant="footer" /> : null}</div>
+          <div className="mx-auto max-w-7xl">
+            <VisibilityBanner mode={mode} variant="footer" />
+          </div>
         </footer>
       </div>
     </div>

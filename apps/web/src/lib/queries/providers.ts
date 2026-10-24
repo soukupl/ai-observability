@@ -54,8 +54,7 @@ export function aggArgs(d: Dims, kind: 'ts' | 'date'): SQL {
 /** WHERE conditions on `turns` aliased `t` (direct path). `model`/`effort` are the turn's primary ones. */
 export function turnConds(ctx: QueryCtx, d: Dims, opts: { model?: boolean; effort?: boolean } = {}): SQL[] {
   const c: SQL[] = [
-    sql`t.company_id = ${ctx.viewer.companyId}::uuid`,
-    sql`t.started_at >= ${d.fromIso}::timestamptz`,
+        sql`t.started_at >= ${d.fromIso}::timestamptz`,
     sql`t.started_at < ${d.toIso}::timestamptz`,
   ];
   if (d.teamId) c.push(sql`t.team_id = ${d.teamId}::uuid`);
@@ -157,7 +156,7 @@ export async function usageDaily(ctx: QueryCtx, d: Dims): Promise<UsageDay[]> {
             sum(u.input_tokens)::bigint as input_tokens, sum(u.output_tokens)::bigint as output_tokens,
             sum(u.cache_read_tokens)::bigint as cache_read_tokens, sum(u.cache_write_tokens)::bigint as cache_write_tokens,
             sum(u.reasoning_tokens)::bigint as reasoning_tokens, sum(u.requests)::bigint as requests
-          from usage u join turns t on t.id = u.turn_id and t.company_id = u.company_id
+          from usage u join turns t on t.id = u.turn_id
           ${where(conds)} group by 1, 2, 3 ${NONZERO_USAGE} order by 1, 2, 3`,
     );
   }
@@ -181,7 +180,7 @@ export async function usageDailyByProject(ctx: QueryCtx, d: Dims): Promise<(Usag
           sum(u.input_tokens)::bigint as input_tokens, sum(u.output_tokens)::bigint as output_tokens,
           sum(u.cache_read_tokens)::bigint as cache_read_tokens, sum(u.cache_write_tokens)::bigint as cache_write_tokens,
           sum(u.reasoning_tokens)::bigint as reasoning_tokens, sum(u.requests)::bigint as requests
-        from usage u join turns t on t.id = u.turn_id and t.company_id = u.company_id
+        from usage u join turns t on t.id = u.turn_id
         ${where(conds)} group by 1, 2, 3 ${NONZERO_USAGE}`,
   );
   return out.map((r) => ({
@@ -224,8 +223,7 @@ export async function rollupFacts(ctx: QueryCtx, d: Dims): Promise<RollupFact[]>
     if (d.effort) out = out.filter((r) => r.effort === d.effort);
   } else {
     const c: SQL[] = [
-      sql`d.company_id = ${ctx.viewer.companyId}::uuid`,
-      sql`d.day >= ${d.fromDay}::date`,
+            sql`d.day >= ${d.fromDay}::date`,
       sql`d.day < ${d.toDay}::date`,
     ];
     if (d.teamId) c.push(sql`d.team_id = ${d.teamId}::uuid`);

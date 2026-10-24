@@ -10,8 +10,22 @@ import { runMigrations } from '../../../../packages/db/src/migrate';
 export const INGEST_TEST_URL =
   process.env.INGEST_TEST_DATABASE_URL || 'postgres://ai_obs:ai_obs@localhost:5432/ai_obs_ingest_test';
 
-function admin() {
+/** The database this test file uses (vitest isolates modules per file); see useIngestTestDb. */
+let testUrl = INGEST_TEST_URL;
+
+/**
+ * Gives this test file its own database (`<name>_<suffix>_test`), so suites running in parallel never drop each other's
+ * database. Call before prepareIngestTestDb.
+ */
+export function useIngestTestDb(suffix: string): void {
   const u = new URL(INGEST_TEST_URL);
+  const name = decodeURIComponent(u.pathname.slice(1)).replace(/_test$/, '');
+  u.pathname = `/${name}_${suffix}_test`;
+  testUrl = u.toString();
+}
+
+function admin() {
+  const u = new URL(testUrl);
   const name = decodeURIComponent(u.pathname.slice(1));
   u.pathname = '/postgres';
   return { name, url: u.toString() };
@@ -44,7 +58,7 @@ export async function prepareIngestTestDb(): Promise<string | null> {
   const quiet = console.log;
   console.log = () => {};
   try {
-    await runMigrations(INGEST_TEST_URL);
+    await runMigrations(testUrl);
   } finally {
     console.log = quiet;
   }
@@ -59,14 +73,14 @@ export async function dropIngestTestDb(): Promise<void> {
 
 /** Pool running as app_ingest — what the route uses via dbFor('ingest'). */
 export function connectIngest(): Database {
-  const { db, close } = createDb({ url: INGEST_TEST_URL, role: DB_ROLES.ingest, max: 2 });
+  const { db, close } = createDb({ url: testUrl, role: DB_ROLES.ingest, max: 2 });
   closers.push(close);
   return db;
 }
 
 /** Owner pool; every transaction runs as app_definer so FORCE RLS is honoured for fixtures and checks. */
 export function connectOwner(): { run: <T>(fn: (tx: Tx) => Promise<T>) => Promise<T> } {
-  const { db, close } = createDb({ url: INGEST_TEST_URL, max: 1 });
+  const { db, close } = createDb({ url: testUrl, max: 1 });
   closers.push(close);
   return {
     run: (fn) =>
@@ -79,7 +93,7 @@ export function connectOwner(): { run: <T>(fn: (tx: Tx) => Promise<T>) => Promis
 
 /** Pool running as another service role (app_web for dashboard reads, app_worker for rollups). */
 export function connectRole(role: 'web' | 'worker'): Database {
-  const { db, close } = createDb({ url: INGEST_TEST_URL, role: DB_ROLES[role], max: 2 });
+  const { db, close } = createDb({ url: testUrl, role: DB_ROLES[role], max: 2 });
   closers.push(close);
   return db;
 }

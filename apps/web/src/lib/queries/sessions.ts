@@ -9,7 +9,7 @@ import { listProjects, listTeams } from './lookups';
 import { dims, turnConds } from './providers';
 import { addDays, rawRange, rangeFor, type ResolvedRange } from './range';
 import { canSeeUsers, type QueryCtx } from './scope';
-import { costTokens, num, numOrNull, rows, tokensOf, where, type Outcomes, type TokenTotals } from './sqlutil';
+import { costTokens, num, numOrNull, rows, tokensOf, userLabel, where, type Outcomes, type TokenTotals } from './sqlutil';
 import { mergeUses } from './turns';
 import { IDLE_MAX_MS, sessionStatus, WORKING_MAX_MS, type ActiveSession, type ActiveSessionsPayload, type LiveSessionPayload } from '../live/status';
 
@@ -144,7 +144,7 @@ const MS = (col: string) => sql.raw(`(extract(epoch from ${col}) * 1000)::bigint
  */
 function sessionSql(ctx: QueryCtx, cand: SQL, opts: { span?: { fromIso: string; toIso: string }; withUsers: boolean; tail: SQL }): SQL {
   const own = ctx.agg ? sql`and s.user_id = ${ctx.viewer.id}::uuid` : sql``;
-  const userCols = opts.withUsers ? sql`, x.user_id, coalesce(u.name, u.email) as user_name` : sql``;
+  const userCols = opts.withUsers ? sql`, x.user_id, ${userLabel('u')} as user_name` : sql``;
   const userJoin = opts.withUsers ? sql`left join users u on u.id = x.user_id` : sql``;
   const span = opts.span ? sql`where x.span_start < ${opts.span.toIso}::timestamptz and x.span_end >= ${opts.span.fromIso}::timestamptz` : sql``;
   return sql`
@@ -161,13 +161,11 @@ function sessionSql(ctx: QueryCtx, cand: SQL, opts: { span?: { fromIso: string; 
         (array_agg(t.team_id order by t.started_at, t.id) filter (where t.team_id is not null))[1] as turn_team_id,
         (array_agg(t.outcome order by t.started_at desc, t.id desc))[1] as last_outcome
       from turns t join cand c on c.session_id = t.session_id
-      where t.company_id = ${ctx.viewer.companyId}::uuid
       group by t.session_id
     ),
     rs as (
       select t.session_id, count(r.id) as runs, count(distinct r.orchestration_id) as workflows, max(r.ended_at) as last_run_end
-      from turns t join cand c on c.session_id = t.session_id join runs r on r.turn_id = t.id and r.company_id = t.company_id
-      where t.company_id = ${ctx.viewer.companyId}::uuid
+      from turns t join cand c on c.session_id = t.session_id join runs r on r.turn_id = t.id
       group by t.session_id
     ),
     x as (
@@ -180,7 +178,7 @@ function sessionSql(ctx: QueryCtx, cand: SQL, opts: { span?: { fromIso: string; 
         st.cache_write_tokens, st.reasoning_tokens, st.first_summary,
         s.current_turn_started_at, s.last_seen_at, st.last_turn_end, st.last_outcome
       from agent_sessions s join cand c on c.session_id = s.id left join st on st.session_id = s.id left join rs on rs.session_id = s.id
-      where s.company_id = ${ctx.viewer.companyId}::uuid ${own}
+      where true ${own}
     )
     select x.*, ${MS('x.span_start')} as span_start_ms, ${MS('x.span_end')} as span_end_ms, ${MS('x.ended_at')} as ended_ms,
       ${MS('x.current_turn_started_at')} as current_turn_started_ms, ${MS('x.last_seen_at')} as last_seen_ms, ${MS('x.last_turn_end')} as last_turn_end_ms,
@@ -255,8 +253,8 @@ async function usageCosts(ctx: QueryCtx, sessionIds: string[], by: 'session' | '
   const out = await rows<Record<string, unknown>>(
     ctx.tx,
     sql`select ${key} as k, (u.started_at at time zone 'UTC')::date::text as day, u.model, ${USAGE_SUMS}
-        from usage u join turns t on t.id = u.turn_id and t.company_id = u.company_id
-        where t.company_id = ${ctx.viewer.companyId}::uuid and t.session_id in (${idList(sessionIds)})
+        from usage u join turns t on t.id = u.turn_id
+        where t.session_id in (${idList(sessionIds)})
         group by 1, 2, 3`,
   );
   const sums = new Map<string, CostSum>();
@@ -273,7 +271,7 @@ async function usageCosts(ctx: QueryCtx, sessionIds: string[], by: 'session' | '
 
 /** Runs, links and flows of the given sessions' turns (raw, under RLS). */
 async function sessionFlows(ctx: QueryCtx, sessionIds: string[]) {
-  const input = await readFlowInputs(ctx, [sql`t.company_id = ${ctx.viewer.companyId}::uuid`, sql`t.session_id in (${idList(sessionIds)})`]);
+  const input = await readFlowInputs(ctx, [sql`t.session_id in (${idList(sessionIds)})`]);
   const flows = buildFlows({ runs: input.runs, turns: input.turns, links: input.links, prices: ctx.prices });
   return { ...input, flows };
 }
@@ -347,7 +345,7 @@ async function finishRows(ctx: QueryCtx, list: Record<string, unknown>[], lk: Lo
   const sessionOfTurn = new Map<string, string>();
   const turnRows = await rows<{ id: string; session_id: string }>(
     ctx.tx,
-    sql`select t.id, t.session_id from turns t where t.company_id = ${ctx.viewer.companyId}::uuid and t.session_id in (${idList(ids)})`,
+    sql`select t.id, t.session_id from turns t where t.session_id in (${idList(ids)})`,
   );
   for (const t of turnRows) sessionOfTurn.set(String(t.id), String(t.session_id));
   const flowCount = new Map<string, number>();
@@ -379,7 +377,7 @@ const NO_LOOKUPS: Lookups = { team: new Map(), project: new Map() };
  */
 function liveCandidates(ctx: QueryCtx, nowMs: number): SQL {
   const own = ctx.agg ? sql`and s.user_id = ${ctx.viewer.id}::uuid` : sql``;
-  return sql`select s.id as session_id from agent_sessions s where s.company_id = ${ctx.viewer.companyId}::uuid ${own}
+  return sql`select s.id as session_id from agent_sessions s where true ${own}
     and s.ended_at is null and s.last_seen_at >= ${new Date(nowMs - WORKING_MAX_MS).toISOString()}::timestamptz
     and ((s.current_turn_started_at is not null and s.current_turn_started_at >= ${new Date(nowMs - WORKING_MAX_MS).toISOString()}::timestamptz)
       or s.last_seen_at > ${new Date(nowMs - IDLE_MAX_MS).toISOString()}::timestamptz)`;
@@ -531,8 +529,8 @@ export async function getSessionDetail(ctx: QueryCtx, sessionId: string): Promis
       sql`select t.id, ${MS('t.started_at')} as started_ms, ${MS('t.ended_at')} as ended_ms, t.duration_ms, t.model, t.effort,
             t.input_tokens, t.output_tokens, t.cache_read_tokens, t.cache_write_tokens, t.reasoning_tokens, t.outcome, t.summary,
             t.skills, t.mcp,
-            (select count(*) from runs r where r.turn_id = t.id and r.company_id = t.company_id) as runs
-          from turns t where t.company_id = ${ctx.viewer.companyId}::uuid and t.session_id = ${id}::uuid
+            (select count(*) from runs r where r.turn_id = t.id) as runs
+          from turns t where t.session_id = ${id}::uuid
           order by t.started_at, t.id`,
     ),
     usageCosts(ctx, [id], 'turn'),
@@ -611,9 +609,9 @@ export async function getSessionLink(ctx: QueryCtx, sessionId: string | null): P
   const [r] = await rows<Record<string, unknown>>(
     ctx.tx,
     sql`select s.id, s.external_id, s.harness, s.title,
-          (select t.summary from turns t where t.session_id = s.id and t.company_id = s.company_id and t.summary is not null and t.summary <> ''
+          (select t.summary from turns t where t.session_id = s.id and t.summary is not null and t.summary <> ''
             order by t.started_at, t.id limit 1) as first_summary
-        from agent_sessions s where s.id = ${id}::uuid and s.company_id = ${ctx.viewer.companyId}::uuid ${own}`,
+        from agent_sessions s where s.id = ${id}::uuid ${own}`,
   );
   if (!r) return null;
   const hid = harnessSessionId(String(r.external_id), String(r.harness));

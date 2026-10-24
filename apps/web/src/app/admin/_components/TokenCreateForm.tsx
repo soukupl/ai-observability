@@ -3,7 +3,6 @@
 import { useActionState, useState, type ReactNode } from 'react';
 import { IDLE, type TokenReveal } from '@/lib/admin/types';
 import { ActionMessage, type FormAction } from './ActionForm';
-import { CompanyField } from './CompanyScope';
 import { buttonCls } from './ui';
 
 function Copy({ text, label }: { text: string; label: string }) {
@@ -29,34 +28,27 @@ function Reveal({ token }: { token: TokenReveal }) {
       <pre className="overflow-x-auto rounded bg-white p-2 text-xs dark:bg-zinc-950">
         <code>{token.plaintext}</code>
       </pre>
-      <p className="text-xs text-zinc-700 dark:text-zinc-300">Run on the developer machine:</p>
+      <p className="text-xs text-zinc-700 dark:text-zinc-300">
+        {token.expiresAt ? `Expires on ${token.expiresAt.slice(0, 10)} (UTC).` : 'Never expires: revoke it when it is no longer needed.'} Run on the machine that
+        sends data:
+      </p>
       <pre className="overflow-x-auto rounded bg-white p-2 text-xs dark:bg-zinc-950">
         <code>{token.command}</code>
       </pre>
       <div className="flex flex-wrap gap-2">
         <Copy text={token.plaintext} label="Copy token" />
         <Copy text={token.command} label="Copy command" />
-        {token.mdmJson && (
-          <a
-            className={buttonCls.subtle}
-            download={token.mdmFilename}
-            href={`data:application/json;charset=utf-8,${encodeURIComponent(token.mdmJson)}`}
-          >
-            Download config (MDM)
-          </a>
-        )}
       </div>
     </div>
   );
 }
 
-/** Token creation (user or company token): fields as children, the plaintext + install command appear after success. */
+/** Token creation (own token or a service user's): fields as children, the plaintext + login command appear after success. */
 export function TokenCreateForm({ action, children, submitLabel }: { action: FormAction; children: ReactNode; submitLabel: string }) {
   const [state, formAction, pending] = useActionState(action, IDLE);
   return (
     <div className="min-w-0">
       <form action={formAction} className="flex flex-wrap items-end gap-2">
-        <CompanyField />
         {children}
         <button type="submit" disabled={pending} className={buttonCls.primary}>
           {pending ? '…' : submitLabel}

@@ -14,13 +14,13 @@ import type {
   TurnSummaryEvent,
 } from '@ai-obs/protocol';
 import { assertOwner, OwnerConflictError, rows, type BatchContext } from './context';
-import { sessionKey, teamFor, turnKey, upsertProject } from './resolve';
+import { resolveSessionTeam, sessionKey, turnKey, upsertProject } from './resolve';
 import { mergeUsage, sumUsage } from './usage';
 import { propagateTurnOwner, replaceUsage } from './usage-rows';
 
 /*
  * One function per event type. Each runs inside the batch transaction (withIngestContext, so RLS
- * pins every row to the token's company) and is idempotent: replaying an event converges to the
+ * lets it write only rows of the token's user) and is idempotent: replaying an event converges to the
  * same rows. app_ingest can read identity columns only, so updates set bound values and never read
  * metrics back.
  *
@@ -30,7 +30,7 @@ import { propagateTurnOwner, replaceUsage } from './usage-rows';
  * app_ingest cannot read patch values or delete) moves the patch onto it. Turn and patch paths take
  * a transaction-scoped advisory lock on the turn key, so a patch and its turn in concurrent batches
  * cannot both miss each other. An outcome patch also leaves a marker row in ingest_events
- * (`outcome-patch:<turn key>`), so a re-sent turn never overwrites a patched outcome with its
+ * (`outcome-patch:<sender user id>:<turn key>`), so a re-sent turn never overwrites a patched outcome with its
  * provisional one. Summaries are only ever written by patches.
  *
  * Session titles (ADR-0026) follow the same design: a session_title for a session that has not arrived is parked in
@@ -42,8 +42,13 @@ import { propagateTurnOwner, replaceUsage } from './usage-rows';
  *
  * Ownership (SEC-3): an existing turn, run or session is overwritten (or patched) only by its owner or
  * while it has none (see ownerMayWrite); anything else throws OwnerConflictError and the event is
- * rejected. A non-provisional outcome patch also leaves `outcome-final:<turn key>`, after which a
- * provisional patch is ignored (DP-09). Runs take the turn lock too, so a run racing its turn is
+ * rejected. Since 0018 the ingest role cannot even see another user's rows (RLS USING user_id = app_user() OR user_id
+ * IS NULL): an upsert that collides with one updates nothing and is rejected, while a patch, title or run aimed at
+ * another user's turn or session finds nothing and is parked (or stored unlinked) under its sender, where it is never
+ * applied to the other user's row (propagateTurnOwner and the pending-patch functions only touch own or ownerless
+ * rows). A non-provisional outcome patch also leaves `outcome-final:<sender user id>:<turn key>`, after
+ * which a provisional patch of the same user is ignored (DP-09). Markers carry the sender, so a stray patch parked under
+ * another user never freezes the owner's outcome. Runs take the turn lock too, so a run racing its turn is
  * always linked (DP-13). Revision ordering of re-sent turns is NOT enforced: the last arrival wins
  * (needs a revision on the wire and a column app_ingest can read; see the DP-09 note in the report).
  *
@@ -58,18 +63,27 @@ import { propagateTurnOwner, replaceUsage } from './usage-rows';
  * alone. app_ingest may read and write these liveness columns (and read ended_at) only (0017).
  */
 
-const outcomeMarker = (key: string) => `outcome-patch:${key}`;
+/*
+ * Outcome markers are namespaced by the patch's sender (`outcome-patch:<user id>:<turn key>`). A stray patch from another
+ * user (whose turn the sender cannot see, so the patch is parked under the sender and never applied) must not leave a
+ * marker that freezes the owner's outcome. Every reader asks for the markers of the user writing the turn, which is the
+ * turn's owner (an upsert or patch only lands on an own or ownerless row). Markers written before 0018 have no user part
+ * (`outcome-patch:<turn key>`); they came from the single company of the old deployment and are still honoured.
+ */
+const outcomeMarker = (userId: string, key: string) => `outcome-patch:${userId}:${key}`;
 /** Left by a non-provisional outcome patch: a provisional patch arriving later must not replace it (DP-09). */
-const finalOutcomeMarker = (key: string) => `outcome-final:${key}`;
+const finalOutcomeMarker = (userId: string, key: string) => `outcome-final:${userId}:${key}`;
+const legacyOutcomeMarker = (key: string) => `outcome-patch:${key}`;
+const legacyFinalOutcomeMarker = (key: string) => `outcome-final:${key}`;
 
 /** Serialises the turn and the patches of one turn key across concurrent batches (until commit). */
-async function lockTurnKey(tx: Tx, ctx: BatchContext, key: string): Promise<void> {
-  await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`turn:${ctx.companyId}:${key}`}, 0))`);
+async function lockTurnKey(tx: Tx, key: string): Promise<void> {
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`turn:${key}`}, 0))`);
 }
 
 /** Serialises the session upserts and the title patches of one session key across concurrent batches (until commit). */
-async function lockSessionKey(tx: Tx, ctx: BatchContext, key: string): Promise<void> {
-  await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`session:${ctx.companyId}:${key}`}, 0))`);
+async function lockSessionKey(tx: Tx, key: string): Promise<void> {
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`session:${key}`}, 0))`);
 }
 
 /** The session keys an event writes (session_start, turn_started, turn, session_title, session_end); pure. */
@@ -90,8 +104,8 @@ export function batchSessionKeys(events: readonly IngestEvent[]): string[] {
 }
 
 /** Takes the session locks of a batch up front, in sorted order (see the header comment). */
-export async function lockBatchSessions(tx: Tx, ctx: BatchContext, events: readonly IngestEvent[]): Promise<void> {
-  for (const key of batchSessionKeys(events)) await lockSessionKey(tx, ctx, key);
+export async function lockBatchSessions(tx: Tx, events: readonly IngestEvent[]): Promise<void> {
+  for (const key of batchSessionKeys(events)) await lockSessionKey(tx, key);
 }
 
 /**
@@ -108,56 +122,68 @@ const json = (v: unknown) => JSON.stringify(v ?? {});
 const seenAt = (iso: string) => sql`least(${iso}::timestamptz, now())`;
 const bumpSeen = (iso: string) => sql`last_seen_at = greatest(agent_sessions.last_seen_at, ${seenAt(iso)})`;
 
+/**
+ * session_start resolves and pins the session's team (ADR-0030, Appendix D): admin mapping → dot-file team (members
+ * only, else a warning) → primary team → none. Later events of the session reuse the stored team. The first
+ * session_start with a project pins it: a later one (a lost collector state, a resume on a fresh state) keeps the
+ * stored project and team even when the admin mapping or the user's memberships changed meanwhile, so one session's
+ * turns never split across two teams. Without a project the event carries no dot-file team either, so an existing
+ * session keeps its team.
+ */
 export async function applySessionStart(tx: Tx, ctx: BatchContext, e: SessionStartEvent): Promise<void> {
+  const key = sessionKey(e.harness, e.session_id);
   const project = e.project ? await upsertProject(tx, ctx, e.project) : null;
-  const teamId = await teamFor(tx, ctx, project?.id ?? null);
-  await lockSessionKey(tx, ctx, sessionKey(e.harness, e.session_id));
-  const [session] = await rows<{ id: string }>(
+  const teamId = project
+    ? await resolveSessionTeam(tx, ctx, { key, sessionId: e.session_id }, project, e.project?.team)
+    : ctx.primaryTeamId;
+  await lockSessionKey(tx, key);
+  const [session] = await rows<{ id: string; team_id: string | null; project_id: string | null }>(
     tx,
-    sql`insert into agent_sessions (company_id, team_id, user_id, machine_id, project_id, external_id, harness,
+    sql`insert into agent_sessions (team_id, user_id, machine_id, project_id, external_id, harness,
           harness_version, started_at, last_seen_at)
-        values (${ctx.companyId}::uuid, ${teamId}::uuid, ${ctx.userId}::uuid, ${ctx.machineRowId}::uuid,
-          ${project?.id ?? null}::uuid, ${sessionKey(e.harness, e.session_id)}, ${e.harness},
+        values (${teamId}::uuid, ${ctx.userId}::uuid, ${ctx.machineRowId}::uuid,
+          ${project?.id ?? null}::uuid, ${key}, ${e.harness},
           ${e.harness_version ?? null}, ${e.at}::timestamptz, ${seenAt(e.at)})
-        on conflict (company_id, external_id) do update set
-          team_id = ${teamId}::uuid, user_id = coalesce(${ctx.userId}::uuid, agent_sessions.user_id),
-          machine_id = ${ctx.machineRowId}::uuid, started_at = ${e.at}::timestamptz,
-          project_id = coalesce(${project?.id ?? null}::uuid, agent_sessions.project_id)
+        on conflict (external_id) do update set
+          ${project
+            ? sql`team_id = case when agent_sessions.project_id is null then ${teamId}::uuid else agent_sessions.team_id end,
+              project_id = coalesce(agent_sessions.project_id, ${project.id}::uuid),`
+            : sql``}
+          user_id = ${ctx.userId}::uuid, machine_id = ${ctx.machineRowId}::uuid, started_at = ${e.at}::timestamptz
           ${e.harness_version ? sql`, harness_version = ${e.harness_version}` : sql``}
           , ${bumpSeen(e.at)}
         where ${sessionOwnerGuard(ctx)}
-        returning id`,
+        returning id, team_id, project_id`,
   );
   if (!session) throw new OwnerConflictError('session');
   await applyPendingSessionPatch(tx, session.id);
   if (!project) return;
 
-  // Turns that arrived before their session_start had no project: give them one (and its team).
+  // Turns that arrived before their session_start had no project and the primary team: give them the session's
+  // (pinned) project and team.
+  await claimTurns(tx, ctx, sql`session_id = ${session.id}::uuid and project_id is null`);
   const backfilled = await rows<{ id: string; external_id: string; team_id: string | null; user_id: string | null }>(
     tx,
-    sql`update turns set project_id = ${project.id}::uuid ${project.teamId ? sql`, team_id = ${project.teamId}::uuid` : sql``}
-        , updated_at = now()
+    sql`update turns set project_id = ${session.project_id}::uuid, team_id = ${session.team_id}::uuid, updated_at = now()
         where session_id = ${session.id}::uuid and project_id is null
         returning id, external_id, team_id, user_id`,
   );
-  if (project.teamId) {
-    for (const t of backfilled) {
-      await propagateTurnOwner(tx, { id: t.id, key: t.external_id, teamId: t.team_id, userId: t.user_id });
-    }
+  for (const t of backfilled) {
+    await propagateTurnOwner(tx, { id: t.id, key: t.external_id, teamId: t.team_id, userId: t.user_id });
   }
 }
 
 export async function applySessionEnd(tx: Tx, ctx: BatchContext, e: SessionEndEvent): Promise<void> {
-  const teamId = await teamFor(tx, ctx, null);
-  await lockSessionKey(tx, ctx, sessionKey(e.harness, e.session_id));
+  const teamId = ctx.primaryTeamId;
+  await lockSessionKey(tx, sessionKey(e.harness, e.session_id));
   const [done] = await rows<{ id: string }>(
     tx,
-    sql`insert into agent_sessions (company_id, team_id, user_id, machine_id, external_id, harness,
+    sql`insert into agent_sessions (team_id, user_id, machine_id, external_id, harness,
           started_at, ended_at, end_reason, last_seen_at)
-        values (${ctx.companyId}::uuid, ${teamId}::uuid, ${ctx.userId}::uuid, ${ctx.machineRowId}::uuid,
+        values (${teamId}::uuid, ${ctx.userId}::uuid, ${ctx.machineRowId}::uuid,
           ${sessionKey(e.harness, e.session_id)}, ${e.harness}, ${e.at}::timestamptz, ${e.at}::timestamptz, ${e.reason},
           ${seenAt(e.at)})
-        on conflict (company_id, external_id) do update set
+        on conflict (external_id) do update set user_id = ${ctx.userId}::uuid,
           ended_at = case when agent_sessions.current_turn_started_at is null
               or agent_sessions.current_turn_started_at <= ${e.at}::timestamptz
             then ${e.at}::timestamptz else agent_sessions.ended_at end,
@@ -182,16 +208,16 @@ export async function applySessionEnd(tx: Tx, ctx: BatchContext, e: SessionEndEv
  */
 export async function applyTurnStarted(tx: Tx, ctx: BatchContext, e: TurnStartedEvent): Promise<void> {
   const key = sessionKey(e.harness, e.session_id);
-  const teamId = await teamFor(tx, ctx, null);
-  await lockSessionKey(tx, ctx, key);
+  const teamId = ctx.primaryTeamId;
+  await lockSessionKey(tx, key);
   const started = sql`${e.started_at}::timestamptz`;
   const [row] = await rows<{ id: string }>(
     tx,
-    sql`insert into agent_sessions (company_id, team_id, user_id, machine_id, external_id, harness, started_at,
+    sql`insert into agent_sessions (team_id, user_id, machine_id, external_id, harness, started_at,
           current_turn_started_at, last_seen_at)
-        values (${ctx.companyId}::uuid, ${teamId}::uuid, ${ctx.userId}::uuid, ${ctx.machineRowId}::uuid, ${key},
+        values (${teamId}::uuid, ${ctx.userId}::uuid, ${ctx.machineRowId}::uuid, ${key},
           ${e.harness}, ${started}, ${started}, ${seenAt(e.started_at)})
-        on conflict (company_id, external_id) do update set
+        on conflict (external_id) do update set user_id = ${ctx.userId}::uuid,
           current_turn_started_at = greatest(agent_sessions.current_turn_started_at, ${started}),
           ${bumpSeen(e.started_at)}
         where ${sessionOwnerGuard(ctx)}
@@ -210,33 +236,49 @@ const sessionOwnerGuard = (ctx: BatchContext) =>
   sql`(agent_sessions.user_id is null or agent_sessions.user_id = ${ctx.userId}::uuid)`;
 
 /**
- * The session a turn belongs to; created on the fly when the turn arrives before session_start. Also keeps the live
+ * Makes ownerless (pre-ADR-0029) turns matching `where` the sender's, verified. Every write of the ingest role must
+ * leave the row owned by the token's user (WITH CHECK user_id = app_user(), 0018) and RLS shows it only own and ownerless
+ * rows, so a turn is claimed before it is updated. Own turns are left alone (app_ingest cannot read `attribution`, so
+ * one statement could not keep an old `matched` value).
+ */
+async function claimTurns(tx: Tx, ctx: BatchContext, where: ReturnType<typeof sql>): Promise<void> {
+  await tx.execute(sql`update turns set user_id = ${ctx.userId}::uuid, attribution = 'verified'
+    where user_id is null and ${where}`);
+}
+
+/**
+ * The session a turn belongs to, with its pinned team; created on the fly (primary team) when the turn arrives before
+ * session_start, which then re-points the turn to the resolved team. Also keeps the live
  * status (ADR-0027): bumps last_seen_at to the turn's end and clears current_turn_started_at when the turn ended at or
  * after it (a later prompt's start stays).
  */
-async function sessionForTurn(tx: Tx, ctx: BatchContext, e: TurnEvent): Promise<{ id: string; projectId: string | null }> {
+async function sessionForTurn(
+  tx: Tx,
+  ctx: BatchContext,
+  e: TurnEvent,
+): Promise<{ id: string; projectId: string | null; teamId: string | null }> {
   const key = sessionKey(e.harness, e.session_id);
-  const teamId = await teamFor(tx, ctx, null);
-  await lockSessionKey(tx, ctx, key);
-  const [row] = await rows<{ id: string; project_id: string | null }>(
+  await lockSessionKey(tx, key);
+  const [row] = await rows<{ id: string; project_id: string | null; team_id: string | null }>(
     tx,
-    sql`insert into agent_sessions (company_id, team_id, user_id, machine_id, external_id, harness, started_at,
+    sql`insert into agent_sessions (team_id, user_id, machine_id, external_id, harness, started_at,
           last_seen_at)
-        values (${ctx.companyId}::uuid, ${teamId}::uuid, ${ctx.userId}::uuid, ${ctx.machineRowId}::uuid, ${key},
+        values (${ctx.primaryTeamId}::uuid, ${ctx.userId}::uuid, ${ctx.machineRowId}::uuid, ${key},
           ${e.harness}, ${e.started_at}::timestamptz, ${seenAt(e.ended_at)})
-        on conflict (company_id, external_id) do update set ${bumpSeen(e.ended_at)},
+        on conflict (external_id) do update set user_id = ${ctx.userId}::uuid, ${bumpSeen(e.ended_at)},
           current_turn_started_at = case when agent_sessions.current_turn_started_at <= ${e.ended_at}::timestamptz
             then null else agent_sessions.current_turn_started_at end
         where ${sessionOwnerGuard(ctx)}
-        returning id, project_id`,
+        returning id, project_id, team_id`,
   );
   if (!row) throw new OwnerConflictError('session');
   await applyPendingSessionPatch(tx, row.id);
-  return { id: row.id, projectId: row.project_id };
+  return { id: row.id, projectId: row.project_id, teamId: row.team_id };
 }
 
-async function hasMarker(tx: Tx, markerId: string): Promise<boolean> {
-  const found = await rows(tx, sql`select 1 from ingest_events where event_id = ${markerId}`);
+async function hasMarker(tx: Tx, ...markerIds: string[]): Promise<boolean> {
+  const ids = sql.join(markerIds.map((id) => sql`${id}`), sql`, `);
+  const found = await rows(tx, sql`select 1 from ingest_events where event_id in (${ids}) limit 1`);
   return found.length > 0;
 }
 
@@ -247,19 +289,12 @@ function outcomeSet(o: Outcome) {
 
 export async function applyTurn(tx: Tx, ctx: BatchContext, e: TurnEvent, eventId: string): Promise<void> {
   const key = turnKey(e.harness, e.turn_id);
-  await lockTurnKey(tx, ctx, key);
+  await lockTurnKey(tx, key);
   const session = await sessionForTurn(tx, ctx, e);
-  const teamId = await teamFor(tx, ctx, session.projectId);
+  const teamId = session.teamId;
   const usage = mergeUsage(e.usage);
   const t = sumUsage(usage);
-  const keepOutcome = await hasMarker(tx, outcomeMarker(key));
-  // The turn must not take over runs another user already filed under this key (propagateTurnOwner re-owns them).
-  const foreignRun = await rows(
-    tx,
-    sql`select 1 from runs where turn_external_id = ${key} and user_id is not null
-        and user_id is distinct from ${ctx.userId}::uuid limit 1`,
-  );
-  if (foreignRun.length > 0) throw new OwnerConflictError('turn');
+  const keepOutcome = await hasMarker(tx, outcomeMarker(ctx.userId, key), legacyOutcomeMarker(key));
 
   const cols = sql`team_id = ${teamId}::uuid, user_id = ${ctx.userId}::uuid, attribution = ${ctx.attribution}::attribution,
     session_id = ${session.id}::uuid, project_id = ${session.projectId}::uuid, harness = ${e.harness},
@@ -274,11 +309,11 @@ export async function applyTurn(tx: Tx, ctx: BatchContext, e: TurnEvent, eventId
 
   const [turn] = await rows<{ id: string }>(
     tx,
-    sql`insert into turns (company_id, team_id, user_id, attribution, session_id, project_id, external_id, harness,
+    sql`insert into turns (team_id, user_id, attribution, session_id, project_id, external_id, harness,
           model, effort, started_at, ended_at, duration_ms, input_tokens, output_tokens, cache_read_tokens,
           cache_write_tokens, reasoning_tokens, requests, phases_ms, tools, skills, mcp, mcp_stats, outcome, outcome_signals,
           outcome_provisional, source_event_id, files_touched, lines_added, lines_removed, phase_rules_version)
-        values (${ctx.companyId}::uuid, ${teamId}::uuid, ${ctx.userId}::uuid, ${ctx.attribution}::attribution,
+        values (${teamId}::uuid, ${ctx.userId}::uuid, ${ctx.attribution}::attribution,
           ${session.id}::uuid, ${session.projectId}::uuid, ${key}, ${e.harness}, ${e.model}, ${e.effort},
           ${e.started_at}::timestamptz, ${e.ended_at}::timestamptz, ${durationMs(e.started_at, e.ended_at)},
           ${t.input}, ${t.output}, ${t.cacheRead}, ${t.cacheWrite}, ${t.reasoning}, ${t.requests},
@@ -286,7 +321,7 @@ export async function applyTurn(tx: Tx, ctx: BatchContext, e: TurnEvent, eventId
           ${e.outcome.status}::outcome,
           ${json(e.outcome.signals)}::jsonb, ${e.outcome.provisional}, ${eventId}, ${e.files_touched},
           ${e.lines_added}, ${e.lines_removed}, ${e.phase_rules_version})
-        on conflict (company_id, external_id) do update set ${cols}
+        on conflict (external_id) do update set ${cols}
           ${keepOutcome ? sql`` : sql`, ${outcomeSet(e.outcome)}`}
         where (turns.user_id is null or turns.user_id = ${ctx.userId}::uuid)
         returning id`,
@@ -296,7 +331,7 @@ export async function applyTurn(tx: Tx, ctx: BatchContext, e: TurnEvent, eventId
   const owner = { id: turn.id, key, teamId, userId: ctx.userId };
   await replaceUsage(
     tx,
-    { companyId: ctx.companyId, turnId: owner.id, runId: null, teamId, userId: ctx.userId, startedAt: e.started_at },
+    { turnId: owner.id, runId: null, teamId, userId: ctx.userId, startedAt: e.started_at },
     usage,
   );
   await propagateTurnOwner(tx, owner);
@@ -307,7 +342,7 @@ export async function applyRun(tx: Tx, ctx: BatchContext, e: RunEvent, eventId: 
   const key = turnKey(e.harness, e.turn_id);
   // Same lock as the turn: otherwise a turn batch committing between our read of the turn and our insert
   // would not see this run (propagateTurnOwner) and the run would stay unlinked (DP-13).
-  await lockTurnKey(tx, ctx, key);
+  await lockTurnKey(tx, key);
   const [turn] = await rows<{ id: string; team_id: string | null; user_id: string | null }>(
     tx,
     sql`select id, team_id, user_id from turns where external_id = ${key}`,
@@ -320,8 +355,9 @@ export async function applyRun(tx: Tx, ctx: BatchContext, e: RunEvent, eventId: 
       )
     : [];
   // A run before its turn takes the batch's owner; linking the turn re-points it (propagateTurnOwner).
-  const teamId = turn ? turn.team_id : await teamFor(tx, ctx, null);
-  const userId = turn ? turn.user_id : ctx.userId;
+  const teamId = turn ? turn.team_id : ctx.primaryTeamId;
+  // An ownerless (pre-ADR-0029) turn is claimed by its first token user, like every ownerless row.
+  const userId = turn?.user_id ?? ctx.userId;
   const usage = mergeUsage(e.usage);
   const t = sumUsage(usage);
   const model = e.model ?? usage[0]?.model ?? null;
@@ -344,16 +380,16 @@ export async function applyRun(tx: Tx, ctx: BatchContext, e: RunEvent, eventId: 
 
   const [run] = await rows<{ id: string }>(
     tx,
-    sql`insert into runs (company_id, team_id, user_id, turn_id, turn_external_id, parent_run_id, parent_external_id,
+    sql`insert into runs (team_id, user_id, turn_id, turn_external_id, parent_run_id, parent_external_id,
           external_id, agent_type, agent_group, orchestration_id, stage_index, flow_key, depth, model, effort, started_at, ended_at, duration_ms, input_tokens, output_tokens,
           cache_read_tokens, cache_write_tokens, reasoning_tokens, requests, phases_ms, tools, skills, mcp, mcp_stats, outcome,
           outcome_signals, outcome_provisional, source_event_id)
-        values (${ctx.companyId}::uuid, ${teamId}::uuid, ${userId}::uuid, ${turnId}::uuid, ${key}, ${parentId}::uuid,
+        values (${teamId}::uuid, ${userId}::uuid, ${turnId}::uuid, ${key}, ${parentId}::uuid,
           ${e.parent_run_id}, ${e.run_id}, ${e.agent_type}, ${agentGroup}, ${orchestrationId}, ${stageIndex}, ${flowKey}, ${e.depth}, ${model}, ${effort},
           ${e.started_at}::timestamptz, ${e.ended_at}::timestamptz, ${dur}, ${t.input}, ${t.output}, ${t.cacheRead},
           ${t.cacheWrite}, ${t.reasoning}, ${t.requests}, ${phases}::jsonb, ${tools}::jsonb, ${skills}::jsonb,
           ${mcp}::jsonb, ${mcpStats}::jsonb, ${e.outcome.status}::outcome, ${signals}::jsonb, ${e.outcome.provisional}, ${eventId})
-        on conflict on constraint runs_company_turn_external_uq do update set
+        on conflict on constraint runs_turn_external_uq do update set
           team_id = ${teamId}::uuid, user_id = ${userId}::uuid, turn_id = coalesce(${turnId}::uuid, runs.turn_id),
           parent_run_id = coalesce(${parentId}::uuid, runs.parent_run_id), parent_external_id = ${e.parent_run_id},
           agent_type = ${e.agent_type}, agent_group = ${agentGroup}, orchestration_id = ${orchestrationId},
@@ -371,12 +407,12 @@ export async function applyRun(tx: Tx, ctx: BatchContext, e: RunEvent, eventId: 
   if (!run) throw new OwnerConflictError('run');
 
   // Children that arrived before this run.
-  await tx.execute(sql`update runs set parent_run_id = ${run.id}::uuid
+  await tx.execute(sql`update runs set parent_run_id = ${run.id}::uuid, user_id = coalesce(runs.user_id, ${ctx.userId}::uuid)
     where turn_external_id = ${key} and parent_external_id = ${e.run_id} and parent_run_id is null`);
-  await replaceRunLinks(tx, ctx, { key, turnId, runId: run.id, externalId: e.run_id }, e.links ?? []);
+  await replaceRunLinks(tx, { key, turnId, runId: run.id, externalId: e.run_id }, e.links ?? []);
   await replaceUsage(
     tx,
-    { companyId: ctx.companyId, turnId: null, runId: run.id, teamId, userId, startedAt: e.started_at },
+    { turnId: null, runId: run.id, teamId, userId, startedAt: e.started_at },
     usage,
   );
 }
@@ -389,20 +425,19 @@ export async function applyRun(tx: Tx, ctx: BatchContext, e: RunEvent, eventId: 
  */
 async function replaceRunLinks(
   tx: Tx,
-  ctx: BatchContext,
   run: { key: string; turnId: string | null; runId: string; externalId: string },
   links: readonly RunLink[],
 ): Promise<void> {
   await tx.execute(sql`delete from run_links
-    where company_id = ${ctx.companyId}::uuid and turn_external_id = ${run.key} and to_external_id = ${run.externalId}`);
+    where turn_external_id = ${run.key} and to_external_id = ${run.externalId}`);
   const edges = links.filter((l) => l.from_run_id !== run.externalId);
   if (edges.length > 0) {
     const values = edges.map(
-      (l) => sql`(${ctx.companyId}::uuid, ${run.turnId}::uuid, ${run.key},
+      (l) => sql`(${run.turnId}::uuid, ${run.key},
         (select id from runs where turn_external_id = ${run.key} and external_id = ${l.from_run_id}),
         ${run.runId}::uuid, ${l.from_run_id}, ${run.externalId}, ${l.kind})`,
     );
-    await tx.execute(sql`insert into run_links (company_id, turn_id, turn_external_id, from_run_id, to_run_id,
+    await tx.execute(sql`insert into run_links (turn_id, turn_external_id, from_run_id, to_run_id,
         from_external_id, to_external_id, kind)
       values ${sql.join(values, sql`, `)}
       on conflict on constraint run_links_edge_uq do nothing`);
@@ -424,19 +459,20 @@ async function patchTurn(
   set: ReturnType<typeof sql>,
 ): Promise<string> {
   const key = turnKey(e.harness, e.turn_id);
-  await lockTurnKey(tx, ctx, key);
+  await lockTurnKey(tx, key);
   const [turn] = await rows<{ user_id: string | null }>(tx, sql`select user_id from turns where external_id = ${key}`);
   if (turn) {
     assertOwner('turn', turn.user_id, ctx.userId);
+    await claimTurns(tx, ctx, sql`external_id = ${key}`);
     await tx.execute(sql`update turns set ${set}, updated_at = now() where external_id = ${key}`);
   } else {
     // The parked patch remembers its sender (SEC-3): ingest_apply_pending_patch applies it only to an
     // ownerless turn or one of the same owner, and another user cannot overwrite a parked patch.
     const parked = await rows<{ id: string }>(
       tx,
-      sql`insert into pending_turn_patches (company_id, turn_external_id, user_id, ${cols})
-        values (${ctx.companyId}::uuid, ${key}, ${ctx.userId}::uuid, ${vals})
-        on conflict (company_id, turn_external_id) do update set ${set}, user_id = ${ctx.userId}::uuid, received_at = now()
+      sql`insert into pending_turn_patches (turn_external_id, user_id, ${cols})
+        values (${key}, ${ctx.userId}::uuid, ${vals})
+        on conflict (turn_external_id) do update set ${set}, user_id = ${ctx.userId}::uuid, received_at = now()
         where pending_turn_patches.user_id is null or pending_turn_patches.user_id = ${ctx.userId}::uuid
         returning id`,
     );
@@ -449,8 +485,9 @@ export async function applyTurnOutcome(tx: Tx, ctx: BatchContext, e: TurnOutcome
   const o = e.outcome;
   // A provisional outcome never replaces a final one, whatever order the patches arrive in (DP-09). The
   // check needs the turn lock: a final patch in a concurrent batch must be visible to it.
-  await lockTurnKey(tx, ctx, turnKey(e.harness, e.turn_id));
-  if (o.provisional && (await hasMarker(tx, finalOutcomeMarker(turnKey(e.harness, e.turn_id))))) return;
+  const turn = turnKey(e.harness, e.turn_id);
+  await lockTurnKey(tx, turn);
+  if (o.provisional && (await hasMarker(tx, finalOutcomeMarker(ctx.userId, turn), legacyFinalOutcomeMarker(turn)))) return;
   const key = await patchTurn(
     tx,
     ctx,
@@ -459,11 +496,11 @@ export async function applyTurnOutcome(tx: Tx, ctx: BatchContext, e: TurnOutcome
     sql`${o.status}::outcome, ${json(o.signals)}::jsonb, ${o.provisional}`,
     outcomeSet(o),
   );
-  await tx.execute(sql`insert into ingest_events (company_id, event_id, type)
-    values (${ctx.companyId}::uuid, ${outcomeMarker(key)}, 'marker') on conflict (company_id, event_id) do nothing`);
+  await tx.execute(sql`insert into ingest_events (event_id, type)
+    values (${outcomeMarker(ctx.userId, key)}, 'marker') on conflict (event_id) do nothing`);
   if (!o.provisional) {
-    await tx.execute(sql`insert into ingest_events (company_id, event_id, type)
-      values (${ctx.companyId}::uuid, ${finalOutcomeMarker(key)}, 'marker') on conflict (company_id, event_id) do nothing`);
+    await tx.execute(sql`insert into ingest_events (event_id, type)
+      values (${finalOutcomeMarker(ctx.userId, key)}, 'marker') on conflict (event_id) do nothing`);
   }
 }
 
@@ -478,22 +515,22 @@ export async function applyTurnSummary(tx: Tx, ctx: BatchContext, e: TurnSummary
  */
 export async function applySessionTitle(tx: Tx, ctx: BatchContext, e: SessionTitleEvent): Promise<void> {
   const key = sessionKey(e.harness, e.session_id);
-  await lockSessionKey(tx, ctx, key);
+  await lockSessionKey(tx, key);
   const [session] = await rows<{ user_id: string | null }>(
     tx,
     sql`select user_id from agent_sessions where external_id = ${key}`,
   );
   if (session) {
     assertOwner('session', session.user_id, ctx.userId);
-    await tx.execute(sql`update agent_sessions set title = ${e.title}, title_source = ${e.source}
+    await tx.execute(sql`update agent_sessions set title = ${e.title}, title_source = ${e.source}, user_id = ${ctx.userId}::uuid
       where external_id = ${key}`);
     return;
   }
   const parked = await rows<{ id: string }>(
     tx,
-    sql`insert into pending_session_patches (company_id, session_external_id, user_id, title, title_source)
-      values (${ctx.companyId}::uuid, ${key}, ${ctx.userId}::uuid, ${e.title}, ${e.source})
-      on conflict (company_id, session_external_id) do update set title = ${e.title}, title_source = ${e.source},
+    sql`insert into pending_session_patches (session_external_id, user_id, title, title_source)
+      values (${key}, ${ctx.userId}::uuid, ${e.title}, ${e.source})
+      on conflict (session_external_id) do update set title = ${e.title}, title_source = ${e.source},
         user_id = ${ctx.userId}::uuid, received_at = now()
       where pending_session_patches.user_id is null or pending_session_patches.user_id = ${ctx.userId}::uuid
       returning id`,

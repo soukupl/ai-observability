@@ -16,7 +16,7 @@ import {
  * (the wire schema in @ai-obs/protocol accepts any non-negative safe integer and free-form strings).
  *
  * Why here: the DB columns are int4 / bigint and the dashboard and rollups sum bigint columns, so an
- * unbounded count lets one token break every aggregate of its company ("bigint out of range") or make
+ * unbounded count lets one token break every aggregate of the deployment ("bigint out of range") or make
  * valid-looking events fail at insert. And ADR-0008 (metadata only) is enforced by the official
  * collector alone; an older or third-party collector must not be able to store paths or internal
  * names in tool keys, agent types or outcome signals.
@@ -78,7 +78,7 @@ const HASHED_NAME_RE = /^sha256:[0-9a-f]{64}$/;
 const sha256Name = (input: string) => `sha256:${createHash('sha256').update(input, 'utf8').digest('hex')}`;
 
 /**
- * Skill / MCP names in the company's project-naming mode. The collector hashes them on the machine; in
+ * Skill / MCP names in the deployment's project-naming mode. The collector hashes them on the machine; in
  * hashed mode a plain name (a collector with a stale config, or a third-party one) is hashed here the way
  * the collector does without a salt (`sha256:` + SHA-256 of `skill:<name>`, `mcp:<server>`,
  * `mcp:<server>/<tool>`), so the name is never stored.
@@ -211,7 +211,7 @@ export function normalizeOutcome(o: Outcome): Outcome {
 
 /**
  * Pure. Returns the event to apply (normalised copy) or the reason it is rejected. `naming` is the
- * company's project-naming mode (skill / MCP names are hashed in `hashed` mode).
+ * deployment's project-naming mode (skill / MCP names are hashed in `hashed` mode).
  */
 export function enforceLimits(event: IngestEvent, naming: ProjectNamingMode = 'plain'): LimitResult {
   switch (event.type) {
@@ -270,7 +270,7 @@ export const MAX_FUTURE_MS = 86_400_000;
 const startOfUtcDayMs = (ms: number) => ms - (((ms % 86_400_000) + 86_400_000) % 86_400_000);
 
 /**
- * The event time window (DP-05, DP-08): a turn, run or turn_started that started before the company's retention cutoff
+ * The event time window (DP-05, DP-08): a turn, run or turn_started that started before the deployment's retention cutoff
  * (00:00 UTC, `retentionDays` ago: the same cutoff the worker's retention pass deletes by) would be
  * stored just to be deleted again and would make already-folded rollup days wrong; one that starts or
  * ends more than a day in the future would be counted in month-to-date budgets. Rejected with a reason.

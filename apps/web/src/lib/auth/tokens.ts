@@ -65,7 +65,7 @@ export function safeNext(next: unknown): string | null {
   try {
     const url = new URL(next, base);
     if (url.origin !== base) return null;
-    if (/^\/(api\/auth|login|signup|logout)(\/|$)/.test(url.pathname)) return null;
+    if (/^\/(api\/auth|login|logout|welcome)(\/|$)/.test(url.pathname)) return null;
     return url.pathname + url.search + url.hash;
   } catch {
     return null;

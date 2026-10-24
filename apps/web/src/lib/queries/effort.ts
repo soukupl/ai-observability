@@ -19,7 +19,7 @@ export interface EffortAdvice {
 /** The SQL body of agg_effort_cells (migration 0006) over a turn scope; used by the direct path. */
 function cellsSql(scope: SQL): SQL {
   return sql`with scope as (
-      select t.id, t.company_id, t.project_id, t.model, t.effort, t.outcome, t.duration_ms,
+      select t.id, t.project_id, t.model, t.effort, t.outcome, t.duration_ms,
         (t.started_at at time zone 'UTC')::date as day
       from (${scope}) t where t.model is not null and t.effort is not null
     ), cost as (
@@ -27,7 +27,7 @@ function cellsSql(scope: SQL): SQL {
         case when bool_or(c.usd is null and u.input_tokens + u.output_tokens + u.cache_read_tokens + u.cache_write_tokens > 0)
              then null else coalesce(sum(c.usd), 0) end as usd
       from scope s
-      join usage u on u.turn_id = s.id and u.company_id = s.company_id
+      join usage u on u.turn_id = s.id
       cross join lateral (select estimate_cost_usd(u.model, s.day, u.input_tokens, u.output_tokens,
         u.cache_read_tokens, u.cache_write_tokens) as usd) c
       group by s.id

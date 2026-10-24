@@ -5,7 +5,6 @@ import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
 import { userMessage } from '../admin/errors';
 import { parse } from '../admin/input';
-import { staleCompany } from '../admin/run';
 import { AdminError, type ActionState } from '../admin/types';
 import { requireUser } from '../auth/session';
 import { FLOW_KEY_RE, getFlowDetail } from '../queries/flows';
@@ -13,9 +12,8 @@ import { withDashboardContext } from '../queries/page';
 import type { QueryCtx } from '../queries/scope';
 
 /**
- * Flag a flow "for later" / remove the flag (ADR-0024). Same shape as the admin actions: the form carries the
- * company it was rendered for (`_companyId`, D10), the operation runs in one RLS transaction as the user, and the
- * result is an ActionState for useActionState. The flow has to be visible to the user (getFlowDetail) before a flag
+ * Flag a flow "for later" / remove the flag (ADR-0024). Same shape as the admin actions: the operation runs in one
+ * RLS transaction as the user, and the result is an ActionState for useActionState. The flow has to be visible to the user (getFlowDetail) before a flag
  * is written, so nobody can bookmark a turn they cannot open; RLS keeps every row private to its user.
  */
 
@@ -40,8 +38,6 @@ const str = (fd: FormData, k: string): string | undefined => {
 
 async function run(fd: FormData, fn: (ctx: QueryCtx) => Promise<string>): Promise<ActionState> {
   const user = await requireUser();
-  const stale = staleCompany(fd, user.companyId);
-  if (stale) return stale;
   try {
     const message = await withDashboardContext(user, fn);
     revalidatePath('/flows', 'layout');
@@ -60,9 +56,9 @@ export async function flagFlowAction(_p: ActionState, fd: FormData): Promise<Act
     if (!flow) throw new AdminError('This flow is not visible to you (or no longer exists).');
     const name = flow.name.length > 200 ? `${flow.name.slice(0, 199)}…` : flow.name;
     await ctx.tx.execute(sql`
-      insert into flow_flags (company_id, user_id, turn_id, flow_key, flow_name, note)
-      values (${ctx.viewer.companyId}::uuid, ${ctx.viewer.id}::uuid, ${input.turnId}::uuid, ${input.key}, ${name}, ${input.note ?? null})
-      on conflict (company_id, user_id, turn_id, flow_key) do update set note = coalesce(excluded.note, flow_flags.note)`);
+      insert into flow_flags (user_id, turn_id, flow_key, flow_name, note)
+      values (${ctx.viewer.id}::uuid, ${input.turnId}::uuid, ${input.key}, ${name}, ${input.note ?? null})
+      on conflict (user_id, turn_id, flow_key) do update set note = coalesce(excluded.note, flow_flags.note)`);
     return 'Flagged for later. Find it at the top of Agent flows.';
   });
 }

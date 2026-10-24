@@ -1,84 +1,72 @@
 import { ADAPTERS } from '../adapters/index.js';
 import { hookCommandFactory, isVersionManagedNode } from '../adapters/hook-command.js';
-import { loadConfig } from '../config.js';
+import { loadConfig, normalizeEndpoint } from '../config.js';
 import { errorMessage } from '../fsutil.js';
-import { gitEmail, gitTopLevel } from '../git.js';
+import { gitTopLevel } from '../git.js';
+import { createLogger } from '../log.js';
+import { migrateHome } from '../migrate.js';
 import { installRuntime, isDefaultHome, type RuntimeInstall } from '../runtime.js';
-import { movePreUpgrade, nowOf, parseOptions, upgradeBanner, UsageError, withWriteLock, type CliDeps, type Io } from './common.js';
-import { afterRegistration, registerToken, type RegisterInput } from './register.js';
+import { nowOf, parseOptions, UsageError, withWriteLock, type CliDeps, type Io } from './common.js';
+import { checkTokenShape, registerServer, serverOf } from './login.js';
 
 export const INIT_OPTIONS = {
   token: { type: 'string' },
   endpoint: { type: 'string' },
-  name: { type: 'string' },
+  label: { type: 'string' },
   project: { type: 'boolean', default: false },
   'project-dir': { type: 'string' },
   harness: { type: 'string' },
-  'git-email': { type: 'string' },
 } as const;
 
-/** Where the endpoint of `init` / `token add` comes from (C10): --endpoint, AI_OBS_ENDPOINT, then the last registration. */
-export function endpointOf(flag: string | undefined, deps: CliDeps, configured: string | undefined): Pick<RegisterInput, 'endpoint' | 'endpointSource'> {
-  const env = deps.env ?? process.env;
-  if (flag) return { endpoint: flag, endpointSource: 'flag' };
-  if (env.AI_OBS_ENDPOINT) return { endpoint: env.AI_OBS_ENDPOINT, endpointSource: 'env' };
-  if (configured) return { endpoint: configured, endpointSource: 'config' };
-  throw new UsageError('--endpoint is required (your ai-obs server URL), or set AI_OBS_ENDPOINT');
-}
-
 /**
- * `ai-obs init [--token <t>] [--endpoint <url>] [--name n] [--project] [--project-dir d] [--harness a,b] [--git-email e]`:
- * registers a token (design §2.2) and installs the hooks of every detected harness. Without --token it
- * keeps the registered tokens and only refreshes the runtime and the hooks.
+ * `ai-obs init [--token <t> --endpoint <url> [--label <name>]] [--project] [--project-dir d] [--harness a,b]`:
+ * machine setup: copies the hook runtime and installs the hooks of every detected harness. With --token it is
+ * first the non-interactive form of `ai-obs login --server <url> --token <t>`.
  */
 export async function initCommand(args: readonly string[], io: Io, deps: CliDeps): Promise<number> {
   const { values } = parseOptions(args, INIT_OPTIONS);
-  const existing = loadConfig(deps.paths);
   const only = values.harness?.split(',').map((s) => s.trim()).filter(Boolean);
   const adapters = (deps.adapters ?? ADAPTERS).filter((a) => !only || only.includes(a.name));
   if (only && !adapters.length) throw new UsageError(`unknown harness: ${values.harness}`);
-  if (!values.token && !existing?.tokens.length) {
-    const banner = upgradeBanner(existing);
-    if (banner) io.err(banner);
-    throw new UsageError('--token is required (create one in the dashboard: My tokens or Settings → Tokens)');
+  if (!values.token && (values.endpoint !== undefined || values.label !== undefined)) {
+    throw new UsageError('--endpoint and --label need --token (or run `ai-obs login --server <url>` for the browser login)');
   }
 
   const cwd = deps.cwd ?? process.cwd();
   const scope = values.project ? 'project' : 'user';
   const projectDir = values['project-dir'] ?? (values.project ? ((await gitTopLevel(cwd)) ?? cwd) : undefined);
 
-  // 1. Token (or the registered ones) and a fresh runtime for the hooks (C25, under the lock).
-  let runtime: RuntimeInstall | null = null;
-  const refreshRuntime = () => {
-    runtime = (deps.installRuntime ?? installRuntime)(deps.paths);
-  };
-  let outcome: Awaited<ReturnType<typeof registerToken>> | null = null;
+  // 1. Token (non-interactive login), then a fresh runtime for the hooks (C25, under the lock).
   if (values.token) {
-    const ep = endpointOf(values.endpoint, deps, existing?.endpoint);
-    const email = values['git-email'] ?? (await gitEmail(cwd));
-    outcome = await registerToken(
-      { token: values.token, ...ep, ...(values.name !== undefined ? { name: values.name } : {}), gitEmail: email },
-      io,
-      { ...deps, refreshRuntime },
-    );
-    if (!outcome.ok) return outcome.code;
-    io.out(`✓ config written to ${deps.paths.config} (machine ${outcome.config.machine_id})`);
-  } else {
-    if (values.name !== undefined || values.endpoint !== undefined) throw new UsageError('--name and --endpoint need --token');
-    io.out(`using the registered tokens: ${existing!.tokens.map((t) => t.name).join(', ')}`);
-    const locked = await withWriteLock(deps, io, () => {
-      const moved = movePreUpgrade(deps.paths, new Date(nowOf(deps)));
-      refreshRuntime();
-      return moved;
-    });
-    if (!locked) return 1;
-    if (locked.value) {
-      io.out(`! ${locked.value.batches} pre-upgrade batches (${locked.value.events} events) moved to ${deps.paths.deadPreUpgrade}: they are not sent, because every token from before the upgrade was reset`);
+    const { endpoint: raw } = serverOf(values.endpoint, deps);
+    let endpoint: string;
+    try {
+      endpoint = normalizeEndpoint(raw);
+    } catch (err) {
+      io.err(`ai-obs: invalid endpoint: ${errorMessage(err)}`);
+      return 2;
     }
+    if (!checkTokenShape(values.token, io)) return 2;
+    const code = await registerServer({ endpoint, token: values.token, source: 'manual', ...(values.label ? { label: values.label } : {}) }, io, deps, { fromInit: true });
+    if (code !== 0) return code;
   }
+  let runtime: RuntimeInstall | null = null;
+  const notes: string[] = [];
+  const locked = await withWriteLock(deps, io, () => {
+    const refresh = deps.installRuntime ?? installRuntime;
+    runtime = refresh(deps.paths); // first: the hooks' runtime must read the config the migration writes
+    notes.push(...migrateHome(deps.paths, { log: createLogger(deps.paths, 'cli'), now: new Date(nowOf(deps)), refreshRuntime: refresh }));
+  });
+  if (!locked) return 1;
+  for (const n of notes) io.err(`ai-obs: ${n}`);
   const rt = runtime as RuntimeInstall | null;
   if (!rt) throw new Error('the hook runtime was not installed');
   const home = isDefaultHome(deps.paths) ? undefined : deps.paths.root;
+  const config = loadConfig(deps.paths);
+  if (!values.token) {
+    if (config?.servers.length) io.out(`using the registered servers: ${config.servers.map((s) => s.endpoint).join(', ')}`);
+    else io.out('! not logged in to any ai-obs server yet: nothing is recorded until you run `ai-obs login --server <url>`');
+  }
 
   // 2. Harness hooks (re-installed every time, so changes such as the SessionStart timeout reach old installs).
   let installed = 0;
@@ -114,10 +102,8 @@ export async function initCommand(args: readonly string[], io: Io, deps: CliDeps
       io.out(`! project hooks contain absolute paths of this machine (${rt.node}, ${rt.entry}). They do not work for teammates or on CI: keep the file out of git (e.g. in .git/info/exclude) or let each teammate run \`ai-obs init --project\`.`);
     }
   }
-
-  // 3. Company settings per token and the "several tokens" hints.
-  if (outcome?.ok) await afterRegistration(outcome, io, deps);
   for (const step of nextSteps) io.out(`→ ${step}`);
-  io.out(installed ? 'ai-obs is set up. Usage appears in the dashboard within minutes; check with `ai-obs doctor`.' : 'ai-obs config saved.');
+  if (installed && config?.servers.length) io.out('ai-obs is set up. Usage appears in the dashboard within minutes; check with `ai-obs doctor`.');
+  else if (installed) io.out('hooks installed. Run `ai-obs login --server <url>` to start recording.');
   return 0;
 }

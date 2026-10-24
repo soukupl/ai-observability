@@ -11,12 +11,15 @@ import {
   MAX_SUMMARY_LENGTH,
   PHASES,
   SCHEMA_VERSION,
+  REJECTED_TOKEN_PREFIXES,
+  TEAM_SLUG_RE,
   TOKEN_PREFIXES,
 } from '@ai-obs/protocol';
 import { describe, expect, it } from 'vitest';
 import { provisionalOutcome } from '../src/analysis/outcome.js';
 import { emptyPhaseTotals } from '../src/analysis/phases.js';
 import { sumUsage } from '../src/analysis/tokens.js';
+import { parseCollectorConfigValue } from '../src/cc-cache.js';
 import { buildConfig } from '../src/config.js';
 import { countTools, runEvent, sessionEndEvent, sessionStartEvent, sessionTitleEvent, turnEvent, turnOutcomeEvent, turnStartedEvent, turnSummaryEvent } from '../src/events.js';
 import * as local from '../src/protocol-types.js';
@@ -56,7 +59,7 @@ function allEvents(): local.IngestEvent[] {
 
 describe('collector events conform to @ai-obs/protocol', () => {
   it('every builder output passes validateBatch', () => {
-    const config = buildConfig({ endpoint: 'https://obs.example.com', token: 'aiobs_u_x', gitEmail: 'dev@acme.com' });
+    const config = buildConfig({ endpoint: 'https://obs.example.com', token: 'aiobs_u_x' });
     const batch = buildEnvelope(config, allEvents());
     const r = validateBatch(JSON.parse(JSON.stringify(batch)));
     expect(r.ok).toBe(true);
@@ -76,32 +79,47 @@ describe('collector events conform to @ai-obs/protocol', () => {
 
   it('local types are assignable to the protocol input types (compile-time)', () => {
     const events: IngestEventInput[] = allEvents();
-    const batch: IngestBatchInput = buildEnvelope(buildConfig({ endpoint: 'https://x.io', token: 'aiobs_c_x' }), allEvents());
+    const batch: IngestBatchInput = buildEnvelope(buildConfig({ endpoint: 'https://x.io', token: 'aiobs_u_x' }), allEvents());
     expect(events.length + batch.events.length).toBe(20);
   });
 
-  it('token prefixes match the server: user and company tokens are accepted, the dropped team prefix is not (ADR-0022)', () => {
-    expect([local.USER_TOKEN_PREFIX, local.COMPANY_TOKEN_PREFIX]).toEqual([TOKEN_PREFIXES.user, TOKEN_PREFIXES.company]);
-    expect(Object.keys(TOKEN_PREFIXES).sort()).toEqual(['company', 'user']);
-    expect(buildConfig({ endpoint: 'https://x.io', token: 'aiobs_c_abc' }).tokens[0]?.token).toBe('aiobs_c_abc');
-    expect(() => buildConfig({ endpoint: 'https://x.io', token: `${local.LEGACY_TEAM_TOKEN_PREFIX}abc` })).toThrow(/aiobs_u_ or aiobs_c_/);
+  it('token prefix matches the server: only user tokens; company and team tokens are retired', () => {
+    expect(local.USER_TOKEN_PREFIX).toBe(TOKEN_PREFIXES.user);
+    expect(Object.keys(TOKEN_PREFIXES)).toEqual(['user']);
+    expect([...local.RETIRED_TOKEN_PREFIXES].sort()).toEqual([...REJECTED_TOKEN_PREFIXES].sort());
+    expect(() => buildConfig({ endpoint: 'https://x.io', token: 'aiobs_c_abc' })).toThrow(/aiobs_u_/);
+    expect(String(local.TEAM_SLUG_RE)).toBe(String(TEAM_SLUG_RE));
   });
 
-  it('collector-config: the local response type (company, user) matches the protocol schema both ways', () => {
-    const user: local.CollectorConfigResponse = {
+  it('collector-config (appendix A): a protocol response parses to the same local value; a local full value is a protocol value', () => {
+    const full: ProtocolCollectorConfigResponse = {
       project_naming: 'hashed',
-      min_collector_version: '0.2.0',
-      project_salt: 'company-salt-0123456789',
-      company: { name: 'Acme Corp', slug: 'acme' },
-      user: { email: 'alice@acme.example' },
+      min_collector_version: '0.5.0',
+      project_salt: 'deployment-salt-0123456789',
+      deployment: { name: 'SPECTADO', slug: 'spectado' },
+      user: { email: 'dev@example.com', name: 'Dev', kind: 'person' },
+      teams: [{ slug: 'spectado', name: 'SPECTADO' }],
+      primary_team: 'spectado',
+      token: { expires_at: '2027-01-22T10:00:00Z', label: 'mac-ladislav', source: 'device' },
     };
-    const company: local.CollectorConfigResponse = { project_naming: 'plain', min_collector_version: '0.2.0', company: { name: 'Globex', slug: 'globex' }, user: null };
-    const older: local.CollectorConfigResponse = { project_naming: 'plain', min_collector_version: '0.1.0' };
-    for (const v of [user, company, older]) {
-      const asProtocol: ProtocolCollectorConfigResponse = v; // compile-time: local → protocol
-      const back: local.CollectorConfigResponse = schemas.collectorConfigResponse.parse(asProtocol); // protocol → local
+    const service: ProtocolCollectorConfigResponse = { ...full, user: { email: null, name: 'CI', kind: 'service' }, primary_team: null, token: { expires_at: null, label: null, source: 'manual' } };
+    for (const v of [full, service]) {
+      expect(schemas.collectorConfigResponse.parse(v)).toEqual(v);
+      const asLocal: local.CollectorConfigResponse = v; // compile-time: protocol → local
+      expect(parseCollectorConfigValue(JSON.parse(JSON.stringify(asLocal)))).toEqual(v);
+      const back: ProtocolCollectorConfigResponse = schemas.collectorConfigResponse.parse(parseCollectorConfigValue(v));
       expect(back).toEqual(v);
     }
+  });
+
+  it('wire additions (appendix C): session_start.project.team and ingest warnings validate', () => {
+    const start = sessionStartEvent({ harness, sessionId: 's9', at: '2026-10-05T10:00:00Z', project: { key: 'github.com/acme/billing', name: 'billing' } });
+    const withTeam = { ...start, project: { ...start.project!, team: 'spectado' } };
+    const r = validateBatch(JSON.parse(JSON.stringify(buildEnvelope(buildConfig({ endpoint: 'https://x.io', token: 'aiobs_u_x' }), [withTeam]))));
+    expect(r.ok && r.rejected).toEqual([]);
+    const warning: local.IngestWarning = { code: 'team_not_member', team: 'mobile', session_id: 's9' };
+    const resp: local.IngestResponse = { accepted: 1, duplicates: 0, rejected: [], warnings: [warning] };
+    expect(schemas.ingestResponse.parse(resp)).toEqual(resp);
   });
 
   it('constants match', () => {

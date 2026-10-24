@@ -1,6 +1,6 @@
 # ADR-0007: Per-user and team ingest tokens; turn-to-team attribution
 
-- **Status:** Partly superseded by ADR-0022 (2026-10-08)
+- **Status:** Superseded 2026-10-24 by [ADR-0029](0029-per-user-tokens-device-login-expiry.md) (partly superseded by ADR-0022 on 2026-10-08)
 - **Date:** 2026-10-05
 - **Deciders:** Ladislav Soukup (owner); options proposed by Claude
 - **Tags:** security, auth, schema
@@ -58,3 +58,14 @@ primary team.
 - **SEC-10 successor:** a company token matches a git e-mail to any member of the token's company, bound to
   `app_ingest_company()`; a non-member stays `unverified`.
 - Revocation is one-way (a DB trigger). Every token that existed before migration 0014 was revoked: re-run `ai-obs init`.
+
+## Amendment 2026-10-24 — superseded by ADR-0029
+
+- **Decided by:** Ladislav Soukup (owner, grilling Q1-Q9 of 2026-10-24 and "go" on
+  `docs/briefs/single-deployment-per-user-tokens.md`); design by Claude Fable 5.1. The body and earlier amendments are kept as history.
+
+- Every token belongs to one user, a person or an admin-created service user (`aiobs_u_`); company tokens and git-e-mail
+  attribution (`matched` / `unverified`) are gone, new rows are always `verified`. Tokens expire (90 days for device
+  login, chosen lifetime for manual tokens). See [ADR-0029](0029-per-user-tokens-device-login-expiry.md).
+- The team of a turn: admin mapping, else the repository's dot-file team if the user is a member, else the primary team,
+  else none. See [ADR-0030](0030-project-dot-file-and-team-resolution.md).

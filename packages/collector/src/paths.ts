@@ -11,35 +11,37 @@ export function aiObsPaths(home: string = resolveHome()) {
   const state = join(home, 'state');
   return {
     root: home,
-    /** registered tokens, default endpoint, random machine_id, routing epochs (mode 0600) */
+    /** config v3: machine_id and one entry per server with its token (mode 0600) */
     config: join(home, 'config.json'),
-    /** per-repo token choice, keyed by the plain project key (mode 0600; written only by `ai-obs use`) */
-    projects: join(home, 'projects.json'),
+    /** 0.2 – 0.4 per-repository token choice: no longer read; renamed to projects.json.v2 by the migration */
+    legacyProjects: join(home, 'projects.json'),
     /** random local secret for path-based project keys (mode 0600; never sent) */
     projectSecret: join(home, 'project-secret'),
     /** per-session cursors (state/<harness>/<session>.json), delivery + collector-config caches */
     state,
-    /** single collector-config cache of the 0.1.x collector; deleted by the first registration (per-token caches: collectorConfigDir) */
-    collectorConfigCache: join(state, 'collector-config.json'),
-    /** cached GET /api/v1/collector-config, one file per token: <name>.json */
+    /** cached GET /api/v1/collector-config, one file per server: <host>.json (':' → '_') */
     collectorConfigDir: join(state, 'collector-config'),
-    /** cwd → plain project key, written by the worker and `use`, read by the hook */
+    /** cwd → plain project key, written by the worker, read by the hook */
     projectKeyCache: join(state, 'project-keys.json'),
+    /** cwd → dot-file lookup (.ai-obs.json / .ai-obs.local.json), written by the worker, read by the hook */
+    dotFileCache: join(state, 'dot-files.json'),
+    /** latest ingest warning per project key (team_not_member / team_unknown) */
+    warnings: join(state, 'warnings.json'),
     /** SessionStart nudge markers, one file per session id */
     nudged: join(state, 'nudged'),
     /** size-cap drop counters */
     dropped: join(state, 'dropped.json'),
-    /** per-token delivery state: last attempt / success / backoff / blocked */
+    /** per-server delivery state (keyed by host): last attempt / success / backoff / blocked / repositories */
     delivery: join(state, 'delivery.json'),
     /** event queue, capped ~50 MB / 30 days; root *.ndjson = pre-upgrade stream (frozen, never sent) */
     queue: join(home, 'queue'),
-    /** project streams p/o-<id>/ (open) and p/t-<id>/ (token-bound) */
+    /** project streams p/s-<id>/ keyed by (project key, server endpoint, team) */
     queueProjects: join(home, 'queue', 'p'),
-    /** unresolved streams u/o-<id>/, u/t-<id>/ (git timed out at capture) */
+    /** unresolved streams u/s-<id>/ (git timed out at capture) */
     queueUnresolved: join(home, 'queue', 'u'),
     /** batches the server refused as a whole (HTTP 400), kept locally for inspection */
     deadLetter: join(home, 'queue', 'dead'),
-    /** pre-upgrade root segments, moved here by the first registration and never sent (tokens were reset) */
+    /** pre-upgrade root segments moved here by 0.2 – 0.4 (never sent; left as is) */
     deadPreUpgrade: join(home, 'queue', 'dead', 'pre-upgrade'),
     /** hook invocations waiting for the detached worker */
     jobs: join(home, 'jobs'),
@@ -59,10 +61,10 @@ export function aiObsPaths(home: string = resolveHome()) {
 
 export type AiObsPaths = ReturnType<typeof aiObsPaths>;
 
-/** Per-token collector-config cache file. Token names are validated (TOKEN_NAME_RE) before they reach here. */
-export function collectorConfigPath(paths: Pick<AiObsPaths, 'collectorConfigDir'>, name: string): string {
-  if (!/^[a-z0-9-]{1,63}$/.test(name)) throw new Error(`invalid token name: ${JSON.stringify(name)}`);
-  return join(paths.collectorConfigDir, `${name}.json`);
+/** Per-server collector-config cache file: `<host>.json` with ':' → '_' (a host is never a path). */
+export function collectorConfigPath(paths: Pick<AiObsPaths, 'collectorConfigDir'>, host: string): string {
+  if (!/^[a-z0-9.\-\[\]:]{1,255}$/.test(host)) throw new Error(`invalid host: ${JSON.stringify(host)}`);
+  return join(paths.collectorConfigDir, `${host.replace(/[:[\]]/g, '_')}.json`);
 }
 
 /** Nudge marker of one session; null unless the id is a plain token (no path tricks). */

@@ -10,7 +10,7 @@ import { agentGroupOf } from './agent-groups';
 import { buildRunTree, type RunNode, type RunRow } from './runs-tree';
 import { deriveSequenceLinks, flowOrchestrationId, mapRunLink, type RunLink } from './run-links';
 import { canSeeUsers, type QueryCtx } from './scope';
-import { addTokens, AGG_PAGE, costTokens, emptyTokens, num, numOrNull, rows, tokensOf, where, type TokenTotals } from './sqlutil';
+import { addTokens, AGG_PAGE, costTokens, emptyTokens, num, numOrNull, rows, tokensOf, userLabel, where, type TokenTotals } from './sqlutil';
 
 export interface TurnListRow {
   id: string;
@@ -124,7 +124,7 @@ async function directRows(
   const conds = [...base];
   if (outcome) conds.push(sql`t.outcome = ${outcome}::outcome`);
   if (after) conds.push(sql`(t.started_at < ${after.raw}::timestamptz or (t.started_at = ${after.raw}::timestamptz and t.id > ${after.id}::uuid))`);
-  const userCols: SQL = withUsers ? sql`, t.user_id, coalesce(u.name, u.email) as user_name` : sql``;
+  const userCols: SQL = withUsers ? sql`, t.user_id, ${userLabel('u')} as user_name` : sql``;
   const join: SQL = withUsers ? sql`left join users u on u.id = t.user_id` : sql``;
   return rows<Record<string, unknown>>(
     ctx.tx,
@@ -169,7 +169,7 @@ async function directTurnCosts(ctx: QueryCtx, list: Record<string, unknown>[]): 
   const out = await rows<Record<string, unknown>>(
     ctx.tx,
     sql`select u.turn_id, (u.started_at at time zone 'UTC')::date::text as day, u.model, ${USAGE_SUMS}
-        from usage u where u.company_id = ${ctx.viewer.companyId}::uuid and u.turn_id in (${sql.join(ids.map((id) => sql`${id}::uuid`), sql`, `)})
+        from usage u where u.turn_id in (${sql.join(ids.map((id) => sql`${id}::uuid`), sql`, `)})
         group by 1, 2, 3`,
   );
   return foldCosts(ctx, ids, out.map((r) => ({ turnId: String(r.turn_id), day: String(r.day), model: String(r.model), tokens: tokensOf(r) })));
@@ -217,7 +217,7 @@ const turnCosts = (ctx: QueryCtx, list: Record<string, unknown>[]) => (ctx.agg ?
 
 /** Conditions on `turns` aliased `t` for one session (no date range: the session is the scope). */
 export function sessionTurnConds(ctx: QueryCtx, sessionId: string): SQL[] {
-  return [sql`t.company_id = ${ctx.viewer.companyId}::uuid`, sql`t.session_id = ${sessionId}::uuid`];
+  return [sql`t.session_id = ${sessionId}::uuid`];
 }
 
 /** Filterable, paged turn list (newest first). Raw rows for every range. */
@@ -435,16 +435,16 @@ export async function getTurnDetail(ctx: QueryCtx, turnId: string, atMs?: number
   const lk = await lookups(ctx);
   const withUsers = canSeeUsers(ctx.viewer);
 
-  const userCols: SQL = withUsers ? sql`, t.user_id, coalesce(u.name, u.email) as user_name` : sql``;
+  const userCols: SQL = withUsers ? sql`, t.user_id, ${userLabel('u')} as user_name` : sql``;
   const join: SQL = withUsers ? sql`left join users u on u.id = t.user_id` : sql``;
   const [own] = await rows<Record<string, unknown>>(
     ctx.tx,
     sql`select ${LIST_COLS}, (extract(epoch from t.ended_at) * 1000)::bigint as ended_ms, t.phases_ms, t.tools, t.files_touched,
           t.lines_added, t.lines_removed, t.outcome_signals, t.outcome_provisional, t.skills, t.mcp, t.session_id,
           (select coalesce(jsonb_agg(jsonb_build_object('skills', r.skills, 'mcp', r.mcp)), '[]'::jsonb) from runs r
-            where r.turn_id = t.id and r.company_id = t.company_id and (r.skills <> '{}'::jsonb or r.mcp <> '{}'::jsonb)) as run_uses,
+            where r.turn_id = t.id and (r.skills <> '{}'::jsonb or r.mcp <> '{}'::jsonb)) as run_uses,
           (t.user_id = ${ctx.viewer.id}::uuid) as is_mine ${userCols}
-        from turns t ${join} where t.id = ${turnId}::uuid and t.company_id = ${ctx.viewer.companyId}::uuid`,
+        from turns t ${join} where t.id = ${turnId}::uuid`,
   );
 
   let base: TurnListRow;
@@ -489,7 +489,7 @@ export async function getTurnDetail(ctx: QueryCtx, turnId: string, atMs?: number
     ? await rows<Record<string, unknown>>(
         ctx.tx,
         sql`select l.from_run_id, l.to_run_id, l.kind from run_links l join runs r on r.id = l.to_run_id
-            where r.turn_id = ${turnId}::uuid and r.company_id = ${ctx.viewer.companyId}::uuid and l.company_id = r.company_id
+            where r.turn_id = ${turnId}::uuid
               and l.from_run_id is not null
             order by r.started_at, l.from_run_id`,
       )
@@ -528,7 +528,7 @@ export async function getTurnDetail(ctx: QueryCtx, turnId: string, atMs?: number
     const u = await rows<Record<string, unknown>>(
       ctx.tx,
       sql`select model, effort, (u.started_at at time zone 'UTC')::date::text as day, ${USAGE_SUMS}
-          from usage u where u.turn_id = ${turnId}::uuid and u.company_id = ${ctx.viewer.companyId}::uuid
+          from usage u where u.turn_id = ${turnId}::uuid
           group by 1, 2, 3 having sum(u.input_tokens + u.output_tokens + u.cache_read_tokens + u.cache_write_tokens) > 0 order by 1, 2, 3`,
     );
     // One line per model x effort, priced per day; the header is the sum of the same priced groups, so

@@ -1,12 +1,10 @@
-import { boolean, index, jsonb, pgTable, text, unique, uuid } from 'drizzle-orm/pg-core';
+import { index, pgTable, text, unique, uuid } from 'drizzle-orm/pg-core';
 import { createdAt, pk, tstz } from './columns.js';
-import { identityProviderKindEnum } from './enums.js';
-import { companies, users } from './tenancy.js';
+import { users } from './tenancy.js';
 
 /**
- * Dashboard login (ADR-0013). These are identity tables, not tenant data: they are used before a
- * company context exists, so they carry no company_id and have no RLS (only app_web may touch them).
- * Secrets are stored as hashes only.
+ * Dashboard login (ADR-0013). Identity tables used before an RLS context exists, so they have no RLS (only app_web
+ * may touch them). Secrets are stored as hashes only.
  */
 export const authAccounts = pgTable(
   'auth_accounts',
@@ -32,11 +30,6 @@ export const authSessions = pgTable(
     tokenHash: text('token_hash').notNull().unique(),
     expiresAt: tstz('expires_at').notNull(),
     lastSeenAt: tstz('last_seen_at'),
-    /**
-     * The company the dashboard session is working in; validated against company_memberships on every
-     * request (ADR-0022). null = none chosen yet (or the membership went away).
-     */
-    activeCompanyId: uuid('active_company_id').references(() => companies.id, { onDelete: 'set null' }),
     createdAt: createdAt(),
   },
   (t) => [index('auth_sessions_user_idx').on(t.userId), index('auth_sessions_expires_idx').on(t.expiresAt)],
@@ -53,21 +46,4 @@ export const magicLinks = pgTable(
     createdAt: createdAt(),
   },
   (t) => [index('magic_links_email_idx').on(t.email)],
-);
-
-/** Reserved for SAML / OIDC SSO (roadmap, Business plan). Tenant table: admins only. */
-export const identityProviders = pgTable(
-  'identity_providers',
-  {
-    id: pk(),
-    companyId: uuid('company_id')
-      .notNull()
-      .references(() => companies.id, { onDelete: 'cascade' }),
-    kind: identityProviderKindEnum('kind').notNull(),
-    name: text('name').notNull(),
-    config: jsonb('config').$type<Record<string, unknown>>().notNull().default({}),
-    enabled: boolean('enabled').notNull().default(false),
-    createdAt: createdAt(),
-  },
-  (t) => [index('identity_providers_company_idx').on(t.companyId)],
 );

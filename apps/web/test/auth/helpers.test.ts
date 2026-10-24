@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { appUrl, enabledOAuthProviders, isSecure, superAdminEmails } from '../../src/lib/auth/config';
+import { adminEmails, allowedEmailDomains, appUrl, enabledOAuthProviders, isSecure } from '../../src/lib/auth/config';
 import { expiredCookieOptions, sessionCookieOptions } from '../../src/lib/auth/cookies';
 import { isSameOriginRequest } from '../../src/lib/auth/origin';
 import { RateLimiter } from '../../src/lib/auth/rate-limit';
@@ -37,7 +37,7 @@ describe('tokens', () => {
 
   it('safeNext allows only same-site relative paths', () => {
     expect(safeNext('/turns?team=1#x')).toBe('/turns?team=1#x');
-    for (const bad of ['//evil.example', '/\\evil.example', 'https://evil.example', 'evil', '/%0d%0aSet-Cookie', '/login', '/api/auth/logout', '', null, 42]) {
+    for (const bad of ['//evil.example', '/\\evil.example', 'https://evil.example', 'evil', '/%0d%0aSet-Cookie', '/login', '/api/auth/logout', '/welcome', '', null, 42]) {
       const out = safeNext(bad);
       expect(out === null || (out.startsWith('/') && !out.startsWith('//')), String(bad)).toBe(true);
       if (bad !== '/%0d%0aSet-Cookie') expect(out, String(bad)).toBeNull();
@@ -57,7 +57,10 @@ describe('cookies + config', () => {
   it('reads env', () => {
     expect(appUrl({}).origin).toBe('http://localhost:3000');
     expect(isSecure({ APP_URL: 'https://x.example' })).toBe(true);
-    expect([...superAdminEmails({ SUPER_ADMIN_EMAILS: ' Root@X.example, ,b@y.example' })]).toEqual(['root@x.example', 'b@y.example']);
+    expect([...adminEmails({ ADMIN_EMAILS: ' Root@X.example, ,b@y.example' })]).toEqual(['root@x.example', 'b@y.example']);
+    expect([...adminEmails({})]).toEqual([]);
+    expect([...allowedEmailDomains({ ALLOWED_EMAIL_DOMAINS: ' Corp.Example, @other.example ,, ' })]).toEqual(['corp.example', 'other.example']);
+    expect([...allowedEmailDomains({})]).toEqual([]); // empty by default: nobody joins without an invitation
     expect(enabledOAuthProviders({ GITHUB_CLIENT_ID: 'id', GITHUB_CLIENT_SECRET: 's', GOOGLE_CLIENT_ID: 'id' })).toEqual(['github']);
   });
 });
@@ -91,10 +94,38 @@ describe('rate limiter', () => {
 });
 
 describe('route protection', () => {
-  it('knows the public paths', () => {
-    for (const p of ['/', '/login', '/login/sent', '/signup', '/logout', '/api/auth/magic', '/api/auth/github/callback', '/api/v1/ingest', '/api/v1/collector-config'])
+  it('knows the public paths (the device-login API is public, the /device page is not)', () => {
+    for (const p of [
+      '/',
+      '/login',
+      '/login/sent',
+      '/login/refused',
+      '/logout',
+      '/api/auth/magic',
+      '/api/auth/github/callback',
+      '/api/v1/ingest',
+      '/api/v1/collector-config',
+      '/api/v1/device/code',
+      '/api/v1/device/token',
+    ])
       expect(isPublicPath(p), p).toBe(true);
-    for (const p of ['/overview', '/turns', '/admin', '/super', '/api/export', '/loginx', '/api/v1/other'])
+    for (const p of [
+      '/overview',
+      '/turns',
+      '/admin',
+      '/device',
+      '/welcome',
+      '/tokens',
+      '/signup',
+      '/super',
+      '/invitations',
+      '/api/export',
+      '/loginx',
+      '/api/v1/other',
+      '/api/v1/device',
+      '/api/v1/device/approve',
+      '/api/v1/device/code/x',
+    ])
       expect(isPublicPath(p), p).toBe(false);
   });
 });

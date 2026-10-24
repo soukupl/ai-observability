@@ -69,7 +69,7 @@ export default async function FlowsPage({ searchParams }: { searchParams: Search
         description="Multi-step sub-agent flows of one turn: a Workflow-tool run, or Agent-tool agents that hand work to each other. Only flows with 2 or more steps, newest first. Costs are ≈ at API list prices."
       />
       <FilterBar filters={filters} options={options} />
-      <FlaggedFlows rows={flagged} companyId={user.companyId} />
+      <FlaggedFlows rows={flagged} />
       {sessionParam && (
         <p role="note" className="text-xs text-zinc-600 dark:text-zinc-400">
           {session ? (

@@ -10,7 +10,7 @@ import { UnflagButton } from './UnflagButton';
  * date range and filters (that is what "later" means). A flag whose turn is no longer visible still shows and can be
  * removed; its links are omitted.
  */
-export function FlaggedFlows({ rows, companyId }: { rows: FlaggedFlowRow[]; companyId: string }) {
+export function FlaggedFlows({ rows }: { rows: FlaggedFlowRow[] }) {
   if (rows.length === 0) return null;
   return (
     <Card title="Flagged for later" description="Flows you flagged on their turn page. Only you see your flags; the date range and filters do not apply here.">
@@ -33,7 +33,7 @@ export function FlaggedFlows({ rows, companyId }: { rows: FlaggedFlowRow[]; comp
             )}
             {r.note && <span className="text-zinc-600 italic dark:text-zinc-400">“{r.note}”</span>}
             <span className="text-xs text-zinc-500 dark:text-zinc-400">flagged {formatDateTime(r.flaggedAtMs)}</span>
-            <UnflagButton companyId={companyId} id={r.id} />
+            <UnflagButton id={r.id} />
           </li>
         ))}
       </ul>

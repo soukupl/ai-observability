@@ -14,7 +14,7 @@ const p = (model: string, input: number, output: number, cacheRead: number, cach
 /**
  * Default API list prices, USD per million tokens (BRIEF §7 "Cost"). Anthropic cache writes are the
  * 5-minute rate (1.25x input); OpenAI bills no cache writes. Verify against the vendors' pricing pages
- * before relying on them; the super admin can edit rows, and newer rows (later effective_from) win.
+ * before relying on them; admins can edit rows in the console, and newer rows (later effective_from) win.
  */
 export const DEFAULT_MODEL_PRICES: Price[] = [
   p('claude-fable-5-1', 10, 50, 0.25, 12.5),

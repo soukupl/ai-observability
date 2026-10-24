@@ -5,20 +5,19 @@ import { POLL_MS, TICK_MS } from '../lib/live/status';
 
 /**
  * Client polling of the live JSON routes (ADR-0027): a setTimeout chain, one interval apart, paused while the tab is
- * hidden. A 401 / 403 / 404 / 409 halts polling for good (the page has to be reloaded); any other failure keeps the
+ * hidden. A 401 / 403 / 404 halts polling for good (the page has to be reloaded); any other failure keeps the
  * last data, sets `failing` and retries at the next interval.
  */
 
-export type PollHalt = 'unauthorized' | 'forbidden' | 'not_found' | 'company_changed';
+export type PollHalt = 'unauthorized' | 'forbidden' | 'not_found';
 
 export const HALT_MESSAGE: Record<PollHalt, string> = {
-  company_changed: 'The active company changed in another tab. Reload this page.',
   unauthorized: 'Signed out. Reload the page to sign in again.',
   not_found: 'This session is no longer visible.',
   forbidden: 'Not available.',
 };
 
-const HALT_BY_STATUS: Record<number, PollHalt> = { 401: 'unauthorized', 403: 'forbidden', 404: 'not_found', 409: 'company_changed' };
+const HALT_BY_STATUS: Record<number, PollHalt> = { 401: 'unauthorized', 403: 'forbidden', 404: 'not_found' };
 
 export function useLivePoll<T extends { nowMs: number }>(
   url: string,

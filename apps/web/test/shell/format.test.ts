@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { formatCost, formatDuration, formatInt, formatPercent, formatTokens, formatUsd } from '../../src/components/format';
-import { ADMIN_NAV, LEAD_NAV, navFor, SUPER_NAV, TOKENS_NAV, VIEW_NAV } from '../../src/components/nav';
+import { ADMIN_NAV, LEAD_NAV, navFor, TOKENS_NAV, VIEW_NAV } from '../../src/components/nav';
 
 describe('formatTokens', () => {
   it.each([
@@ -63,18 +63,15 @@ describe('formatDuration / formatPercent / formatInt', () => {
 });
 
 describe('navFor', () => {
-  const company = { name: 'x' };
   it('members get the views and My tokens', () => {
-    expect(navFor({ companyRole: 'member', isSuperAdmin: false, company })).toEqual([...VIEW_NAV, TOKENS_NAV]);
+    expect(navFor({ role: 'member' })).toEqual([...VIEW_NAV, TOKENS_NAV]);
+    expect(navFor({ role: 'member', teams: [{ role: 'member' }] })).toEqual([...VIEW_NAV, TOKENS_NAV]);
   });
-  it('team leads also get Company tokens', () => {
-    expect(navFor({ companyRole: 'member', isSuperAdmin: false, company, teams: [{ role: 'lead' }] })).toEqual([...VIEW_NAV, TOKENS_NAV, LEAD_NAV]);
+  it('team leads also get Budgets', () => {
+    expect(navFor({ role: 'member', teams: [{ role: 'lead' }] })).toEqual([...VIEW_NAV, TOKENS_NAV, LEAD_NAV]);
   });
-  it('admins get the Admin link, super admins the Super link', () => {
-    expect(navFor({ companyRole: 'admin', isSuperAdmin: false, company }).at(-1)).toEqual(ADMIN_NAV);
-    expect(navFor({ companyRole: 'member', isSuperAdmin: true, company: null })).toEqual([SUPER_NAV]);
-    const both = navFor({ companyRole: 'admin', isSuperAdmin: true, company });
-    expect(both.slice(-2)).toEqual([ADMIN_NAV, SUPER_NAV]);
+  it('admins get the Admin link (not the lead Budgets link)', () => {
+    expect(navFor({ role: 'admin', teams: [{ role: 'lead' }] })).toEqual([...VIEW_NAV, TOKENS_NAV, ADMIN_NAV]);
   });
   it('lists all nine dashboard views', () => {
     expect(VIEW_NAV.map((n) => n.href)).toEqual(['/overview', '/projects', '/models', '/phases', '/agents', '/flows', '/skills-mcp', '/sessions', '/turns']);

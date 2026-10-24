@@ -1,15 +1,14 @@
 import { platform } from 'node:os';
 import { gzipSync } from 'node:zlib';
 import { applyUsageNaming } from './analysis/usage.js';
-import { readCache, renameCache, writeCache, parseCollectorConfigValue } from './cc-cache.js';
-import { isTokenName, loadConfig, saveConfig, type CollectorConfig, type CompanyLabel, type TokenEntry } from './config.js';
-import { readDelivery, renameTokenDelivery, tokenDelivery, writeTokenDelivery, type TokenDeliveryState } from './delivery.js';
+import { readCache, writeCache, parseCollectorConfigValue } from './cc-cache.js';
+import { endpointHost, isExpired, loadConfig, saveConfig, type CollectorConfig, type ServerEntry } from './config.js';
+import { readDelivery, serverDelivery, writeServerDelivery, type ServerDeliveryState } from './delivery.js';
 import { errorMessage } from './fsutil.js';
 import { nodeTransport, type Transport } from './http.js';
 import { nullLogger, type Logger } from './log.js';
 import type { AiObsPaths } from './paths.js';
 import { loadPathSecret, resolveProjectKey, RESOLVE_TIMEOUT_MS, sendRef } from './project-key.js';
-import { loadRouting, resolveStream, type HeldReason, type RoutingView, type StreamIdentity } from './projects.js';
 import {
   MAX_BATCH_EVENTS,
   SCHEMA_VERSION,
@@ -20,7 +19,9 @@ import {
   type ProjectNamingMode,
 } from './protocol-types.js';
 import { identityOfRef, loggableKey, type BatchLimits, type QueueStore, type StreamRef } from './queue.js';
+import { loadRouting, resolveStream, type HeldReason, type RoutingView, type StreamIdentity } from './routing.js';
 import { COLLECTOR_NAME, COLLECTOR_VERSION } from './version.js';
+import { parseIngestWarnings, recordBatchWarnings } from './warnings.js';
 
 export const INGEST_PATH = '/api/v1/ingest';
 export const COLLECTOR_CONFIG_PATH = '/api/v1/collector-config';
@@ -31,28 +32,40 @@ const BASE_BACKOFF_MS = 30_000;
 /** Routing passes per flush: another one only when a stream's resolution changed mid-flush (C17). */
 const MAX_PASSES = 3;
 
+/** The message of a server that refused the token (401): the only fix is a new login. */
+export function rejectedMessage(endpoint: string): string {
+  return `token expired or revoked: run ai-obs login --server ${endpoint}`;
+}
+/** The message of a token past its local `expires_at` (nothing is sent with it). */
+export function expiredMessage(endpoint: string): string {
+  return `token expired: run ai-obs login --server ${endpoint}`;
+}
+
 export interface SenderDeps {
   paths: AiObsPaths;
   log?: Logger;
   transport?: Transport;
   now?: () => number;
-  /** default: () => loadRouting(paths) (fresh read per decision, C17); tests inject */
+  /** default: () => loadRouting(paths, now()) (fresh read per decision, C17); tests inject */
   routing?: () => RoutingView | null;
   /** key resolution for unresolved streams (default resolveProjectKey, 5 s) */
   resolveProjectKey?: (cwd: string, o: { timeoutMs: number }) => Promise<string | null>;
 }
 
-/** Per-token result of one flush. `suspended` = 403 (company suspended); `blocked` = skipped, still blocked by an earlier 401 / 403. */
-export type TokenFlushStatus = 'ok' | 'empty' | 'backoff' | 'blocked' | 'auth_error' | 'suspended' | 'failed';
+/**
+ * Per-server result of one flush. `blocked` = skipped, still refused by an earlier 401 / 403; `expired` =
+ * skipped, the token is past its `expires_at`; `auth_error` = refused (401 / 403) in this flush.
+ */
+export type ServerFlushStatus = 'ok' | 'empty' | 'backoff' | 'blocked' | 'expired' | 'auth_error' | 'failed';
 
-export interface TokenFlushResult {
-  status: TokenFlushStatus;
+export interface ServerFlushResult {
+  status: ServerFlushStatus;
   batches: number;
   sent: number;
   accepted: number;
   duplicates: number;
   rejected: number;
-  /** events still queued for this token after the flush */
+  /** events still queued for this server after the flush */
   left: number;
   error?: string;
 }
@@ -60,7 +73,6 @@ export interface TokenFlushResult {
 export type FlushStatus = 'ok' | 'empty' | 'backoff' | 'auth_error' | 'failed' | 'held';
 
 export interface FlushResult {
-  /** aggregate; one token and nothing held: exactly the 0.1.x values ('suspended' maps to 'auth_error') */
   status: FlushStatus;
   batches: number;
   sent: number;
@@ -68,38 +80,32 @@ export interface FlushResult {
   duplicates: number;
   rejected: number;
   error?: string;
-  /** per token name, for every token a stream resolved to in this flush */
-  tokens: Record<string, TokenFlushResult>;
-  /** streams not sent because no token can be proven for them (design §3.2) */
+  /** per server endpoint, for every server a stream resolved to in this flush */
+  servers: Record<string, ServerFlushResult>;
+  /** streams not sent because no server can take them now */
   held: { events: number; projects: string[]; byReason: Partial<Record<HeldReason, number>> };
-  /** single-token auto-confirm (C9) */
-  confirmed?: { from: string; to: string; company: CompanyLabel };
   /** this run's cap drops (C13) */
   dropped: { events: number; heldEvents: number };
 }
 
 export interface FlushOptions {
-  /** ignore the backoff window and retry blocked tokens once (manual `ai-obs flush`) */
+  /** ignore the backoff window and retry refused servers once (manual `ai-obs flush`) */
   force?: boolean;
-  /** safety stop per token (default 50 batches per flush, C14) */
+  /** safety stop per server (default 50 batches per flush, C14) */
   maxBatches?: number;
   limits?: BatchLimits;
 }
 
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
 /**
- * The batch envelope for one token: `identity.git_email` is the e-mail registered with that token (the
- * git e-mail of the directory `init --token` ran in), else the machine's first one (config.git_email).
+ * The batch envelope. `identity` stays empty: the token identifies the user, and the server ignores a git
+ * e-mail (brief appendix C), so none is sent.
  */
-export function buildEnvelope(config: Pick<CollectorConfig, 'machine_id' | 'git_email'>, events: IngestEvent[], token?: Pick<TokenEntry, 'git_email'>): IngestBatch {
-  const raw = token?.git_email ?? config.git_email;
-  const email = raw && EMAIL_RE.test(raw) && raw.length <= 320 ? raw : undefined;
+export function buildEnvelope(config: Pick<CollectorConfig, 'machine_id'>, events: IngestEvent[]): IngestBatch {
   return {
     schema: SCHEMA_VERSION,
     collector: { name: COLLECTOR_NAME, version: COLLECTOR_VERSION },
     machine: { id: config.machine_id, os: platform().slice(0, 32) },
-    identity: email ? { git_email: email } : {},
+    identity: {},
     events,
   };
 }
@@ -111,13 +117,14 @@ function parseIngestResponse(body: string): IngestResponse {
       accepted: Number(r.accepted) || 0,
       duplicates: Number(r.duplicates) || 0,
       rejected: Array.isArray(r.rejected) ? r.rejected : [],
+      warnings: parseIngestWarnings(r.warnings),
     };
   } catch {
-    return { accepted: 0, duplicates: 0, rejected: [] };
+    return { accepted: 0, duplicates: 0, rejected: [], warnings: [] };
   }
 }
 
-/** The `error` field of a JSON error body (e.g. "company is suspended"), clipped; null when absent. */
+/** The `error` field of a JSON error body, clipped; null when absent. */
 function serverError(body: string): string | null {
   try {
     const e = (JSON.parse(body) as { error?: unknown } | null)?.error;
@@ -137,9 +144,9 @@ function retryAfterMs(header: string | string[] | undefined): number | null {
 }
 
 /**
- * Send-time naming (design §3.5, C3): a project stream's `session_start.project` is rebuilt from the
- * plain stream key for the receiving token (path keys always as a keyed hash); skill / MCP names are
- * hashed in hashed mode. Event ids do not depend on either, so server de-dup is unaffected.
+ * Send-time naming (C3): a project stream's `session_start.project` is rebuilt from the plain stream key for
+ * the receiving server (path keys always as a keyed hash) and carries the stream's dot-file team (appendix
+ * C); skill / MCP names are hashed in hashed mode. Event ids depend on neither, so server de-dup is unaffected.
  */
 export function prepareForSend(
   events: IngestEvent[],
@@ -148,34 +155,36 @@ export function prepareForSend(
 ): IngestEvent[] {
   const named =
     stream.kind === 'project'
-      ? events.map((e) => (e.type === 'session_start' ? { ...e, project: sendRef(stream.pk, o) } : e))
+      ? events.map((e) => (e.type === 'session_start' ? { ...e, project: { ...sendRef(stream.pk, o), ...(stream.team ? { team: stream.team } : {}) } } : e))
       : events;
   return applyUsageNaming(named, o.naming, o.salt);
 }
 
-interface TokenRun {
-  entry: TokenEntry;
-  result: TokenFlushResult;
-  /** no more requests for this token in this flush (failed, blocked, backoff, budget used) */
+interface ServerRun {
+  entry: ServerEntry;
+  result: ServerFlushResult;
+  /** no more requests for this server in this flush (failed, blocked, backoff, budget used) */
   done: boolean;
   cc: CollectorConfigResponse | null;
   maxEvents: number;
   streams: Set<string>;
-  /** a forced flush retrying a blocked token (its blocked flag is cleared only on success) */
+  /** a forced flush retrying a refused server (its blocked flag is cleared only on success) */
   retryBlocked: boolean;
+  /** project keys delivered in this flush */
+  repos: Set<string>;
 }
 
 /**
- * Sends every stream to the token it resolves to (design §5.3): per token Bearer, endpoint, naming and
- * salt; held streams stay queued and are counted; a 401 / 403 blocks only that token; failures back
- * off per token and the flush goes on with the others. Routing is re-read before every POST (C17).
+ * Sends every stream to the server its endpoint resolves to: per server Bearer, naming and salt; held streams
+ * stay queued and are counted; a 401 / 403 blocks only that server; an expired token sends nothing; failures
+ * back off per server and the flush goes on with the others. Routing is re-read before every POST (C17).
  * Server-side duplicates count as delivered (ADR-0011). Never throws.
  */
 export async function flushQueue(store: QueueStore, deps: SenderDeps, opts: FlushOptions = {}): Promise<FlushResult> {
   const log = deps.log ?? nullLogger;
   const now = deps.now ?? Date.now;
   const transport = deps.transport ?? nodeTransport;
-  const routing = deps.routing ?? (() => loadRouting(deps.paths));
+  const routing = deps.routing ?? (() => loadRouting(deps.paths, now()));
   const resolveKey = deps.resolveProjectKey ?? ((cwd, o) => resolveProjectKey(cwd, o));
   const maxBatches = opts.maxBatches ?? 50;
   const result: FlushResult = {
@@ -185,7 +194,7 @@ export async function flushQueue(store: QueueStore, deps: SenderDeps, opts: Flus
     accepted: 0,
     duplicates: 0,
     rejected: 0,
-    tokens: {},
+    servers: {},
     held: { events: 0, projects: [], byReason: {} },
     dropped: { events: 0, heldEvents: 0 },
   };
@@ -203,24 +212,20 @@ export async function flushQueue(store: QueueStore, deps: SenderDeps, opts: Flus
       if (pk !== null) store.adopt(ref, pk);
     }
 
-    // 0b. Single-token auto-confirm (C9).
-    const confirmed = await autoConfirm(deps, routing, log, transport, now);
-    if (confirmed) result.confirmed = confirmed;
-
     const pathSecret = loadPathSecret(deps.paths.projectSecret);
-    const runs = new Map<string, TokenRun>();
+    const runs = new Map<string, ServerRun>();
     const heldSeen = new Set<string>();
     const heldProjects = new Set<string>();
 
-    const delivery = (t: TokenEntry): TokenDeliveryState => tokenDelivery(readDelivery(deps.paths), t);
-    const saveDelivery = (t: TokenEntry, patch: Partial<Omit<TokenDeliveryState, 'token_fp'>>) => {
+    const delivery = (t: ServerEntry): ServerDeliveryState => serverDelivery(readDelivery(deps.paths), t);
+    const saveDelivery = (t: ServerEntry, patch: Partial<Omit<ServerDeliveryState, 'token_fp'>>) => {
       try {
-        writeTokenDelivery(deps.paths, t, patch);
+        writeServerDelivery(deps.paths, t, patch);
       } catch (err) {
-        log.error('sender: cannot write delivery state', { error: errorMessage(err), token: t.name });
+        log.error('sender: cannot write delivery state', { error: errorMessage(err), server: endpointHost(t.endpoint) });
       }
     };
-    const fail = (run: TokenRun, status: 'failed', error: string, waitMs?: number | null) => {
+    const fail = (run: ServerRun, error: string, waitMs?: number | null) => {
       const failures = delivery(run.entry).consecutive_failures + 1;
       const backoff = waitMs ?? Math.min(MAX_BACKOFF_MS, BASE_BACKOFF_MS * 2 ** (failures - 1));
       saveDelivery(run.entry, {
@@ -229,28 +234,28 @@ export async function flushQueue(store: QueueStore, deps: SenderDeps, opts: Flus
         consecutive_failures: failures,
         next_attempt_at: new Date(now() + backoff).toISOString(),
       });
-      run.result.status = status;
+      run.result.status = 'failed';
       run.result.error = error;
       run.done = true;
-      log.warn('sender: delivery failed, events stay queued', { token: run.entry.name, error, failures });
+      log.warn('sender: delivery failed, events stay queued', { server: endpointHost(run.entry.endpoint), error, failures });
     };
-    const block = (run: TokenRun, status: 401 | 403, body: string) => {
-      const message = serverError(body) ?? (status === 403 ? 'company is suspended' : 'token rejected');
+    const block = (run: ServerRun, status: 401 | 403, body: string) => {
+      const message = status === 401 ? rejectedMessage(run.entry.endpoint) : (serverError(body) ?? 'access denied');
       const error = `HTTP ${status}: ${message}`;
       saveDelivery(run.entry, {
         last_attempt_at: new Date(now()).toISOString(),
         last_error: error,
         blocked: { status, at: new Date(now()).toISOString(), message },
       });
-      run.result.status = status === 403 ? 'suspended' : 'auth_error';
+      run.result.status = 'auth_error';
       run.result.error = error;
       run.done = true;
-      log.warn('sender: token refused by the server, its events stay queued', { token: run.entry.name, status });
+      log.warn('sender: token refused by the server, its events stay queued', { server: endpointHost(run.entry.endpoint), status });
     };
 
-    /** First sight of a token in this flush: blocked / backoff / collector-config (C4). */
-    const startRun = async (t: TokenEntry): Promise<TokenRun> => {
-      const run: TokenRun = {
+    /** First sight of a server in this flush: expired / blocked / backoff / collector-config (C4). */
+    const startRun = async (t: ServerEntry): Promise<ServerRun> => {
+      const run: ServerRun = {
         entry: t,
         result: { status: 'empty', batches: 0, sent: 0, accepted: 0, duplicates: 0, rejected: 0, left: 0 },
         done: false,
@@ -258,8 +263,16 @@ export async function flushQueue(store: QueueStore, deps: SenderDeps, opts: Flus
         maxEvents: opts.limits?.maxEvents ?? MAX_BATCH_EVENTS,
         streams: new Set(),
         retryBlocked: false,
+        repos: new Set(),
       };
-      runs.set(t.name, run);
+      runs.set(t.endpoint, run);
+      if (isExpired(t, now())) {
+        // local pre-check (brief Q6): never send with a token past its expiry, not even on a forced flush
+        run.result.status = 'expired';
+        run.result.error = expiredMessage(t.endpoint);
+        run.done = true;
+        return run;
+      }
       const st = delivery(t);
       run.retryBlocked = !!st.blocked;
       if (st.blocked && !opts.force) {
@@ -274,20 +287,21 @@ export async function flushQueue(store: QueueStore, deps: SenderDeps, opts: Flus
         run.done = true;
         return run;
       }
-      const cc = await getCollectorConfig({ token: t, paths: deps.paths, log, transport, now });
+      const cc = await getCollectorConfig({ server: t, paths: deps.paths, log, transport, now });
       if (cc.status === 401 || cc.status === 403) {
         block(run, cc.status, cc.body ?? '');
         return run;
       }
       if (cc.source === 'default') {
-        fail(run, 'failed', `collector-config unavailable: ${cc.error ?? 'never fetched'}`);
+        fail(run, `collector-config unavailable: ${cc.error ?? 'never fetched'}`);
         return run;
       }
+      if (cc.source === 'fresh') syncServerEntry(deps.paths, t, cc.value, log);
       run.cc = cc.value;
       return run;
     };
 
-    const sameToken = (a: TokenEntry, b: TokenEntry) => a.name === b.name && a.token === b.token && a.endpoint === b.endpoint;
+    const sameServer = (a: ServerEntry, b: ServerEntry) => a.endpoint === b.endpoint && a.token === b.token;
 
     for (let pass = 0; pass < MAX_PASSES; pass++) {
       let replan = false;
@@ -296,8 +310,11 @@ export async function flushQueue(store: QueueStore, deps: SenderDeps, opts: Flus
       for (const ref of store.streams()) {
         const identity = identityOfRef(ref);
         const r = resolveStream(view, identity);
-        // C13: the age cap counts only time a stream was seen sendable (held / blocked time does not count)
-        if (pass === 0) store.observe(ref, r.kind === 'token' && !Object.prototype.hasOwnProperty.call(view.blocked, r.token.name));
+        // C13: the age cap counts only time a stream was seen sendable (held, refused, expired time does not count)
+        if (pass === 0) {
+          const ok = r.kind === 'server' && !Object.prototype.hasOwnProperty.call(view.blocked, endpointHost(r.server.endpoint)) && !isExpired(r.server, now());
+          store.observe(ref, ok);
+        }
         if (r.kind === 'held') {
           if (!heldSeen.has(ref.dir)) {
             heldSeen.add(ref.dir);
@@ -308,41 +325,34 @@ export async function flushQueue(store: QueueStore, deps: SenderDeps, opts: Flus
           }
           continue;
         }
-        const t = r.token;
-        let run = runs.get(t.name);
-        if (run && !sameToken(run.entry, t)) continue; // the token was replaced mid-flush: next flush
+        const t = r.server;
+        let run = runs.get(t.endpoint);
+        if (run && !sameServer(run.entry, t)) continue; // a new login mid-flush: next flush
         run ??= await startRun(t);
         run.streams.add(ref.dir);
         if (run.done) continue;
-        const stopped = await sendStream(store, ref, identity, run, {
-          deps,
-          view: routing,
-          transport,
-          log,
-          pathSecret,
-          maxBatches,
-          limits: opts.limits,
-          block,
-          fail,
-          sameToken,
-        });
+        const stopped = await sendStream(store, ref, identity, run, { deps, view: routing, transport, log, pathSecret, maxBatches, limits: opts.limits, block, fail, sameServer, now });
         if (stopped === 'replan') replan = true;
       }
       if (!replan) break;
     }
 
-    // per-token success bookkeeping and totals
+    // per-server success bookkeeping and totals
     for (const run of runs.values()) {
       const r = run.result;
       if (r.status === 'ok') {
+        const at = new Date(now()).toISOString();
+        const repos = { ...delivery(run.entry).repos };
+        for (const pk of run.repos) repos[pk] = at;
         saveDelivery(run.entry, {
-          last_attempt_at: new Date(now()).toISOString(),
-          last_success_at: new Date(now()).toISOString(),
+          last_attempt_at: at,
+          last_success_at: at,
           last_error: null,
           consecutive_failures: 0,
           next_attempt_at: null,
           blocked: null,
           last_result: { accepted: r.accepted, duplicates: r.duplicates, rejected: r.rejected },
+          repos,
         });
       }
       result.batches += r.batches;
@@ -363,15 +373,15 @@ export async function flushQueue(store: QueueStore, deps: SenderDeps, opts: Flus
     for (const ref of store.streams()) {
       for (const run of runs.values()) if (run.streams.has(ref.dir)) run.result.left += store.stream(ref).stats().events;
     }
-    for (const run of runs.values()) result.tokens[run.entry.name] = run.result;
+    for (const run of runs.values()) result.servers[run.entry.endpoint] = run.result;
     result.held.projects = [...heldProjects];
 
     const statuses = [...runs.values()].map((r) => r.result);
-    const first = (...s: TokenFlushStatus[]) => statuses.find((r) => s.includes(r.status));
+    const first = (...s: ServerFlushStatus[]) => statuses.find((r) => s.includes(r.status));
     const ok = first('ok');
-    const auth = first('auth_error', 'suspended');
+    const auth = first('auth_error');
     const failed = first('failed');
-    const waiting = first('backoff', 'blocked');
+    const waiting = first('backoff', 'blocked', 'expired');
     if (ok) result.status = 'ok';
     else if (auth) Object.assign(result, { status: 'auth_error', ...(auth.error ? { error: auth.error } : {}) });
     else if (failed) Object.assign(result, { status: 'failed', ...(failed.error ? { error: failed.error } : {}) });
@@ -395,19 +405,20 @@ interface SendCtx {
   pathSecret: string | null;
   maxBatches: number;
   limits: BatchLimits | undefined;
-  block: (run: TokenRun, status: 401 | 403, body: string) => void;
-  fail: (run: TokenRun, status: 'failed', error: string, waitMs?: number | null) => void;
-  sameToken: (a: TokenEntry, b: TokenEntry) => boolean;
+  block: (run: ServerRun, status: 401 | 403, body: string) => void;
+  fail: (run: ServerRun, error: string, waitMs?: number | null) => void;
+  sameServer: (a: ServerEntry, b: ServerEntry) => boolean;
+  now: () => number;
 }
 
-/** Batch loop of one stream for one token (design §5.3 step 1b). 'replan' = the stream's resolution changed. */
-async function sendStream(store: QueueStore, ref: StreamRef, identity: StreamIdentity, run: TokenRun, c: SendCtx): Promise<'done' | 'replan'> {
+/** Batch loop of one stream for one server. 'replan' = the stream's resolution changed. */
+async function sendStream(store: QueueStore, ref: StreamRef, identity: StreamIdentity, run: ServerRun, c: SendCtx): Promise<'done' | 'replan'> {
   const queue = store.stream(ref);
   const t = run.entry;
   const cc = run.cc!;
   while (!run.done) {
     if (run.result.batches >= c.maxBatches) {
-      run.done = true; // budget of this token for this flush (C14)
+      run.done = true; // budget of this server for this flush (C14)
       break;
     }
     const batch = queue.readBatch({ ...c.limits, maxEvents: run.maxEvents });
@@ -416,19 +427,23 @@ async function sendStream(store: QueueStore, ref: StreamRef, identity: StreamIde
       queue.ack(batch); // only corrupt / oversized lines were consumed
       continue;
     }
-    // C17: `use --none`, a removed or blocked token must take effect for every batch not yet in flight.
+    // C17: a removed server or a new token must take effect for every batch not yet in flight.
     const view = c.view();
     const now = view ? resolveStream(view, identity) : null;
-    if (!view || now?.kind !== 'token' || !c.sameToken(now.token, t)) return 'replan';
-    if (!run.retryBlocked && Object.prototype.hasOwnProperty.call(view.blocked, t.name)) {
-      // blocked since this flush started (another process saw a 401 / 403): stop sending with it
+    if (!view || now?.kind !== 'server' || !c.sameServer(now.server, t)) return 'replan';
+    if (!run.retryBlocked && Object.prototype.hasOwnProperty.call(view.blocked, endpointHost(t.endpoint))) {
+      // refused since this flush started (another process saw a 401 / 403): stop sending with it
       if (run.result.status !== 'ok') run.result.status = 'blocked';
       run.done = true;
       break;
     }
-    const config = view.config;
+    if (isExpired(t, c.now())) {
+      if (run.result.status !== 'ok') run.result.status = 'expired';
+      run.done = true;
+      break;
+    }
     const events = prepareForSend(batch.events, identity, { naming: cc.project_naming, salt: cc.project_salt ?? null, pathSecret: c.pathSecret });
-    const body = gzipSync(Buffer.from(JSON.stringify(buildEnvelope(config, events, now.token))));
+    const body = gzipSync(Buffer.from(JSON.stringify(buildEnvelope(view.config, events))));
     let res;
     try {
       res = await c.transport({
@@ -444,7 +459,7 @@ async function sendStream(store: QueueStore, ref: StreamRef, identity: StreamIde
         timeoutMs: POST_TIMEOUT_MS,
       });
     } catch (err) {
-      c.fail(run, 'failed', `network: ${errorMessage(err)}`);
+      c.fail(run, `network: ${errorMessage(err)}`);
       break;
     }
 
@@ -457,18 +472,25 @@ async function sendStream(store: QueueStore, ref: StreamRef, identity: StreamIde
       continue;
     }
     if (res.status === 400 || res.status === 413 || res.status === 422) {
-      queue.deadLetter(batch, `HTTP ${res.status}: ${res.body.slice(0, 200)}`, { token: t.name, project: loggableKey(ref.pk) });
+      queue.deadLetter(batch, `HTTP ${res.status}: ${res.body.slice(0, 200)}`, { server: endpointHost(t.endpoint), project: loggableKey(ref.pk) });
       run.result.batches++;
       continue;
     }
     if (res.status < 200 || res.status >= 300) {
-      c.fail(run, 'failed', `HTTP ${res.status}`, res.status === 429 ? retryAfterMs(res.headers['retry-after']) : null);
+      c.fail(run, `HTTP ${res.status}`, res.status === 429 ? retryAfterMs(res.headers['retry-after']) : null);
       break;
     }
 
     const r = parseIngestResponse(res.body);
     for (const rej of r.rejected.slice(0, 20)) {
       c.log.warn('sender: event rejected by server', { event_id: rej.event_id, reason: String(rej.reason).slice(0, 200) });
+    }
+    if (identity.kind === 'project') {
+      // a duplicate session_start (a retry after a lost response) runs no team resolution on the server and so
+      // returns no warning: only a batch without duplicates may clear the project's warning
+      const started = r.duplicates > 0 ? 0 : batch.events.filter((e) => e.type === 'session_start').length;
+      recordBatchWarnings(c.deps.paths, identity.pk, t.endpoint, r.warnings ?? [], started, new Date(c.now()));
+      run.repos.add(identity.pk);
     }
     queue.ack(batch);
     run.result.batches++;
@@ -482,45 +504,29 @@ async function sendStream(store: QueueStore, ref: StreamRef, identity: StreamIde
 }
 
 /**
- * C9: with exactly one valid token (no malformed entry) and no company stored, a 2xx collector-config
- * that reports a company confirms it: `company` / `email` are written, and a provisional `default` is
- * renamed to the slug when that is a valid name (cache and delivery state follow). Bindings match by
- * fingerprint, so nothing else changes. The caller holds the worker lock.
+ * Copies what a fresh collector-config says about the token (e-mail, deployment, label, expiry, source) into
+ * its config.json entry when it changed, so `status` and the expiry nudge know it without the network. The
+ * caller holds the worker lock. Never throws.
  */
-async function autoConfirm(
-  deps: SenderDeps,
-  routing: () => RoutingView | null,
-  log: Logger,
-  transport: Transport,
-  now: () => number,
-): Promise<FlushResult['confirmed'] | undefined> {
-  const view = routing();
-  const only = view?.config.tokens[0];
-  if (!view || view.config.tokens.length !== 1 || view.config.invalidTokens.length || !only || only.company) return undefined;
-  const cc = await getCollectorConfig({ token: only, paths: deps.paths, log, transport, now });
-  const company = cc.source !== 'default' ? cc.value.company : undefined;
-  if (!company) return undefined;
+export function syncServerEntry(paths: AiObsPaths, server: ServerEntry, value: CollectorConfigResponse, log: Logger = nullLogger): ServerEntry | null {
   try {
-    const config = loadConfig(deps.paths);
-    const i = config ? config.tokens.findIndex((t) => t.token === only.token && t.endpoint === only.endpoint) : -1;
-    if (!config || i < 0 || config.tokens.length !== 1 || config.invalidTokens.length) return undefined;
-    const entry = config.tokens[i]!;
-    if (entry.company) return undefined;
-    const rename = entry.provisional_name === true && isTokenName(company.slug) && company.slug !== entry.name;
-    const email = cc.value.user?.email;
-    const { provisional_name: _p, ...rest } = entry;
-    const next: TokenEntry = { ...rest, name: rename ? company.slug : entry.name, company, ...(email ? { email } : {}) };
-    config.tokens[i] = next;
-    saveConfig(deps.paths, config, new Date(now()));
-    if (rename) {
-      renameCache(deps.paths, entry.name, next.name);
-      renameTokenDelivery(deps.paths, entry.name, next.name);
-    }
-    log.info('sender: token confirmed by the server', { token: next.name, company: company.slug });
-    return { from: entry.name, to: next.name, company };
+    const config = loadConfig(paths);
+    const i = config ? config.servers.findIndex((s) => s.endpoint === server.endpoint && s.token === server.token) : -1;
+    if (!config || i < 0) return null;
+    const cur = config.servers[i]!;
+    const next: ServerEntry = {
+      ...cur,
+      ...(value.user ? { email: value.user.email } : {}),
+      ...(value.deployment ? { deployment: value.deployment } : {}),
+      ...(value.token ? { expires_at: value.token.expires_at, label: value.token.label ?? cur.label, source: value.token.source } : {}),
+    };
+    if (JSON.stringify(next) === JSON.stringify(cur)) return cur;
+    config.servers[i] = next;
+    saveConfig(paths, config);
+    return next;
   } catch (err) {
-    log.error('sender: cannot confirm the token', { error: errorMessage(err) });
-    return undefined;
+    log.error('sender: cannot update the server entry', { error: errorMessage(err) });
+    return null;
   }
 }
 
@@ -542,12 +548,12 @@ export interface CollectorConfigResult {
 }
 
 /**
- * Privacy-first fallback when the server was never reached: hash project keys, so a company in
+ * Privacy-first fallback when the server was never reached: hash project keys, so a deployment in
  * `hashed` mode never receives a plain remote. The sender never sends with it (C4).
  */
 export const DEFAULT_COLLECTOR_CONFIG: CollectorConfigResponse = { project_naming: 'hashed', min_collector_version: '0.0.0' };
 
-/** Parses a collector-config response body (keeps `project_salt`, `company`, `user`); null when invalid. */
+/** Parses a collector-config response body (appendix A); null when invalid. */
 export function parseCollectorConfig(body: string): CollectorConfigResponse | null {
   try {
     return parseCollectorConfigValue(JSON.parse(body));
@@ -562,7 +568,7 @@ export interface EndpointCheck {
   status: number | null;
   value: CollectorConfigResponse | null;
   error?: string;
-  /** the response's `error` field (e.g. "company is suspended") */
+  /** the response's `error` field */
   serverError?: string;
   /** Retry-After of a 429, in ms */
   retryAfterMs?: number | null;
@@ -604,7 +610,7 @@ const PROBE_BUDGET_MS = 60_000;
 const PROBE_DEFAULT_WAIT_MS = 5_000;
 
 /**
- * checkEndpoint for `init` / `token add` (contract §5.5): on 429 wait Retry-After (default 5 s) and
+ * checkEndpoint for `login` / `link`: on 429 wait Retry-After (default 5 s) and
  * retry, at most 3 attempts; stops at once when the wait would pass the 60 s budget. `exhausted` =
  * gave up on a 429.
  */
@@ -629,16 +635,15 @@ export async function probeCollectorConfig(
 }
 
 /**
- * The token's collector config (per-token cache, design §3.4): from cache when younger than
- * `maxAgeMs`, else fetched (falling back to a stale cache, then the default). A failed fetch is
- * retried after 10 min unless forced.
+ * The server's collector config (per-server cache): from cache when younger than `maxAgeMs`, else fetched
+ * (falling back to a stale cache, then the default). A failed fetch is retried after 10 min unless forced.
  */
 export async function getCollectorConfig(
-  deps: { token: TokenEntry; paths: Pick<AiObsPaths, 'collectorConfigDir'>; log?: Logger; transport?: Transport; now?: () => number },
+  deps: { server: Pick<ServerEntry, 'endpoint' | 'token'>; paths: Pick<AiObsPaths, 'collectorConfigDir'>; log?: Logger; transport?: Transport; now?: () => number },
   opts: { maxAgeMs?: number; force?: boolean } = {},
 ): Promise<CollectorConfigResult> {
   const now = deps.now ?? Date.now;
-  const cached = readCache(deps.paths, deps.token);
+  const cached = readCache(deps.paths, deps.server);
   const cachedValue = cached?.value ?? null;
   const fallback = (extra: Partial<CollectorConfigResult> = {}): CollectorConfigResult =>
     cachedValue
@@ -649,12 +654,12 @@ export async function getCollectorConfig(
   const sinceFail = cached?.failed_at ? now() - Date.parse(cached.failed_at) : Infinity;
   if (!opts.force && sinceFail >= 0 && sinceFail < FAILED_FETCH_RETRY_MS) return fallback({ error: 'last fetch failed less than 10 min ago' });
 
-  const check = await checkEndpoint({ endpoint: deps.token.endpoint, token: deps.token.token, ...(deps.transport ? { transport: deps.transport } : {}) });
+  const check = await checkEndpoint({ endpoint: deps.server.endpoint, token: deps.server.token, ...(deps.transport ? { transport: deps.transport } : {}) });
   const save = (patch: Parameters<typeof writeCache>[2]) => {
     try {
-      writeCache(deps.paths, deps.token, patch);
+      writeCache(deps.paths, deps.server, patch);
     } catch (err) {
-      deps.log?.error('sender: cannot cache collector config', { error: errorMessage(err), token: deps.token.name });
+      deps.log?.error('sender: cannot cache collector config', { error: errorMessage(err), server: endpointHost(deps.server.endpoint) });
     }
   };
   if (check.value) {
@@ -663,7 +668,7 @@ export async function getCollectorConfig(
     return { value: check.value, source: 'fresh', fetchedAt, status: check.status };
   }
   const error = check.error ?? `HTTP ${check.status}${check.serverError ? `: ${check.serverError}` : ''}`;
-  deps.log?.warn('sender: collector-config fetch failed', { token: deps.token.name, error });
+  deps.log?.warn('sender: collector-config fetch failed', { server: endpointHost(deps.server.endpoint), error });
   save({ failed_at: new Date(now()).toISOString() });
   return fallback({ status: check.status, error, ...(check.body !== undefined ? { body: check.body } : {}) });
 }

@@ -1,18 +1,21 @@
-import { tokenFingerprint, type TokenEntry } from './config.js';
+import { endpointHost, tokenFingerprint, type ServerEntry } from './config.js';
 import { readJsonFile, writeJsonAtomic } from './fsutil.js';
 import type { AiObsPaths } from './paths.js';
 
-/** A token the server refused with 401 / 403: its streams stay queued until a manual flush or doctor succeeds (§3.3). */
+/** A server that refused the token with 401 / 403: its streams stay queued until a new login, a manual flush or doctor succeeds. */
 export interface Blocked {
   status: 401 | 403;
   at: string;
-  /** the response `error`, e.g. "company is suspended" */
   message: string;
 }
 
-/** Delivery state of one token (state/delivery.json `tokens[<name>]`). */
-export interface TokenDeliveryState {
-  /** fingerprint of the token this state belongs to; a replaced token starts fresh */
+/** Repositories (plain project keys, local only) delivered to a server, with the last send; at most MAX_REPOS. */
+export type SeenRepos = Record<string, string>;
+export const MAX_REPOS = 200;
+
+/** Delivery state of one server (state/delivery.json `servers[<host>]`). */
+export interface ServerDeliveryState {
+  /** fingerprint of the token this state belongs to; a new login starts fresh (the blocked flag goes with it) */
   token_fp: string;
   last_attempt_at: string | null;
   last_success_at: string | null;
@@ -22,11 +25,13 @@ export interface TokenDeliveryState {
   next_attempt_at: string | null;
   last_result: { accepted: number; duplicates: number; rejected: number } | null;
   blocked: Blocked | null;
+  /** repositories delivered (token list REPOSITORIES); kept across logins */
+  repos: SeenRepos;
 }
 
 export interface DeliveryFile {
-  v: 2;
-  tokens: Record<string, TokenDeliveryState>;
+  v: 3;
+  servers: Record<string, ServerDeliveryState>;
 }
 
 /** Cap drop counters (state/dropped.json), cumulative (C13); `shown_at` comes from state/dropped-shown.json. */
@@ -36,14 +41,16 @@ export interface DroppedCounters {
   last_at: string | null;
   /** when the SessionStart text last mentioned the drops */
   shown_at: string | null;
+  /** the two counters when the SessionStart text last mentioned them (it reports only what came since) */
+  shown_held: number;
+  shown_sendable: number;
 }
 
-const TOKEN_NAME_SHAPE = /^[a-z0-9-]{1,63}$/;
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 const str = (v: unknown): string | null => (typeof v === 'string' ? v : null);
 const count = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0);
 
-function freshState(fp: string): TokenDeliveryState {
+function freshState(fp: string, repos: SeenRepos = {}): ServerDeliveryState {
   return {
     token_fp: fp,
     last_attempt_at: null,
@@ -53,6 +60,7 @@ function freshState(fp: string): TokenDeliveryState {
     next_attempt_at: null,
     last_result: null,
     blocked: null,
+    repos,
   };
 }
 
@@ -61,7 +69,14 @@ function parseBlocked(v: unknown): Blocked | null {
   return { status: v.status, at: str(v.at) ?? new Date(0).toISOString(), message: str(v.message) ?? '' };
 }
 
-function parseState(v: unknown): TokenDeliveryState | null {
+function parseRepos(v: unknown): SeenRepos {
+  const out: SeenRepos = {};
+  if (!isObject(v)) return out;
+  for (const [k, at] of Object.entries(v)) if (k && typeof at === 'string') out[k] = at;
+  return out;
+}
+
+function parseState(v: unknown): ServerDeliveryState | null {
   if (!isObject(v) || typeof v.token_fp !== 'string') return null;
   const r = v.last_result;
   return {
@@ -73,61 +88,56 @@ function parseState(v: unknown): TokenDeliveryState | null {
     next_attempt_at: str(v.next_attempt_at),
     last_result: isObject(r) ? { accepted: count(r.accepted), duplicates: count(r.duplicates), rejected: count(r.rejected) } : null,
     blocked: parseBlocked(v.blocked),
+    repos: parseRepos(v.repos),
   };
 }
 
-/** state/delivery.json; the flat 0.1.x file, garbage or a missing file read as empty. Never throws. */
+/** state/delivery.json; a 0.2 – 0.4 (per token name) file, garbage or a missing file read as empty. Never throws. */
 export function readDelivery(paths: Pick<AiObsPaths, 'delivery'>): DeliveryFile {
   const raw = readJsonFile<unknown>(paths.delivery);
-  const out: DeliveryFile = { v: 2, tokens: {} };
-  if (!isObject(raw) || raw.v !== 2 || !isObject(raw.tokens)) return out;
-  for (const [name, v] of Object.entries(raw.tokens)) {
-    if (!TOKEN_NAME_SHAPE.test(name)) continue;
+  const out: DeliveryFile = { v: 3, servers: {} };
+  if (!isObject(raw) || raw.v !== 3 || !isObject(raw.servers)) return out;
+  for (const [host, v] of Object.entries(raw.servers)) {
     const st = parseState(v);
-    if (st) out.tokens[name] = st;
+    if (st) out.servers[host] = st;
   }
   return out;
 }
 
-/** The token's state when it belongs to this token (fingerprint), else a fresh one. */
-export function tokenDelivery(file: DeliveryFile, entry: TokenEntry): TokenDeliveryState {
+/** The server's state when it belongs to its current token (fingerprint), else a fresh one (repositories kept). */
+export function serverDelivery(file: DeliveryFile, entry: Pick<ServerEntry, 'endpoint' | 'token'>): ServerDeliveryState {
   const fp = tokenFingerprint(entry.token);
-  const st = Object.prototype.hasOwnProperty.call(file.tokens, entry.name) ? file.tokens[entry.name] : undefined;
-  return st && st.token_fp === fp ? st : freshState(fp);
+  const host = endpointHost(entry.endpoint);
+  const st = Object.prototype.hasOwnProperty.call(file.servers, host) ? file.servers[host] : undefined;
+  if (st && st.token_fp === fp) return st;
+  return freshState(fp, st?.repos ?? {});
 }
 
-/** Read-modify-write of one token's state (atomic). Returns the new state. */
-export function writeTokenDelivery(
+/** Read-modify-write of one server's state (atomic). Returns the new state. */
+export function writeServerDelivery(
   paths: Pick<AiObsPaths, 'delivery'>,
-  entry: TokenEntry,
-  patch: Partial<Omit<TokenDeliveryState, 'token_fp'>>,
-): TokenDeliveryState {
+  entry: Pick<ServerEntry, 'endpoint' | 'token'>,
+  patch: Partial<Omit<ServerDeliveryState, 'token_fp'>>,
+): ServerDeliveryState {
   const file = readDelivery(paths);
-  const next = { ...tokenDelivery(file, entry), ...patch, token_fp: tokenFingerprint(entry.token) };
-  file.tokens[entry.name] = next;
+  const next = { ...serverDelivery(file, entry), ...patch, token_fp: tokenFingerprint(entry.token) };
+  const repos = Object.entries(next.repos).sort((a, b) => (a[1] < b[1] ? 1 : a[1] > b[1] ? -1 : 0)).slice(0, MAX_REPOS);
+  next.repos = Object.fromEntries(repos);
+  file.servers[endpointHost(entry.endpoint)] = next;
   writeJsonAtomic(paths.delivery, file, 0o600);
   return next;
 }
 
-export function clearBlocked(paths: Pick<AiObsPaths, 'delivery'>, entry: TokenEntry): void {
+export function clearBlocked(paths: Pick<AiObsPaths, 'delivery'>, entry: Pick<ServerEntry, 'endpoint' | 'token'>): void {
   const file = readDelivery(paths);
-  if (tokenDelivery(file, entry).blocked) writeTokenDelivery(paths, entry, { blocked: null });
+  if (serverDelivery(file, entry).blocked) writeServerDelivery(paths, entry, { blocked: null });
 }
 
-export function dropTokenDelivery(paths: Pick<AiObsPaths, 'delivery'>, name: string): void {
+export function dropServerDelivery(paths: Pick<AiObsPaths, 'delivery'>, endpoint: string): void {
   const file = readDelivery(paths);
-  if (!Object.prototype.hasOwnProperty.call(file.tokens, name)) return;
-  delete file.tokens[name];
-  writeJsonAtomic(paths.delivery, file, 0o600);
-}
-
-export function renameTokenDelivery(paths: Pick<AiObsPaths, 'delivery'>, from: string, to: string): void {
-  if (from === to) return;
-  const file = readDelivery(paths);
-  const st = file.tokens[from];
-  if (!st) return;
-  delete file.tokens[from];
-  file.tokens[to] = st;
+  const host = endpointHost(endpoint);
+  if (!Object.prototype.hasOwnProperty.call(file.servers, host)) return;
+  delete file.servers[host];
   writeJsonAtomic(paths.delivery, file, 0o600);
 }
 
@@ -144,8 +154,11 @@ export function readDropped(paths: Pick<AiObsPaths, 'dropped'>): DroppedCounters
     .filter((x): x is string => x !== null)
     .sort()
     .at(-1) ?? null;
-  if (!isObject(raw)) return { held_events: 0, sendable_events: 0, last_at: null, shown_at: shownAt };
-  return { held_events: count(raw.held_events), sendable_events: count(raw.sendable_events), last_at: str(raw.last_at), shown_at: shownAt };
+  const shownHeld = isObject(shown) ? count(shown.held_events) : 0;
+  const shownSendable = isObject(shown) ? count(shown.sendable_events) : 0;
+  const marks = { shown_at: shownAt, shown_held: shownHeld, shown_sendable: shownSendable };
+  if (!isObject(raw)) return { held_events: 0, sendable_events: 0, last_at: null, ...marks };
+  return { held_events: count(raw.held_events), sendable_events: count(raw.sendable_events), last_at: str(raw.last_at), ...marks };
 }
 
 /** Adds this cap run's drops to the cumulative counters (no write when both are 0). Called under worker.lock. */
@@ -158,14 +171,25 @@ export function recordDropped(paths: Pick<AiObsPaths, 'dropped'>, drops: { held:
     sendable_events: cur.sendable_events + Math.max(0, drops.sendable),
     last_at: now.toISOString(),
   };
-  const { shown_at: _s, ...counters } = next;
+  const { shown_at: _s, shown_held: _h, shown_sendable: _p, ...counters } = next;
   writeJsonAtomic(paths.dropped, counters, 0o600);
   return next;
 }
 
-/** The hook mentioned the drops in a SessionStart text (its own file: the counters are never rewritten here). */
-export function markDroppedShown(paths: Pick<AiObsPaths, 'dropped'>, now: Date = new Date()): void {
-  writeJsonAtomic(droppedShownPath(paths), { shown_at: now.toISOString() }, 0o600);
+/**
+ * The hook mentioned the drops in a SessionStart text, at these counter values (its own file: the counters are
+ * never rewritten here).
+ */
+export function markDroppedShown(
+  paths: Pick<AiObsPaths, 'dropped'>,
+  now: Date = new Date(),
+  counters?: Pick<DroppedCounters, 'held_events' | 'sendable_events'>,
+): void {
+  writeJsonAtomic(
+    droppedShownPath(paths),
+    { shown_at: now.toISOString(), held_events: counters?.held_events ?? 0, sendable_events: counters?.sendable_events ?? 0 },
+    0o600,
+  );
 }
 
 /** Total events the caps dropped (kept + sendable), for status / doctor / the hook (C13). */

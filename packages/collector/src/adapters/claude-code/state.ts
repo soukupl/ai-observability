@@ -1,6 +1,6 @@
 import type { TurnDigest } from '../../analysis/digest.js';
 import type { Outcome, UsageEntry } from '../../protocol-types.js';
-import type { StreamKey } from '../../queue.js';
+import type { StreamKey } from '../../routing.js';
 import type { SessionStateStore } from '../../state.js';
 import type { Agg } from './analyze.js';
 

@@ -7,7 +7,8 @@ export interface BudgetMailInput {
   limit: number;
   /** 'YYYY-MM-01' */
   period: string;
-  companyName: string;
+  /** deployment.name: mails name the deployment (ADR-0028). */
+  deploymentName: string;
   /** Team name and/or user label this budget applies to, e.g. "team Platform" or "alice@acme.test". */
   scope: string;
   appUrl: string;
@@ -44,9 +45,9 @@ export function buildBudgetEmail(i: BudgetMailInput): { subject: string; text: s
     'Budgets only notify; nothing is blocked.',
   ].filter(Boolean) as string[];
   const link = `${i.appUrl}/overview`;
-  const subject = `[ai-obs] ${i.threshold === 100 ? 'Budget reached' : 'Budget at 80 %'}: ${i.scope} (${i.companyName})`;
+  const subject = `[ai-obs] ${i.threshold === 100 ? 'Budget reached' : 'Budget at 80 %'}: ${i.scope} (${i.deploymentName})`;
 
-  const text = [headline, '', usedLine, ...note, '', `Open the dashboard: ${link}`, '', `-- ai-obs, ${i.companyName}`].join('\n');
+  const text = [headline, '', usedLine, ...note, '', `Open the dashboard: ${link}`, '', `-- ai-obs, ${i.deploymentName}`].join('\n');
   const color = i.threshold === 100 ? '#b42318' : '#b54708';
   const html = `<!doctype html><html><body style="font-family:system-ui,-apple-system,Segoe UI,sans-serif;color:#1f2937;line-height:1.5">
 <h2 style="margin:0 0 12px;color:${color}">${esc(headline)}</h2>
@@ -54,7 +55,7 @@ export function buildBudgetEmail(i: BudgetMailInput): { subject: string; text: s
 <div style="background:#e5e7eb;border-radius:4px;height:8px;width:320px;max-width:100%;margin:8px 0 12px"><div style="background:${color};height:8px;border-radius:4px;width:${Math.min(100, pct)}%"></div></div>
 ${note.map((n) => `<p style="margin:0 0 4px;color:#6b7280">${esc(n)}</p>`).join('\n')}
 <p style="margin:16px 0"><a href="${esc(link)}">Open the dashboard</a></p>
-<p style="margin:0;color:#9ca3af;font-size:12px">ai-obs, ${esc(i.companyName)}</p>
+<p style="margin:0;color:#9ca3af;font-size:12px">ai-obs, ${esc(i.deploymentName)}</p>
 </body></html>`;
   return { subject, text, html };
 }

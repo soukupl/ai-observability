@@ -14,8 +14,14 @@ DO $$
 DECLARE r text;
 BEGIN
   FOREACH r IN ARRAY ARRAY['app_web', 'app_ingest', 'app_worker', 'app_platform', 'app_definer'] LOOP
+    -- Roles are cluster-wide. Several databases of one cluster may run this migration at the same time (the test
+    -- suites do), so a concurrent CREATE of the same role is tolerated instead of failing on the duplicate name.
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
-      EXECUTE format('CREATE ROLE %I NOLOGIN NOINHERIT', r);
+      BEGIN
+        EXECUTE format('CREATE ROLE %I NOLOGIN NOINHERIT', r);
+      EXCEPTION WHEN duplicate_object OR unique_violation THEN
+        NULL;
+      END;
     END IF;
     IF NOT pg_has_role(current_user, r, 'MEMBER') THEN
       EXECUTE format('GRANT %I TO %I', r, current_user);

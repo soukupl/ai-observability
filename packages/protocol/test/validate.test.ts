@@ -238,7 +238,7 @@ describe('helpers', () => {
 
   it('tokenKind reads the prefix', () => {
     expect(tokenKind('aiobs_u_abc')).toBe('user');
-    expect(tokenKind('aiobs_c_abc')).toBe('company');
+    expect(tokenKind('aiobs_c_abc')).toBeNull();
     expect(tokenKind('aiobs_u_')).toBeNull();
     expect(tokenKind('aiobs_c_')).toBeNull();
     expect(tokenKind('Bearer x')).toBeNull();
@@ -251,28 +251,78 @@ describe('helpers', () => {
 
 describe('collectorConfigResponse', () => {
   const { collectorConfigResponse } = schemas;
-  const base = { project_naming: 'plain', min_collector_version: '0.1.0', project_salt: 'x'.repeat(32) };
+  const full = {
+    project_naming: 'plain',
+    project_salt: 'x'.repeat(32),
+    min_collector_version: '0.5.0',
+    deployment: { name: 'SPECTADO', slug: 'spectado' },
+    user: { email: 'dev@example.com', name: 'Dev', kind: 'person' },
+    teams: [{ slug: 'spectado', name: 'SPECTADO' }],
+    primary_team: 'spectado',
+    token: { expires_at: '2027-01-22T10:00:00Z', label: 'mac-ladislav', source: 'device' },
+  };
 
-  it('accepts company and user labels (user token)', () => {
+  it('accepts the full Appendix A response', () => {
+    expect(collectorConfigResponse.safeParse(full).success).toBe(true);
+  });
+
+  it('accepts a service user, no primary team, no expiry, no label, no salt', () => {
+    const { project_salt: _salt, ...noSalt } = full;
     const res = collectorConfigResponse.safeParse({
-      ...base,
-      company: { name: 'Acme', slug: 'acme' },
-      user: { email: 'alice@acme.example' },
+      ...noSalt,
+      user: { email: null, name: 'CI', kind: 'service' },
+      teams: [],
+      primary_team: null,
+      token: { expires_at: null, label: null, source: 'manual' },
     });
     expect(res.success).toBe(true);
-    if (!res.success) return;
-    expect(res.data.company).toEqual({ name: 'Acme', slug: 'acme' });
-    expect(res.data.user).toEqual({ email: 'alice@acme.example' });
   });
 
-  it('accepts user: null (company token) and an older server without the labels', () => {
-    expect(collectorConfigResponse.safeParse({ ...base, company: { name: 'Acme', slug: 'acme' }, user: null }).success).toBe(true);
-    const old = collectorConfigResponse.safeParse(base);
-    expect(old.success).toBe(true);
-    if (old.success) expect(old.data.company).toBeUndefined();
+  it('rejects a missing deployment, a bad kind or source, and drops company', () => {
+    const { deployment: _d, ...noDeployment } = full;
+    expect(collectorConfigResponse.safeParse(noDeployment).success).toBe(false);
+    expect(collectorConfigResponse.safeParse({ ...full, user: { ...full.user, kind: 'bot' } }).success).toBe(false);
+    expect(collectorConfigResponse.safeParse({ ...full, token: { ...full.token, source: 'x' } }).success).toBe(false);
+    expect(collectorConfigResponse.safeParse({ ...full, deployment: { name: 'A', slug: '' } }).success).toBe(false);
+    const res = collectorConfigResponse.safeParse({ ...full, company: { name: 'A', slug: 'a' } });
+    expect(res.success && 'company' in res.data).toBe(false);
+  });
+});
+
+describe('ingestResponse warnings', () => {
+  const { ingestResponse } = schemas;
+  const base = { accepted: 1, duplicates: 0, rejected: [] };
+
+  it('is valid without warnings (old servers) and with them', () => {
+    expect(ingestResponse.safeParse(base).success).toBe(true);
+    const w = { code: 'team_not_member', team: 'spectado', session_id: 'sess-1' };
+    expect(ingestResponse.safeParse({ ...base, warnings: [w] }).success).toBe(true);
+    expect(ingestResponse.safeParse({ ...base, warnings: [{ ...w, code: 'other' }] }).success).toBe(false);
   });
 
-  it('rejects an empty company slug', () => {
-    expect(collectorConfigResponse.safeParse({ ...base, company: { name: 'Acme', slug: '' } }).success).toBe(false);
+  it('echoes a malformed team in team_unknown, but never an empty or oversized one', () => {
+    const w = { code: 'team_unknown', team: 'Platform', session_id: 'sess-1' };
+    expect(ingestResponse.safeParse({ ...base, warnings: [w] }).success).toBe(true);
+    expect(ingestResponse.safeParse({ ...base, warnings: [{ ...w, team: '' }] }).success).toBe(false);
+    expect(ingestResponse.safeParse({ ...base, warnings: [{ ...w, team: 'a'.repeat(129) }] }).success).toBe(false);
+  });
+});
+
+describe('session_start project.team', () => {
+  it('accepts any short team string so a malformed slug falls back instead of losing the session (ADR-0030)', () => {
+    const start = {
+      event_id: '01J9ZQ8Y3N4X5V6W7Z8A9B0C10',
+      type: 'session_start',
+      harness: 'claude-code',
+      session_id: 's',
+      at: '2026-10-05T10:00:00Z',
+    };
+    const ok = schemas.ingestEvent.safeParse({ ...start, project: { key: 'github.com/acme/x', team: 'spectado-1' } });
+    expect(ok.success).toBe(true);
+    for (const team of ['Spectado', '', 'a_b', 'a'.repeat(64), 'a'.repeat(128)]) {
+      expect(schemas.ingestEvent.safeParse({ ...start, project: { key: 'github.com/acme/x', team } }).success).toBe(true);
+    }
+    expect(schemas.ingestEvent.safeParse({ ...start, project: { key: 'github.com/acme/x', team: 'a'.repeat(129) } }).success).toBe(false);
+    expect(schemas.ingestEvent.safeParse({ ...start, project: { key: 'github.com/acme/x', team: 7 } }).success).toBe(false);
   });
 });

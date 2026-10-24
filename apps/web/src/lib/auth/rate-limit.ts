@@ -24,6 +24,12 @@ export class RateLimiter {
     return entry.count <= this.limit;
   }
 
+  /** True when the key has used its whole budget for the current window (records nothing). */
+  exhausted(key: string): boolean {
+    const entry = this.hits.get(key);
+    return entry !== undefined && entry.resetAt > this.now() && entry.count >= this.limit;
+  }
+
   private prune(t: number) {
     for (const [k, v] of this.hits) if (v.resetAt <= t) this.hits.delete(k);
   }

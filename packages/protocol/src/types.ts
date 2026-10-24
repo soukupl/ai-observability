@@ -44,4 +44,5 @@ export type IngestBatchInput = Omit<z.input<typeof batchEnvelope>, 'events'> & {
 };
 export type IngestResponse = z.infer<typeof ingestResponse>;
 export type RejectedEvent = IngestResponse['rejected'][number];
+export type IngestWarning = NonNullable<IngestResponse['warnings']>[number];
 export type CollectorConfigResponse = z.infer<typeof collectorConfigResponse>;

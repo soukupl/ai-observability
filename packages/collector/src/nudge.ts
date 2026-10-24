@@ -1,19 +1,23 @@
 /**
- * The SessionStart nudge (collector design §4): when a repository has no usable token choice, a token is
- * rejected or unconfirmed, or kept events were dropped, the hook prints one short text into the agent's
- * context so the agent asks the user and runs `ai-obs use`. Imports only fs-level modules: the hook must stay fast.
+ * The SessionStart nudge: one short text the hook puts into the agent's context, only when (a) the
+ * repository has no dot-file server and two or more servers are registered (run `ai-obs link`), (b) the
+ * repository's server has no token, or an expired or refused one (run `ai-obs login --server …`), (c) its
+ * token expires within 14 days, (d) queued events were dropped, (e) the server ignored this project's
+ * dot-file team. Identifiers only (hosts, URLs, team slugs, the sanitized directory), at most 1000
+ * characters, once per session per text. Imports only fs-level modules: the hook must stay fast.
  */
 import { createHash } from 'node:crypto';
-import { mkdirSync, readdirSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { mkdirSync, readFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { shellQuote } from './adapters/hook-command.js';
-import { tokenKind, type TokenEntry } from './config.js';
-import { droppedTotal, markDroppedShown, readDropped } from './delivery.js';
+import { daysLeft, findServer, isExpired, loadConfig } from './config.js';
+import { droppedTotal, markDroppedShown, readDelivery, readDropped, serverDelivery } from './delivery.js';
+import { lookupDotFile } from './dotfile.js';
 import { writeFileAtomic } from './fsutil.js';
 import { nudgeMarkerPath, type AiObsPaths } from './paths.js';
 import { cachedPk, readPkCache } from './pk-cache.js';
-import { captureBinding, effectiveCompany, loadRouting, routable, streamDirName, OPEN, type OpenReason, type RoutingView } from './projects.js';
-import type { HarnessName } from './protocol-types.js';
+import { TEAM_SLUG_RE, type HarnessName, type IngestWarningCode } from './protocol-types.js';
+import { readWarnings } from './warnings.js';
 
 /**
  * How SessionStart output reaches the agent. Claude Code: JSON `hookSpecificOutput.additionalContext`.
@@ -33,30 +37,23 @@ export function formatSessionStartOutput(harness: HarnessName, text: string): st
 export const isSessionStart = (hook: string): boolean => hook.replace(/[_-]/g, '').toLowerCase() === 'sessionstart';
 
 export const NUDGE_MAX_CHARS = 1000;
+/** A token expiring within this many days is mentioned (brief Q6). */
+export const EXPIRY_NUDGE_DAYS = 14;
 const SAFE = /^[A-Za-z0-9._~:/@+ -]+$/;
 const HOST_RE = /^[a-z0-9.-]+(:\d+)?$/;
-const SLUG_RE = /^[a-z0-9-]{1,47}$/;
-const MAX_LIST = 10;
+const MAX_HOSTS = 10;
 const ASK = ' If you cannot ask the user (for example in a non-interactive session), do nothing.';
-
-/** A registered token as the nudge text may show it: validated identifiers only, never the token or a display name. */
-export interface NudgeToken {
-  name: string;
-  kind: 'user token' | 'company token';
-  slug?: string;
-  host?: string;
-}
+const DAY_MS = 86_400_000;
 
 export type NudgeMain =
-  | { kind: 'unassigned' | 'dangling'; key: string; tokens: NudgeToken[]; assignedTo?: string }
-  | { kind: 'open-backlog'; key: string; only: string }
-  | { kind: 'unverified'; name: string; reportedSlug?: string }
-  | { kind: 'config-damaged' | 'projects-unreadable' }
-  | { kind: 'no-tokens'; revoked: boolean }
-  | { kind: 'blocked'; name: string; status: 401 | 403; host?: string; slug?: string };
+  | { kind: 'link'; hosts: string[] }
+  | { kind: 'login'; server: string; reason: 'no-token' | 'expired' | 'rejected' }
+  | { kind: 'expiring'; server: string; days: number; date: string };
 
 export interface NudgeInput {
   main: NudgeMain | null;
+  /** the server ignored this project's dot-file team (latest ingest warning) */
+  warning?: { code: IngestWarningCode; team: string } | null;
   /** kept (held) events deleted by the size cap that the user has not been told about */
   droppedEvents?: number;
   /** sendable events deleted by the 30-day / size caps that the user has not been told about (C13) */
@@ -67,16 +64,14 @@ export interface NudgeInput {
   dir: string | null;
 }
 
-/** Project keys reach the agent as quoted data: anything outside SAFE becomes `?`, at most 200 chars. */
-export function safeKey(key: string): string {
-  let out = '';
-  for (const ch of key.slice(0, 200)) out += SAFE.test(ch) ? ch : '?';
-  return `"${out}"`;
-}
-
-function describeToken(t: NudgeToken): string {
-  const parts = [t.slug ? `company ${t.slug}` : null, t.kind, t.host ?? null].filter(Boolean);
-  return `"${t.name}" (${parts.join(', ')})`;
+/** A host as the text may show it, or null. */
+export function safeHost(endpoint: string): string | null {
+  try {
+    const h = new URL(endpoint).host.toLowerCase();
+    return HOST_RE.test(h) ? h : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Pure. Null when there is nothing to say. */
@@ -85,13 +80,9 @@ export function buildNudge(input: NudgeInput): string | null {
   const fullCmd = cmdSafe ? input.selfCommand!.map(shellQuote).join(' ') : 'ai-obs';
   const dirSafe = input.dir !== null && SAFE.test(input.dir);
 
-  /**
-   * `detail`: token descriptions (company, kind, host) or names only. `cmdForm`: the collector's command in every
-   * command (`full`), written once (`once`), or plain `ai-obs` (`plain`). `dirFlag`: `--project-dir` in the commands
-   * or "run it from the repository's root". `listMax`: how many tokens to name.
-   */
-  type Form = { detail: boolean; cmdForm: 'full' | 'once' | 'plain'; dirFlag: boolean; listMax: number };
-  const build = ({ detail, cmdForm, dirFlag: withDir, listMax }: Form): string | null => {
+  /** `cmdForm`: the collector's command in every command, written once, or plain `ai-obs`; `withDir`: `--project-dir` or "run it from the root". */
+  type Form = { cmdForm: 'full' | 'once' | 'plain'; withDir: boolean; listMax: number; hostOnly?: boolean };
+  const build = ({ cmdForm, withDir, listMax, hostOnly }: Form): string | null => {
     const form = cmdSafe && fullCmd !== 'ai-obs' ? cmdForm : 'plain';
     const cmd = form === 'full' ? fullCmd : 'ai-obs';
     const cmdNote =
@@ -99,55 +90,47 @@ export function buildNudge(input: NudgeInput): string | null {
     const dirOk = dirSafe && withDir;
     const dirFlag = dirOk ? ` --project-dir ${shellQuote(input.dir!)}` : '';
     const dirNote = dirOk ? '' : " Run it from this repository's root directory.";
-    const use = (name: string) => `${cmd} use ${name}${dirFlag}`;
-    const m = input.main;
+    const server = (endpoint: string) =>
+      !hostOnly && SAFE.test(endpoint) ? { text: endpoint, arg: shellQuote(endpoint) } : { text: safeHost(endpoint) ?? 'the server', arg: '<url>' };
     const parts: string[] = [];
+    const m = input.main;
     if (m) {
       switch (m.kind) {
-        case 'unassigned':
-        case 'dangling': {
-          const shown = m.tokens.slice(0, listMax);
-          const more = m.tokens.length - shown.length;
-          const list = `${shown.map((t) => (detail ? describeToken(t) : `"${t.name}"`)).join(', ')}${more > 0 ? ` and ${more} more` : ''}`;
-          if (m.kind === 'unassigned')
-            parts.push(
-              `ai-obs: this repository (${safeKey(m.key)}) has no ai-obs token yet, so its AI usage data is kept on this machine and not reported. Registered tokens: ${list}. Ask the user which company this repository's work belongs to, then run \`${use('<name>')}\`. If the user says it should not be reported, run \`${cmd} use --none${dirFlag}\` (this keeps the data on this machine, it deletes nothing).${dirNote} Do not choose without asking; ask only once in this session.${cmdNote}${ASK}`,
-            );
-          else
-            parts.push(
-              `ai-obs: this repository (${safeKey(m.key)}) was assigned to the token "${m.assignedTo ?? '?'}", which is no longer registered or now belongs to another company, so new usage data is kept on this machine. Registered tokens: ${list}. Ask the user which one to use, then run \`${use('<name>')}\`.${dirNote}${cmdNote}${ASK}`,
-            );
+        case 'link': {
+          const shown = m.hosts.slice(0, listMax);
+          const more = m.hosts.length - shown.length;
+          parts.push(
+            `ai-obs: this repository has no .ai-obs.json and this machine is logged in to ${m.hosts.length} ai-obs servers (${shown.join(', ')}${more > 0 ? ` and ${more} more` : ''}), so its AI usage data is kept on this machine and not reported. Ask the user which server and team this repository reports to, then run \`${cmd} link --server <url> --team <team>${dirFlag}\`.${dirNote} Do not choose without asking; ask only once in this session.${cmdNote}${ASK}`,
+          );
           break;
         }
-        case 'open-backlog':
+        case 'login': {
+          const s = server(m.server);
+          const what =
+            m.reason === 'no-token'
+              ? `this repository reports to ${s.text} (its .ai-obs.json), but this machine is not logged in to that server`
+              : m.reason === 'expired'
+                ? `the ai-obs token for ${s.text} has expired`
+                : `${s.text} rejected this machine's ai-obs token (expired or revoked)`;
           parts.push(
-            `ai-obs: usage data of this repository (${safeKey(m.key)}) recorded while several ai-obs tokens were registered is kept on this machine. Ask the user whether it belongs to "${m.only}"; if yes run \`${use(m.only)}\`, if it should not be reported run \`${cmd} use --none${dirFlag}\`.${dirNote}${cmdNote}${ASK}`,
+            `ai-obs: ${what}, so usage data of this repository is kept on this machine. Tell the user to run \`${cmd} login --server ${s.arg}\` themselves (it opens the browser to approve the login; never ask for a token).${cmdNote}`,
           );
           break;
-        case 'unverified':
+        }
+        case 'expiring': {
+          const s = server(m.server);
           parts.push(
-            `ai-obs: the token "${m.name}" used for this repository is not confirmed (${m.reportedSlug ? `the server reports company "${m.reportedSlug}"` : 'the server was not reachable'}), so usage data is kept on this machine. Tell the user to run \`${cmd} token confirm ${m.name}\`.${cmdNote}`,
+            `ai-obs: the ai-obs token for ${s.text} expires ${m.days <= 0 ? 'today' : `in ${m.days} day${m.days === 1 ? '' : 's'}`} (${m.date}). Tell the user to run \`${cmd} login --server ${s.arg}\` before then.${cmdNote}`,
           );
           break;
-        case 'config-damaged':
-          parts.push(`ai-obs: config.json contains malformed token entries, so usage data of repositories without an explicit token is kept on this machine. Tell the user to run \`${cmd} doctor\`.${cmdNote}`);
-          break;
-        case 'projects-unreadable':
-          parts.push(`ai-obs: projects.json cannot be read, so usage data of new sessions is kept on this machine. Tell the user to run \`${cmd} doctor\`.${cmdNote}`);
-          break;
-        case 'no-tokens':
-          parts.push(
-            `ai-obs is installed but has no usable token, so nothing is recorded${m.revoked ? ' (the token used before the upgrade was revoked)' : ''}. Tell the user to create a token in the ai-obs dashboard and run \`${cmd} init --token <token> --endpoint <url>\` themselves (do not ask for the token).${cmdNote}`,
-          );
-          break;
-        case 'blocked':
-          parts.push(
-            m.status === 401
-              ? `ai-obs: ${m.host ?? 'the server'} rejected the token "${m.name}" (HTTP 401: revoked, or the user left the company). Usage data for this repository is kept on this machine. Tell the user to create a new token in the ai-obs dashboard and run \`${cmd} token add --token <new token> --name ${m.name}\` themselves (do not ask for the token).${cmdNote}`
-              : `ai-obs: company "${m.slug ?? '?'}" is suspended on ${m.host ?? 'the server'}; usage data for this repository is kept on this machine until it is active again (\`${cmd} flush\` retries). Tell the user.${cmdNote}`,
-          );
-          break;
+        }
       }
+    }
+    const w = input.warning;
+    if (w && TEAM_SLUG_RE.test(w.team)) {
+      parts.push(
+        `ai-obs: the server ignored team "${w.team}" from this repository's .ai-obs.json (${w.code === 'team_not_member' ? 'the user is not a member of that team' : 'no team has that slug'}), so the user's primary team is used, or no team if they have none. Tell the user (\`${cmd} status\`).`,
+      );
     }
     if (input.droppedEvents && input.droppedEvents > 0)
       parts.push(`Note: ai-obs deleted ${Math.floor(input.droppedEvents)} kept events because its local queue reached the 50 MB cap; tell the user (\`${cmd} status\`).`);
@@ -156,16 +139,15 @@ export function buildNudge(input: NudgeInput): string | null {
     return parts.length ? parts.join(' ') : null;
   };
 
-  // Shorten in this order so the agent can still offer every company: token details first, then the repeated
-  // command (once, then not at all), then --project-dir, and only then the number of tokens named.
+  // Shorten: the repeated command first (once, then not at all), then --project-dir, then the hosts named.
   const attempts: Form[] = [
-    { detail: true, cmdForm: 'full', dirFlag: true, listMax: MAX_LIST },
-    { detail: false, cmdForm: 'full', dirFlag: true, listMax: MAX_LIST },
-    { detail: false, cmdForm: 'once', dirFlag: true, listMax: MAX_LIST },
-    { detail: false, cmdForm: 'plain', dirFlag: true, listMax: MAX_LIST },
-    { detail: false, cmdForm: 'plain', dirFlag: false, listMax: MAX_LIST },
+    { cmdForm: 'full', withDir: true, listMax: MAX_HOSTS },
+    { cmdForm: 'once', withDir: true, listMax: MAX_HOSTS },
+    { cmdForm: 'plain', withDir: true, listMax: MAX_HOSTS },
+    { cmdForm: 'plain', withDir: false, listMax: MAX_HOSTS },
   ];
-  for (let n = MAX_LIST - 1; n >= 1; n--) attempts.push({ detail: false, cmdForm: 'plain', dirFlag: false, listMax: n });
+  for (let n = MAX_HOSTS - 1; n >= 1; n--) attempts.push({ cmdForm: 'plain', withDir: false, listMax: n });
+  attempts.push({ cmdForm: 'plain', withDir: false, listMax: 1, hostOnly: true }); // a long server URL: name its host only
   let text: string | null = null;
   for (const a of attempts) {
     text = build(a);
@@ -173,42 +155,6 @@ export function buildNudge(input: NudgeInput): string | null {
   }
   return text === null ? null : text.slice(0, NUDGE_MAX_CHARS);
 }
-
-function nudgeToken(view: RoutingView, t: TokenEntry): NudgeToken {
-  const slug = effectiveCompany(t, view.caches[t.name])?.slug;
-  const host = hostOf(t.endpoint);
-  return {
-    name: t.name,
-    kind: tokenKind(t.token) === 'company' ? 'company token' : 'user token',
-    ...(slug && SLUG_RE.test(slug) ? { slug } : {}),
-    ...(host ? { host } : {}),
-  };
-}
-
-function hostOf(endpoint: string): string | undefined {
-  try {
-    const h = new URL(endpoint).host.toLowerCase();
-    return HOST_RE.test(h) ? h : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-const hasSegments = (dir: string): boolean => {
-  try {
-    return readdirSync(dir).some((f) => f.endsWith('.ndjson'));
-  } catch {
-    return false;
-  }
-};
-
-const hasOpenStreams = (paths: AiObsPaths): boolean => {
-  try {
-    return readdirSync(paths.queueProjects).some((d) => d.startsWith('o-'));
-  } catch {
-    return false;
-  }
-};
 
 export interface NudgeContext {
   paths: AiObsPaths;
@@ -228,57 +174,56 @@ export const GIT_START_LIMIT_MS = 40;
 export const GIT_BUDGET_MS = 40;
 export const HOOK_BUDGET_MS = 80;
 
-const reasonOf = (r: OpenReason): 'unassigned' | 'dangling' | 'config-damaged' | 'projects-unreadable' => r;
+interface Decision {
+  main: NudgeMain | null;
+  /** the endpoint this repository's new sessions go to ('' = none chosen) */
+  endpoint: string | null;
+  /** the repository root (where `link` writes the dot file); null outside git */
+  root: string | null;
+}
 
-/** Decides the main text for this session (§4.1 steps 1-5). */
-async function decideMain(ctx: NudgeContext, view: RoutingView): Promise<NudgeMain | null> {
-  const { paths } = ctx;
-  const T = view.config.tokens;
-  if (!T.length) return { kind: 'no-tokens', revoked: !!(view.config.legacy || view.config.legacyToken) };
+/** (a) – (c): no network, local files only. */
+function decideMain(ctx: NudgeContext): Decision | null {
+  const config = loadConfig(ctx.paths);
+  if (!config) return null;
+  const dot = lookupDotFile(ctx.cwd, { cache: ctx.paths });
+  const root = dot.root;
+  const servers = config.servers;
+  if (!dot.server && servers.length >= 2) {
+    const hosts = servers.map((s) => safeHost(s.endpoint)).filter((h): h is string => h !== null);
+    return { main: { kind: 'link', hosts }, endpoint: '', root };
+  }
+  const endpoint = dot.server ?? (servers.length === 1 ? servers[0]!.endpoint : null);
+  if (!endpoint) return { main: null, endpoint: null, root };
+  const entry = findServer(config, endpoint);
+  if (!entry) return { main: { kind: 'login', server: endpoint, reason: 'no-token' }, endpoint, root };
+  if (isExpired(entry, ctx.now)) return { main: { kind: 'login', server: endpoint, reason: 'expired' }, endpoint, root };
+  let blocked = false;
+  try {
+    blocked = !!serverDelivery(readDelivery(ctx.paths), entry).blocked;
+  } catch {
+    blocked = false;
+  }
+  if (blocked) return { main: { kind: 'login', server: endpoint, reason: 'rejected' }, endpoint, root };
+  const days = daysLeft(entry, ctx.now);
+  if (days !== null && Date.parse(entry.expires_at!) - ctx.now <= EXPIRY_NUDGE_DAYS * DAY_MS) {
+    return { main: { kind: 'expiring', server: endpoint, days, date: entry.expires_at!.slice(0, 10) }, endpoint, root };
+  }
+  return { main: null, endpoint, root };
+}
 
-  const projectsHaveEntries = view.projects.status !== 'ok' || Object.keys(view.projects.entries).length > 0;
-  const needKey = T.length >= 2 || projectsHaveEntries || view.config.invalidTokens.length > 0 || hasOpenStreams(paths);
-
-  let pk: string | null = null;
-  if (needKey) {
-    pk = cachedPk(readPkCache(paths), ctx.cwd); // only while the directory is still the same repository
-    if (pk === null) {
-      const elapsed = ctx.perfNow() - ctx.startedAt;
-      if (elapsed < GIT_START_LIMIT_MS) pk = await ctx.resolveProjectKey(ctx.cwd, { timeoutMs: Math.min(GIT_BUDGET_MS, HOOK_BUDGET_MS - elapsed), bounded: true });
-    }
-    if (pk === null) return null; // no key, no guessing: the worker fills the cache, so the next session asks
+/** (e): the latest warning of this project, for the server its new sessions go to. Git only when a warning exists. */
+async function decideWarning(ctx: NudgeContext, endpoint: string | null): Promise<NudgeInput['warning']> {
+  if (!endpoint) return null;
+  const warnings = readWarnings(ctx.paths);
+  if (!Object.keys(warnings).length) return null;
+  let pk = cachedPk(readPkCache(ctx.paths), ctx.cwd);
+  if (pk === null) {
+    const elapsed = ctx.perfNow() - ctx.startedAt;
+    if (elapsed < GIT_START_LIMIT_MS) pk = await ctx.resolveProjectKey(ctx.cwd, { timeoutMs: Math.min(GIT_BUDGET_MS, HOOK_BUDGET_MS - elapsed), bounded: true });
   }
-
-  const d = captureBinding(view, pk, ctx.now);
-  if (d.kind === 'drop') return null;
-  if (d.bind.kind === 'open') {
-    const reason = reasonOf(d.openReason ?? 'unassigned');
-    if (reason === 'config-damaged' || reason === 'projects-unreadable') return { kind: reason };
-    const tokens = T.slice(0, 50).map((t) => nudgeToken(view, t));
-    if (reason === 'dangling') {
-      const a = pk !== null && view.projects.status === 'ok' ? view.projects.entries[pk] : undefined;
-      const name = a && a.token !== null && /^[a-z0-9-]{1,63}$/.test(a.token) ? a.token : undefined;
-      return { kind: 'dangling', key: pk ?? '', tokens, ...(name ? { assignedTo: name } : {}) };
-    }
-    return { kind: 'unassigned', key: pk ?? '', tokens };
-  }
-  const boundName = d.bind.name;
-  const t = T.find((x) => x.name === boundName);
-  if (!t) return null;
-  const blocked = view.blocked[t.name];
-  if (blocked) {
-    const slug = effectiveCompany(t, view.caches[t.name])?.slug;
-    const host = hostOf(t.endpoint);
-    return { kind: 'blocked', name: t.name, status: blocked.status, ...(host ? { host } : {}), ...(slug && SLUG_RE.test(slug) ? { slug } : {}) };
-  }
-  const r = routable(t, view.caches[t.name]);
-  if (r !== 'ok') {
-    const reported = view.caches[t.name]?.company?.slug;
-    return { kind: 'unverified', name: t.name, ...(reported && SLUG_RE.test(reported) ? { reportedSlug: reported } : {}) };
-  }
-  const explicit = pk !== null && view.projects.status === 'ok' && Object.prototype.hasOwnProperty.call(view.projects.entries, pk);
-  if (pk !== null && !explicit && hasSegments(join(paths.queueProjects, streamDirName(pk, OPEN)))) return { kind: 'open-backlog', key: pk, only: t.name };
-  return null;
+  const w = pk !== null && Object.prototype.hasOwnProperty.call(warnings, pk) ? warnings[pk] : undefined;
+  return w && w.endpoint === endpoint ? { code: w.code, team: w.team } : null;
 }
 
 export interface Nudge {
@@ -287,21 +232,22 @@ export interface Nudge {
   commit: () => void;
 }
 
-/** The SessionStart nudge for this session, or null (§4.1). Never throws. */
+/** The SessionStart nudge for this session, or null. Never throws. */
 export async function computeNudge(ctx: NudgeContext): Promise<Nudge | null> {
-  const view = loadRouting(ctx.paths);
-  if (!view) return null;
-  const main = await decideMain(ctx, view);
+  const d = decideMain(ctx);
+  if (!d) return null;
+  const warning = await decideWarning(ctx, d.endpoint);
   let droppedEvents = 0;
   let droppedSendable = 0;
   let droppedShown = false;
   const dropped = readDropped(ctx.paths);
   if (droppedTotal(dropped) > 0 && dropped.last_at && (!dropped.shown_at || dropped.last_at > dropped.shown_at)) {
-    droppedEvents = dropped.held_events;
-    droppedSendable = dropped.sendable_events;
+    // the counters are lifetime totals: report only what was dropped since the text last mentioned it
+    droppedEvents = Math.max(0, dropped.held_events - dropped.shown_held);
+    droppedSendable = Math.max(0, dropped.sendable_events - dropped.shown_sendable);
     droppedShown = true;
   }
-  const text = buildNudge({ main, droppedEvents, droppedSendable, selfCommand: ctx.selfCommand, dir: ctx.cwd });
+  const text = buildNudge({ main: d.main, warning, droppedEvents, droppedSendable, selfCommand: ctx.selfCommand, dir: d.root ?? ctx.cwd });
   if (text === null) return null;
 
   const markerFile = nudgeMarkerPath(ctx.paths, ctx.sessionId);
@@ -326,7 +272,7 @@ export async function computeNudge(ctx: NudgeContext): Promise<Nudge | null> {
       }
       if (droppedShown) {
         try {
-          markDroppedShown(ctx.paths, new Date(ctx.now));
+          markDroppedShown(ctx.paths, new Date(ctx.now), dropped);
         } catch {
           /* ignore */
         }

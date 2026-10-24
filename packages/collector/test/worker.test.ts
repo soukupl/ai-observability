@@ -6,17 +6,15 @@ import type { StreamHolder } from '../src/adapters/types.js';
 import { buildDigest } from '../src/analysis/digest.js';
 import { listStagedDigests, pendingSummariesPath, stageDigests } from '../src/analysis/summaries.js';
 import { writeCache } from '../src/cc-cache.js';
-import { newMachineConfig, saveConfig, type TokenEntry } from '../src/config.js';
+import { newMachineConfig, saveConfig } from '../src/config.js';
 import { sessionStartEvent, turnEvent } from '../src/events.js';
 import { writeJob } from '../src/jobs.js';
 import { nullLogger } from '../src/log.js';
 import { tryLock } from '../src/lock.js';
-import { streamDirName } from '../src/projects.js';
-import type { StreamKey } from '../src/queue.js';
+import { streamDirName, type StreamKey } from '../src/routing.js';
 import { ulid } from '../src/ulid.js';
 import { runWorker } from '../src/worker.js';
-import { ACME, cleanupHomes, fakeAdapter, okResponder, startServer, tmpHome, writeTestConfig } from './helpers.js';
-import { bound, OPEN } from './queue-helpers.js';
+import { ccValue, cleanupHomes, fakeAdapter, okResponder, startServer, tmpHome, writeTestConfig } from './helpers.js';
 
 const closers: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -86,18 +84,18 @@ describe('runWorker', () => {
     expect(readdirSync(paths.jobs)).toEqual([]);
   });
 
-  it('queues the plain key bound to the token and hashes it with the company salt only at send time', async () => {
-    const salt = 'company-salt-0123456789';
+  it('queues the plain key in the server’s stream and hashes it with the deployment salt only at send time', async () => {
+    const salt = 'deployment-salt-0123456789';
     const srv = await startServer((req) =>
       req.url === '/api/v1/collector-config'
-        ? { status: 200, body: { project_naming: 'hashed', min_collector_version: '0.0.1', project_salt: salt, company: ACME, user: null } }
+        ? { status: 200, body: ccValue({ naming: 'hashed', salt }) }
         : { status: 200, body: { accepted: 1, duplicates: 0, rejected: [] } },
     );
     closers.push(srv.close);
     const paths = tmpHome();
     const config = writeTestConfig(paths, srv.url);
-    // a stale cache: the flush fetches the company's real (hashed, salted) config
-    writeCache(paths, config.tokens[0] as TokenEntry, { fetched_at: new Date(0).toISOString() });
+    // a stale cache: the flush fetches the deployment's real (hashed, salted) config
+    writeCache(paths, config.servers[0]!, { fetched_at: new Date(0).toISOString() });
     writeJob(paths.jobs, job('Stop'), 1000);
     const seen: unknown[][] = [];
     const resolveProject = async (...args: unknown[]) => (seen.push(args), 'github.com/acme/billing');
@@ -105,9 +103,8 @@ describe('runWorker', () => {
     const r = await runWorker({ paths, adapters: [adapter], flush: false, resolveProject });
     expect(r.failed).toBe(0);
     expect(seen).toEqual([['/work/repo']]);
-    const bind = bound('acme', srv.url, 'acme', 'aiobs_u_testtoken');
-    const dir = join(paths.queueProjects, streamDirName('github.com/acme/billing', bind));
-    expect(JSON.parse(readFileSync(join(dir, 'stream.json'), 'utf8'))).toMatchObject({ pk: 'github.com/acme/billing', bind: { kind: 'token', name: 'acme', id: { company_slug: 'acme' } } });
+    const dir = join(paths.queueProjects, streamDirName('github.com/acme/billing', srv.url, ''));
+    expect(JSON.parse(readFileSync(join(dir, 'stream.json'), 'utf8'))).toMatchObject({ key: 'github.com/acme/billing', endpoint: srv.url, team: '' });
     expect(readFileSync(join(dir, readdirSync(dir).find((f) => f.endsWith('.ndjson'))!), 'utf8')).toContain('"key":"github.com/acme/billing"');
 
     const flushed = await runWorker({ paths, adapters: [adapter] });
@@ -117,11 +114,11 @@ describe('runWorker', () => {
     expect(ev!.project).toEqual({ key: `sha256:${createHmac('sha256', salt).update('github.com/acme/billing').digest('hex')}` });
   });
 
-  it('runs another flush when projects.json changed during the flush (C17)', async () => {
+  it('runs another flush when config.json changed during the flush (C17)', async () => {
     let posts = 0;
     const paths = tmpHome();
     const srv = await startServer((req) => {
-      if (req.url === '/api/v1/ingest' && ++posts === 1) writeFileSync(paths.projects, '{}\n');
+      if (req.url === '/api/v1/ingest' && ++posts === 1) writeFileSync(paths.config, `${readFileSync(paths.config, 'utf8')}\n`);
       return okResponder()(req);
     });
     closers.push(srv.close);
@@ -175,7 +172,7 @@ describe('runWorker', () => {
     expect(readdirSync(paths.jobs)).toEqual([]);
   });
 
-  it('discards jobs while no token is registered (pre-upgrade config, C6)', async () => {
+  it('discards jobs while no server is registered (C6)', async () => {
     const paths = tmpHome();
     saveConfig(paths, newMachineConfig(null));
     writeJob(paths.jobs, job('Stop'), 1000);
@@ -223,7 +220,7 @@ function summarizingAdapter(summarize: (turnIds: string[]) => Promise<Map<string
 }
 
 const resolveProject = async () => 'github.com/acme/billing';
-const KEY: StreamKey = { kind: 'project', pk: 'github.com/acme/billing', bind: OPEN };
+const KEY: StreamKey = { kind: 'project', pk: 'github.com/acme/billing', endpoint: '', team: '' };
 const sentTypes = (srv: { received: Array<{ url: string; json: unknown }> }) =>
   srv.received.filter((x) => x.url === '/api/v1/ingest').map((x) => (x.json as { events: Array<{ type: string }> }).events.map((e) => e.type));
 const stagedOf = (paths: ReturnType<typeof tmpHome>) => listStagedDigests(paths.state, 'claude-code').map((f) => readFileSync(f, 'utf8'));

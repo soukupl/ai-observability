@@ -5,6 +5,7 @@ import { sql } from 'drizzle-orm';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { adminDbUrl, testDbName, testDbUrl } from './test-db.js';
 import { createDb, type Database } from '../src/client.js';
 import { migrationsFolder } from '../src/migrate.js';
 
@@ -14,18 +15,16 @@ import { migrationsFolder } from '../src/migrate.js';
  * (remaining turns marked updated) or deleted. Own database (ai_obs_m0002_test): migrates to 0001,
  * writes old-style rows, then applies 0002.
  */
-const base = new URL(process.env.TEST_DATABASE_URL || 'postgres://ai_obs:ai_obs@localhost:5432/ai_obs_test');
-base.pathname = '/ai_obs_m0002_test';
-const URL_ = base.toString();
-const adminUrl = new URL(URL_);
-adminUrl.pathname = '/postgres';
+const DB = testDbName('m0002');
+const URL_ = testDbUrl('m0002');
+const adminUrl = new URL(adminDbUrl());
 
 async function prepare(): Promise<string | null> {
   const admin = postgres(adminUrl.toString(), { max: 1, connect_timeout: 3, onnotice: () => {} });
   try {
     await admin`select 1`;
-    await admin.unsafe('drop database if exists "ai_obs_m0002_test" with (force)');
-    await admin.unsafe('create database "ai_obs_m0002_test"');
+    await admin.unsafe(`drop database if exists "${DB}" with (force)`);
+    await admin.unsafe(`create database "${DB}"`);
     return null;
   } catch (err) {
     return `Postgres not reachable (${(err as { code?: string }).code || (err as Error).message})`;
@@ -87,7 +86,7 @@ describe.skipIf(skip !== null)(skip ? `migration 0002 - SKIPPED: ${skip}` : 'mig
     await close?.();
     if (partial) rmSync(partial, { recursive: true, force: true });
     const admin = postgres(adminUrl.toString(), { max: 1, onnotice: () => {} });
-    await admin.unsafe('drop database if exists "ai_obs_m0002_test" with (force)').catch(() => {});
+    await admin.unsafe(`drop database if exists "${DB}" with (force)`).catch(() => {});
     await admin.end({ timeout: 1 }).catch(() => {});
   }, 30_000);
 

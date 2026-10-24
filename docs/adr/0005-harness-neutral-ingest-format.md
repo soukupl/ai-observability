@@ -1,3 +1,6 @@
+---
+spoor_id: b874a92b-2f81-4a61-a930-1a31852595ed
+---
 # ADR-0005: Harness-neutral ingest format; Claude Code and Codex first
 
 - **Status:** Accepted

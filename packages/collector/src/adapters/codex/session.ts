@@ -6,7 +6,7 @@ import { mergeUsage, primaryModel } from '../../analysis/tokens.js';
 import { mcpFromTools } from '../../analysis/usage.js';
 import { sessionEndEvent, sessionStartEvent, turnEvent, turnOutcomeEvent, type TurnInput } from '../../events.js';
 import type { IngestEvent, Outcome, ProjectRef, UsageEntry } from '../../protocol-types.js';
-import type { StreamKey } from '../../queue.js';
+import type { StreamKey } from '../../routing.js';
 import { addUsage, applyItem, newAcc, usageDelta, type RunAcc } from './accumulator.js';
 import { isRealPrompt, type RolloutItem, type SessionMeta, type TokenTotals } from './records.js';
 import type { ResolvedChildren } from './subagents.js';

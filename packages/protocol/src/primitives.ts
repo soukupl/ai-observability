@@ -5,6 +5,7 @@ import {
   MAX_SKILLS_PER_EVENT,
   MAX_SUMMARY_LENGTH,
   MAX_USAGE_NAME_LENGTH,
+  MAX_TEAM_REF_LENGTH,
   MCP_LATENCY_BUCKETS_MS,
   OUTCOME_STATUSES,
   PHASES,
@@ -42,6 +43,12 @@ export function projectKeyKind(key: string): 'plain' | 'hashed' {
 export const project = z.object({
   key: projectKey,
   name: z.string().min(1).max(200).optional(),
+  /**
+   * Team slug from the repository dot file in force at session start; absent or empty means no dot file. Collectors
+   * send a valid slug (TEAM_SLUG_RE), but ingest accepts any short string so a typo costs a `team_unknown` warning and
+   * a fallback team rather than the whole session_start (ADR-0030 R1, R2).
+   */
+  team: z.string().max(MAX_TEAM_REF_LENGTH).optional(),
 });
 
 /** Token counts for one model × effort pair. */
@@ -66,7 +73,7 @@ export const phasesMs = z.object(phaseShape);
 export const tools = z.record(z.string().min(1).max(128), count);
 
 /**
- * A skill, MCP server or MCP tool name: the harness's name in the company's `plain` project-naming
+ * A skill, MCP server or MCP tool name: the harness's name in the deployment's `plain` project-naming
  * mode, `sha256:<64 hex>` in `hashed` mode. No whitespace or control characters.
  */
 export const usageName = z

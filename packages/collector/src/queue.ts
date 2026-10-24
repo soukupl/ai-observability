@@ -5,14 +5,20 @@ import { ensureDir, errorMessage, readJsonFile, writeFileAtomic, writeJsonAtomic
 import { nullLogger, type Logger } from './log.js';
 import { isPathKey } from './project-key.js';
 import {
-  adoptKey,
+  keyDirName,
+  legacyTarget,
   resolveStream,
+  sendableNow,
   streamDirName,
   unresolvedDirName,
-  type Binding,
+  upgradeStreamKey,
   type RoutingView,
   type StreamIdentity,
-} from './projects.js';
+  type StreamKey,
+  type StreamTarget,
+} from './routing.js';
+import { TEAM_SLUG_RE } from './protocol-types.js';
+import type { CollectorConfig } from './config.js';
 import { MAX_BATCH_BYTES, MAX_BATCH_EVENTS, type IngestEvent } from './protocol-types.js';
 import { decodeTime, ulid } from './ulid.js';
 
@@ -260,20 +266,23 @@ export class EventQueue {
   }
 }
 
-// ---------------------------------------------------------------- streams (design §3.1)
+// ---------------------------------------------------------------- streams (brief appendix E)
 
 export { streamDirName, unresolvedDirName };
+export type { StreamKey };
 
-/** Where a session's events go, pinned once per session (C15): a project stream, or an unresolved one (git timed out, C16). */
-export type StreamKey = { kind: 'project'; pk: string; bind: Binding } | { kind: 'unresolved'; cwd: string; bind: Binding };
-
-/** One stream directory: `p/<o|t>-<id>/`, `u/<o|t>-<id>/`, the root segments (pre-upgrade) or a directory we cannot read (unknown). */
+/**
+ * One stream directory: `p/s-<id>/` (project), `u/s-<id>/` (unresolved), the root segments (0.1.x,
+ * pre-upgrade), a 0.2 – 0.4 directory (`p|u/o-`, `t-`) waiting for the migration, or a directory we cannot
+ * read (unknown).
+ */
 export interface StreamRef {
-  kind: 'project' | 'unresolved' | 'pre-upgrade' | 'unknown';
+  kind: 'project' | 'unresolved' | 'pre-upgrade' | 'legacy' | 'unknown';
   dir: string;
   pk?: string;
   cwd?: string;
-  bind?: Binding;
+  endpoint?: string;
+  team?: string;
 }
 export interface StreamStats extends QueueStats {
   stream: StreamRef;
@@ -288,13 +297,20 @@ export interface CapResult {
   droppedFiles: number;
   droppedBytes: number;
   droppedEvents: number;
-  /** of droppedEvents: events of streams that do not resolve to a sendable token */
+  /** of droppedEvents: events of streams that could not be sent now */
   droppedHeldEvents: number;
 }
 export interface StoreOptions extends QueueOptions {
   /** fresh routing per call (loadRouting, C17); null = not configured */
   routing: () => RoutingView | null;
   dropped?: DroppedRecorder;
+}
+export interface LegacyMigration {
+  /** 0.2 – 0.4 stream directories converted */
+  streams: number;
+  events: number;
+  /** of `events`: converted to streams with no server chosen (several servers registered) */
+  unassignedEvents: number;
 }
 
 const STREAM_FILE = 'stream.json';
@@ -307,26 +323,16 @@ const TMP_STALE_MS = 10 * 60_000;
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 const nonEmpty = (v: unknown): v is string => typeof v === 'string' && v.length > 0;
+const isTeam = (v: unknown): v is string => v === '' || (typeof v === 'string' && TEAM_SLUG_RE.test(v));
 
-function parseBinding(v: unknown): Binding | null {
-  if (!isObject(v)) return null;
-  if (v.kind === 'open') return { kind: 'open' };
-  if (v.kind !== 'token' || !nonEmpty(v.name) || !isObject(v.id)) return null;
-  const id = v.id;
-  if (!nonEmpty(id.endpoint) || !nonEmpty(id.token_fp)) return null;
-  if (id.company_slug !== undefined && !nonEmpty(id.company_slug)) return null;
-  return {
-    kind: 'token',
-    id: { endpoint: id.endpoint, ...(nonEmpty(id.company_slug) ? { company_slug: id.company_slug } : {}), token_fp: id.token_fp },
-    name: v.name,
-  };
-}
-
-/** The routing identity of a stream directory (design §3.2 table B input). */
+/** The routing identity of a stream directory. */
 export function identityOfRef(ref: StreamRef): StreamIdentity {
-  if (ref.kind === 'project' && ref.pk !== undefined && ref.bind) return { kind: 'project', pk: ref.pk, bind: ref.bind };
-  if (ref.kind === 'unresolved' && ref.cwd !== undefined && ref.bind) return { kind: 'unresolved', cwd: ref.cwd, bind: ref.bind };
+  if (ref.kind === 'project' && ref.pk !== undefined && ref.endpoint !== undefined && ref.team !== undefined)
+    return { kind: 'project', pk: ref.pk, endpoint: ref.endpoint, team: ref.team };
+  if (ref.kind === 'unresolved' && ref.cwd !== undefined && ref.endpoint !== undefined && ref.team !== undefined)
+    return { kind: 'unresolved', cwd: ref.cwd, endpoint: ref.endpoint, team: ref.team };
   if (ref.kind === 'pre-upgrade') return { kind: 'pre-upgrade' };
+  if (ref.kind === 'legacy') return { kind: 'legacy' };
   return { kind: 'unknown' };
 }
 
@@ -337,11 +343,11 @@ export function loggableKey(pk: string | undefined): string | undefined {
 }
 
 /**
- * The queue as streams keyed by (project key, binding) (design §3.1, C1). Each stream is an EventQueue
- * directory with a `stream.json`; root segments are the frozen pre-upgrade stream, which no API writes.
- * Mutation is serialized by the worker lock, like EventQueue. The store enforces the caps across all
- * streams: the 30-day age cap only for streams that resolve to a sendable token, counted from when
- * they became sendable; the size cap for all (C13).
+ * The queue as streams keyed by (project key, server endpoint, team) (brief appendix E). Each stream is an
+ * EventQueue directory with a `stream.json`; root segments are the frozen pre-upgrade stream, which no API
+ * writes. Mutation is serialized by the worker lock, like EventQueue. The store enforces the caps across
+ * all streams: the 30-day age cap only for streams that can be sent now (a registered server whose token is
+ * neither refused nor expired), counted from when they became sendable; the size cap for all (C13).
  */
 export class QueueStore {
   readonly projectsDir: string;
@@ -368,17 +374,14 @@ export class QueueStore {
   }
 
   /**
-   * Appends events to the key's stream (created on first use) and enforces the caps. A null key (no
-   * cwd, C16) or a project the user opted out of (`use --none`, C19) drops the events (logged).
+   * Appends events to the key's stream (created on first use) and enforces the caps. A null key (no cwd,
+   * C16; nothing to record) drops the events (logged). A key stored by 0.2 – 0.4 is converted first.
    */
-  enqueue(events: readonly IngestEvent[], key: StreamKey | null): void {
+  enqueue(events: readonly IngestEvent[], rawKey: StreamKey | null): void {
     if (!events.length) return;
+    const key = this.current(rawKey);
     if (!key) {
-      this.log.warn('queue: events without a project key dropped', { count: events.length });
-      return;
-    }
-    if (key.kind === 'project' && this.optedOut(key.pk)) {
-      this.log.info('queue: project opted out (ai-obs use --none), events dropped', { count: events.length });
+      this.log.warn('queue: events without a stream key dropped', { count: events.length });
       return;
     }
     let ref = this.ensure(key);
@@ -408,27 +411,83 @@ export class QueueStore {
     return new EventQueue(ref.dir, { ...q, autoCap: false, deadDir: this.deadDir });
   }
 
-  /**
-   * An unresolved stream whose key is now known moves into its project stream (binding per adoptKey):
-   * segments are renamed into the target, the u/ directory is removed. A project the user opted out of
-   * keeps the events (held `opted-out` until `--discard-queued`, C19).
-   */
+  /** An unresolved stream whose key is now known moves into its project stream (same server and team). */
   adopt(ref: StreamRef, pk: string): void {
-    if (ref.kind !== 'unresolved' || !ref.bind) return;
-    const view = this.opts.routing();
-    if (!view) return;
-    const target = this.ensure({ kind: 'project', pk, bind: adoptKey(view, pk, ref.bind).bind });
+    if (ref.kind !== 'unresolved' || ref.endpoint === undefined || ref.team === undefined) return;
+    const target = this.ensure({ kind: 'project', pk, endpoint: ref.endpoint, team: ref.team });
     if (!target) return;
     this.moveSegments(ref.dir, target.dir);
     rmSync(ref.dir, { recursive: true, force: true });
   }
 
   /**
+   * `ai-obs link`: the key's streams recorded while no server was chosen (endpoint '') move into the stream
+   * of the linked server and team. Streams already bound to a server keep it (capture-time pinning).
+   * Returns the number of events moved.
+   */
+  retarget(pk: string, to: StreamTarget): number {
+    if (to.endpoint === '') return 0;
+    const sources = this.scan(false).filter((x) => x.ref.kind === 'project' && x.ref.pk === pk && x.ref.endpoint === '');
+    if (!sources.length) return 0;
+    const target = this.ensure({ kind: 'project', pk, ...to });
+    if (!target) return 0;
+    let moved = 0;
+    for (const { ref } of sources) {
+      if (ref.dir === target.dir) continue;
+      moved += this.moveSegments(ref.dir, target.dir);
+      rmSync(ref.dir, { recursive: true, force: true });
+    }
+    if (moved) this.log.info('queue: events of a repository without a server moved to its linked server', { events: moved, project: loggableKey(pk) });
+    return moved;
+  }
+
+  /**
+   * Converts the 0.2 – 0.4 stream directories (`o-` open, `t-` token-bound; under p/ and u/) into `s-`
+   * streams (brief appendix E): a token binding becomes its endpoint with no team, an open stream the only
+   * server or, with several, no server ('' → held `no-server` until `ai-obs link`). Segments keep their
+   * ULID names, so time order and event ids are unchanged. A directory without a readable stream.json is
+   * left as it is. Caller holds the worker lock.
+   */
+  migrateLegacy(config: Pick<CollectorConfig, 'servers'>): LegacyMigration {
+    const out: LegacyMigration = { streams: 0, events: 0, unassignedEvents: 0 };
+    for (const [parent, kind] of [
+      [this.projectsDir, 'project'],
+      [this.unresolvedDir, 'unresolved'],
+    ] as const) {
+      for (const name of this.dirNames(parent)) {
+        if (!/^[ot]-/.test(name)) continue;
+        const dir = join(parent, name);
+        const raw = readJsonFile<unknown>(join(dir, STREAM_FILE));
+        const target = isObject(raw) ? legacyTarget(raw.bind, config) : null;
+        if (!isObject(raw) || !target) continue;
+        let key: StreamKey | null = null;
+        if (kind === 'project' && nonEmpty(raw.pk)) key = { kind, pk: raw.pk, ...target };
+        if (kind === 'unresolved' && nonEmpty(raw.cwd)) key = { kind, cwd: raw.cwd, ...target };
+        if (!key) continue;
+        const dest = this.ensure(key);
+        if (!dest) continue;
+        const events = this.moveSegments(dir, dest.dir);
+        rmSync(dir, { recursive: true, force: true });
+        out.streams++;
+        out.events += events;
+        if (target.endpoint === '') out.unassignedEvents += events;
+      }
+    }
+    if (out.streams) this.log.info('queue: 0.4 streams converted', { ...out });
+    return out;
+  }
+
+  /** Whether any 0.2 – 0.4 stream directory is left. */
+  hasLegacy(): boolean {
+    return [this.projectsDir, this.unresolvedDir].some((p) => this.dirNames(p).some((n) => /^[ot]-/.test(n)));
+  }
+
+  /**
    * Records whether a stream is sendable now (stream.json `sendable_since` / `seen_at`) and returns the
    * start of its current sendable period (ms), or null while it is held. The 30-day age cap counts from
-   * there (C13), so data released after being held (a `use`, a confirmed or unblocked token) gets its
-   * full 30 days from the release. A stream not seen for more than SEEN_GAP_MS (the collector did not
-   * run) starts a new period: a hold in that gap could not be seen. Never throws.
+   * there (C13), so data released after being held (a login, a new token, a link) gets its full 30 days
+   * from the release. A stream not seen for more than SEEN_GAP_MS (the collector did not run) starts a new
+   * period: a hold in that gap could not be seen. Never throws.
    */
   observe(ref: StreamRef, sendable: boolean): number | null {
     if (ref.kind !== 'project' && ref.kind !== 'unresolved') return null;
@@ -457,38 +516,6 @@ export class QueueStore {
     return since;
   }
 
-  /**
-   * `use <name> --move-queued` (C12): merges the key's other token-bound streams into the stream bound
-   * to `to`. Returns the number of events moved.
-   */
-  rebind(pk: string, to: Binding): number {
-    const sources = this.scan(false).filter(
-      (x) => x.ref.kind === 'project' && x.ref.pk === pk && x.ref.bind?.kind === 'token' && x.ref.dir !== join(this.projectsDir, streamDirName(pk, to)),
-    );
-    if (!sources.length) return 0;
-    const target = this.ensure({ kind: 'project', pk, bind: to });
-    if (!target) return 0;
-    let moved = 0;
-    for (const { ref } of sources) {
-      moved += this.moveSegments(ref.dir, target.dir);
-      rmSync(ref.dir, { recursive: true, force: true });
-    }
-    this.log.info('queue: queued events moved to another token', { events: moved, project: loggableKey(pk) });
-    return moved;
-  }
-
-  /** `use --discard-queued`: deletes every stream of the key. Returns the number of events deleted. */
-  dropKey(pk: string): number {
-    let events = 0;
-    for (const { ref } of this.scan(true)) {
-      if (ref.kind !== 'project' || ref.pk !== pk) continue;
-      events += this.countDir(ref.dir);
-      rmSync(ref.dir, { recursive: true, force: true });
-    }
-    if (events) this.log.info('queue: queued events discarded', { events, project: loggableKey(pk) });
-    return events;
-  }
-
   /** Removes stream directories without segments and stale `.tmp-*` directories. */
   prune(): void {
     for (const parent of [this.projectsDir, this.unresolvedDir]) {
@@ -508,10 +535,10 @@ export class QueueStore {
   }
 
   /**
-   * Caps across all streams (C13): segments older than maxAge are dropped only for streams that resolve
-   * to a sendable (non-blocked) token and have been sendable for longer than maxAge (observe); then the
-   * globally oldest segments go until the total is under maxBytes (never the newest segment of
-   * `justWritten`). Dropped events are counted (held / sendable) into the `dropped` recorder and logged.
+   * Caps across all streams (C13): segments older than maxAge are dropped only for streams that can be sent
+   * now and have been sendable for longer than maxAge (observe); then the globally oldest segments go until
+   * the total is under maxBytes (never the newest segment of `justWritten`). Dropped events are counted
+   * (held / sendable) into the `dropped` recorder and logged.
    */
   enforceCap(justWritten?: StreamRef): CapResult {
     const result: CapResult = { droppedFiles: 0, droppedBytes: 0, droppedEvents: 0, droppedHeldEvents: 0 };
@@ -528,8 +555,7 @@ export class QueueStore {
     const sendable = (ref: StreamRef): boolean => {
       let v = sendableByDir.get(ref.dir);
       if (v === undefined) {
-        const r = view ? resolveStream(view, identityOfRef(ref)) : null;
-        v = !!view && r?.kind === 'token' && !Object.prototype.hasOwnProperty.call(view.blocked, r.token.name);
+        v = !!view && sendableNow(view, resolveStream(view, identityOfRef(ref)));
         sendableByDir.set(ref.dir, v);
       }
       return v;
@@ -559,7 +585,7 @@ export class QueueStore {
       else held += events;
     };
     all.sort((a, b) => a.seg.createdAt - b.seg.createdAt || (a.seg.file < b.seg.file ? -1 : a.seg.file > b.seg.file ? 1 : 0));
-    // age cap: only data that has been sendable for the whole period (held time does not count, C13)
+    // age cap: only data that has been sendable for the whole period (held, refused and expired time does not count, C13)
     for (const x of all) {
       if (x.seg.createdAt >= cutoff) continue;
       const since = sendableSince(x.ref);
@@ -597,11 +623,12 @@ export class QueueStore {
 
   // -------------------------------------------------------------- internals
 
-  private optedOut(pk: string): boolean {
-    const view = this.opts.routing();
-    if (!view || view.projects.status !== 'ok') return false;
-    const a = Object.prototype.hasOwnProperty.call(view.projects.entries, pk) ? view.projects.entries[pk] : undefined;
-    return !!a && a.token === null;
+  /** A key in the current shape (keys stored by 0.2 – 0.4 are converted with the current servers). */
+  private current(key: StreamKey | null): StreamKey | null {
+    if (!key) return null;
+    const k = key as unknown as Record<string, unknown>;
+    if (typeof k.endpoint === 'string' && isTeam(k.team)) return key;
+    return upgradeStreamKey(key, this.opts.routing()?.config ?? null);
   }
 
   private queueOf(ref: StreamRef): EventQueue {
@@ -610,11 +637,6 @@ export class QueueStore {
 
   private segmentsOf(dir: string): SegmentInfo[] {
     return new EventQueue(dir, { autoCap: false }).segments();
-  }
-
-  private countDir(dir: string): number {
-    const q = new EventQueue(dir, { autoCap: false });
-    return q.segments().reduce((n, s) => n + q.countEvents(s.file), 0);
   }
 
   private dirNames(parent: string): string[] {
@@ -630,11 +652,12 @@ export class QueueStore {
 
   /** The stream of a directory, as read from its stream.json; anything that does not hash to its name is unknown. */
   private readRef(dir: string, name: string, kind: 'project' | 'unresolved'): StreamRef {
+    if (/^[ot]-/.test(name)) return { kind: 'legacy', dir };
     const raw = readJsonFile<unknown>(join(dir, STREAM_FILE));
-    const bind = isObject(raw) ? parseBinding(raw.bind) : null;
-    if (isObject(raw) && bind) {
-      if (kind === 'project' && nonEmpty(raw.pk) && streamDirName(raw.pk, bind) === name) return { kind, dir, pk: raw.pk, bind };
-      if (kind === 'unresolved' && nonEmpty(raw.cwd) && unresolvedDirName(raw.cwd, bind) === name) return { kind, dir, cwd: raw.cwd, bind };
+    if (isObject(raw) && typeof raw.endpoint === 'string' && isTeam(raw.team)) {
+      const { endpoint, team } = raw;
+      if (kind === 'project' && nonEmpty(raw.key) && streamDirName(raw.key, endpoint, team) === name) return { kind, dir, pk: raw.key, endpoint, team };
+      if (kind === 'unresolved' && nonEmpty(raw.cwd) && unresolvedDirName(raw.cwd, endpoint, team) === name) return { kind, dir, cwd: raw.cwd, endpoint, team };
     }
     return { kind: 'unknown', dir };
   }
@@ -667,7 +690,7 @@ export class QueueStore {
   private ensure(key: StreamKey): StreamRef | null {
     const project = key.kind === 'project';
     const parent = project ? this.projectsDir : this.unresolvedDir;
-    const name = project ? streamDirName(key.pk, key.bind) : unresolvedDirName(key.cwd, key.bind);
+    const name = keyDirName(key);
     const dir = join(parent, name);
     const expected = (): StreamRef | null => {
       const ref = this.readRef(dir, name, key.kind);
@@ -678,7 +701,7 @@ export class QueueStore {
     const tmp = join(parent, `.tmp-${randomBytes(6).toString('hex')}`);
     try {
       ensureDir(tmp);
-      const body = project ? { pk: key.pk, bind: key.bind } : { cwd: key.cwd, bind: key.bind };
+      const body = project ? { key: key.pk, endpoint: key.endpoint, team: key.team } : { cwd: key.cwd, endpoint: key.endpoint, team: key.team };
       writeJsonAtomic(join(tmp, STREAM_FILE), { ...body, created_at: new Date(this.now()).toISOString() }, 0o600);
       renameSync(tmp, dir);
     } catch (err) {

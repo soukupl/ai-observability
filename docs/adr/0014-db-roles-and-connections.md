@@ -1,6 +1,6 @@
 # ADR-0014: DB roles as NOLOGIN roles reached via SET ROLE, optional per-service logins
 
-- **Status:** Accepted
+- **Status:** Accepted; amended 2026-10-24 by [ADR-0028](0028-one-deployment-one-company.md) (no `app_platform` role)
 - **Date:** 2026-10-05
 - **Deciders:** Ladislav Soukup (owner, via "start coding the project"); implemented by Claude (schema agent)
 - **Tags:** security, database, operations
@@ -53,3 +53,16 @@ an owner that RLS lets through without making the schema owner itself bypass FOR
   company) or null, so a login can be invited into, or made first admin of, another company.*
 - New migration 0004 also adds `auth_pending_invitations`, `ingest_project_salt`, `company_has_user_capacity` and a changed
   `ingest_match_user_by_email(email, team)`; all are SECURITY DEFINER owned by `app_definer` with EXECUTE granted per role.
+
+## Amendment 2026-10-24 — no app_platform (ADR-0028)
+
+- **Decided by:** Ladislav Soukup (owner, grilling Q1-Q9 of 2026-10-24 and "go" on
+  `docs/briefs/single-deployment-per-user-tokens.md`); design by Claude Fable 5.1. The body and earlier amendments are kept as history.
+
+- Migration 0018 strips the **`app_platform`** role of its policies, grants and `platform_*` functions with `DROP OWNED`
+  (the 2026-10-06 amendment above and `platform_invitee_status` are history). The cluster role object itself is left for the
+  operator to drop (`DROP ROLE app_platform;`) once no database of the cluster uses it: roles are cluster-wide, and a
+  per-database migration that drops one races every other database migrating at the same time. The service roles are `app_web`, `app_ingest`,
+  `app_worker`, plus `app_definer`; `dbFor('platform')`, `DATABASE_URL_PLATFORM` and `DB_APP_PLATFORM_PASSWORD` are removed.
+- New definer functions (`ingest_resolve_team`, device-token minting, ADR-0029 / ADR-0030) follow the same rule: owned by
+  `app_definer`, EXECUTE granted per role.

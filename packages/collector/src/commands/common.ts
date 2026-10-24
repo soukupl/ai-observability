@@ -1,15 +1,16 @@
-import { readdirSync, renameSync } from 'node:fs';
-import { join } from 'node:path';
+import { spawn } from 'node:child_process';
+import { hostname } from 'node:os';
 import { parseArgs, type ParseArgsConfig } from 'node:util';
 import type { HarnessAdapter } from '../adapters/types.js';
-import type { CollectorConfig } from '../config.js';
-import { recordDropped } from '../delivery.js';
-import { ensureDir, readJsonFile, writeJsonAtomic } from '../fsutil.js';
+import { daysLeft, endpointHost, isExpired, type CollectorConfig, type ServerEntry } from '../config.js';
+import { readDelivery, recordDropped, serverDelivery } from '../delivery.js';
 import type { Transport } from '../http.js';
-import { acquireLock } from '../lock.js';
+import { acquireLock, tryLock } from '../lock.js';
+import { createLogger } from '../log.js';
+import { migrateHome, needsMigration } from '../migrate.js';
 import type { AiObsPaths } from '../paths.js';
-import { loadRouting, resolveStream, type HeldReason, type RoutingView } from '../projects.js';
-import { EventQueue, identityOfRef, QueueStore, type StoreStats } from '../queue.js';
+import { identityOfRef, QueueStore, type StoreStats } from '../queue.js';
+import { loadRouting, resolveStream, type HeldReason, type RoutingView } from '../routing.js';
 import type { RuntimeInstall } from '../runtime.js';
 
 export interface Io {
@@ -25,12 +26,18 @@ export interface CliDeps {
   installRuntime?: (paths: AiObsPaths) => RuntimeInstall;
   env?: NodeJS.ProcessEnv;
   cwd?: string;
-  /** wait used by the 429 retry of `init` / `token add` / `token confirm` */
+  /** wait used by the device-login poll and the 429 retry of `login` */
   sleep?: (ms: number) => Promise<void>;
   /** wall clock in ms */
   now?: () => number;
-  /** starts the background worker after `use` / `token confirm` (default: hook.ts defaultSpawnWorker) */
+  /** starts the background worker after `link` moved queued events (default: hook.ts defaultSpawnWorker) */
   spawnWorker?: (paths: AiObsPaths) => void;
+  /** opens the device-login page (default: open / xdg-open / explorer, detached) */
+  openBrowser?: (url: string) => void;
+  /** this machine's name: the default device-login client name */
+  hostname?: () => string;
+  /** reads a token piped to `login --token -` */
+  readStdin?: () => Promise<string>;
   /** plain project key of a directory (default resolveProjectKey, 5 s); null when git timed out */
   resolveProjectKey?: (cwd: string, opts: { timeoutMs: number }) => Promise<string | null>;
   /** how long write commands wait for worker.lock (default 30 s, C24) */
@@ -82,16 +89,10 @@ export function listSome(items: readonly string[], max = 10): string {
   return `${shown.join(', ')}${more > 0 ? ` … and ${more} more` : ''}`;
 }
 
-/**
- * C6: the line every command except `hook` prints while nothing can be recorded. Null when config.json
- * is missing (commands say "not configured") or at least one valid token is registered.
- */
+/** The line every command except `hook`, `init`, `login` and `live` prints while nothing can be recorded (C6). */
 export function upgradeBanner(config: CollectorConfig | null): string | null {
-  if (!config || config.tokens.length) return null;
-  if (config.legacyToken) {
-    return `! ai-obs 0.2 no longer accepts the token from before the upgrade (${config.legacyToken}): create a user token (My tokens) or a company token (Settings → Tokens) in the dashboard and run \`ai-obs init --token <token>\`. Nothing is recorded until then.`;
-  }
-  return '! no tokens registered: nothing is recorded. Run `ai-obs init --token <token> --endpoint <url>`.';
+  if (!config || config.servers.length) return null;
+  return '! not logged in to any ai-obs server: nothing is recorded. Run `ai-obs login --server <url>`.';
 }
 
 export const BUSY_MESSAGE = 'the background worker is busy (it may be summarizing); try again in a minute. Nothing was changed.';
@@ -113,67 +114,153 @@ export async function withWriteLock<T>(deps: CliDeps, io: Io, fn: () => Promise<
   }
 }
 
+/**
+ * Migrates a 0.2 – 0.4 home (config.json v2, projects.json, `o-` / `t-` streams) when the worker lock is free
+ * right now, printing what changed; otherwise the background worker does it on its next run. An older copied
+ * hook runtime is refreshed first (migrateHome), or nothing is migrated.
+ */
+export function migrateNow(deps: CliDeps, io: Io): void {
+  try {
+    if (!needsMigration(deps.paths)) return;
+    const release = tryLock(deps.paths.workerLock, 15 * 60_000);
+    if (!release) return;
+    try {
+      const opts = { log: createLogger(deps.paths, 'cli'), now: new Date(nowOf(deps)), ...(deps.installRuntime ? { refreshRuntime: deps.installRuntime } : {}) };
+      for (const note of migrateHome(deps.paths, opts)) io.err(`ai-obs: ${note}`);
+    } finally {
+      release();
+    }
+  } catch {
+    /* the worker retries */
+  }
+}
+
 /** The queue as streams, with fresh routing (C17) and the drop counters. */
 export function openStore(paths: AiObsPaths): QueueStore {
   return new QueueStore(paths.queue, { routing: () => loadRouting(paths), dropped: (d) => recordDropped(paths, d) });
 }
 
+/** The device-login page can be opened here: not over SSH; on Linux only with a display. */
+export function canOpenBrowser(env: NodeJS.ProcessEnv): boolean {
+  if (env.SSH_CONNECTION || env.SSH_TTY) return false;
+  if (process.platform === 'darwin' || process.platform === 'win32') return true;
+  return Boolean(env.DISPLAY || env.WAYLAND_DISPLAY);
+}
+
+export function defaultOpenBrowser(url: string): void {
+  const cmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'explorer' : 'xdg-open';
+  try {
+    const child = spawn(cmd, [url], { detached: true, stdio: 'ignore' });
+    child.on('error', () => {});
+    child.unref();
+  } catch {
+    /* no browser: the URL is printed anyway */
+  }
+}
+
+export const defaultHostname = (): string => hostname();
+
+/** Reads all of stdin (a piped token), giving up after `timeoutMs`; '' on a terminal. */
+export function readProcessStdin(timeoutMs = 2000): Promise<string> {
+  if (process.stdin.isTTY) return Promise.resolve('');
+  return new Promise((resolve) => {
+    let data = '';
+    const finish = () => {
+      clearTimeout(timer);
+      process.stdin.removeAllListeners('data');
+      process.stdin.pause();
+      resolve(data);
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (c: string) => {
+      data += c;
+      if (data.length > 4096) finish();
+    });
+    process.stdin.once('end', finish);
+    process.stdin.once('error', finish);
+  });
+}
+
+/** Strips terminal control characters from server-derived text before it is printed. */
+export function terminalSafe(s: string): string {
+  let out = '';
+  for (const ch of s) {
+    const c = ch.codePointAt(0)!;
+    const control = (c < 0x20 && c !== 0x09) || (c >= 0x7f && c <= 0x9f) || c === 0x200e || c === 0x200f || (c >= 0x202a && c <= 0x202e) || (c >= 0x2066 && c <= 0x2069);
+    if (!control) out += ch;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------- server state (status, token list, doctor)
+
+export interface ServerState {
+  short: string;
+  /** refused, expired or failing: data waits */
+  problem: boolean;
+}
+
+/** STATE column / status line of a server (no network). */
+export function serverState(view: RoutingView, deps: CliDeps, s: ServerEntry, nowMs: number): ServerState {
+  const st = serverDelivery(readDelivery(deps.paths), s);
+  if (isExpired(s, nowMs)) return { short: `EXPIRED: run \`ai-obs login --server ${s.endpoint}\``, problem: true };
+  if (st.blocked?.status === 401) return { short: `REJECTED (401, expired or revoked): run \`ai-obs login --server ${s.endpoint}\``, problem: true };
+  if (st.blocked?.status === 403) return { short: `refused (403: ${st.blocked.message || 'access denied'}); \`ai-obs flush\` retries`, problem: true };
+  if (st.next_attempt_at && Date.parse(st.next_attempt_at) > nowMs) return { short: `retrying (${st.last_error ?? 'send failed'})`, problem: true };
+  const days = daysLeft(s, nowMs);
+  const expiring = days !== null && days <= 14 ? `; expires in ${days} day${days === 1 ? '' : 's'}: run \`ai-obs login --server ${s.endpoint}\`` : '';
+  if (!st.last_success_at) return { short: `never sent${expiring}`, problem: false };
+  return { short: `ok, last send ${ago(st.last_success_at, nowMs)}${expiring}`, problem: false };
+}
+
+/** "dev@acme.com · SPECTADO · mac-dev, expires 2027-01-22" */
+export function describeServer(s: ServerEntry): string {
+  const who = s.email ?? (s.source ? 'service user' : '(not checked yet)');
+  const exp = s.expires_at ? `expires ${s.expires_at.slice(0, 10)}` : s.source ? 'no expiry' : 'expiry unknown until the next send';
+  return [who, s.deployment?.name ?? '(deployment unknown)', `${s.label ? `${s.label}, ` : ''}${exp}`].map(terminalSafe).join(' · ');
+}
+
+export const hostOf = endpointHost;
+
 // ---------------------------------------------------------------- queue summary (status, doctor, flush, token, uninstall)
 
 export interface QueueSummary {
   stats: StoreStats;
-  /** events in streams that resolve to a usable, non-blocked token */
+  /** events in streams that resolve to a usable server (not refused, not expired) */
   sendable: number;
   sendableOldestAt: number | null;
-  /** events not sendable now: held streams plus streams of blocked tokens */
+  /** events not sendable now: held streams plus streams of refused or expired servers */
   kept: number;
-  /** per token name: events in streams that resolve to it (blocked ones included) */
-  perToken: Record<string, number>;
-  /** per blocked token name: its events */
+  /** per endpoint: events in streams that resolve to it (refused / expired ones included) */
+  perServer: Record<string, number>;
+  /** per endpoint: events waiting because its token is refused or expired */
   blocked: Record<string, number>;
-  /** held events per reason (bound streams of removed tokens are counted as `dangling`) */
+  /** held events per reason */
   byReason: Partial<Record<HeldReason, number>>;
-  /** open project streams waiting for a choice (unassigned, or a choice that points nowhere) */
-  waiting: { keys: string[]; events: number };
-  /** events of streams bound to tokens that are no longer registered */
-  danglingBound: number;
+  /** held `no-server` events per stream endpoint ('' = no server chosen) */
+  noServer: Record<string, number>;
+  /** per project key: queued events */
+  byKey: Map<string, number>;
   /** stream directories without a readable stream.json */
   unknown: Array<{ dir: string; events: number }>;
-  /** per project key: open events and bound events (for `use` / status) */
-  byKey: Map<string, { open: number; bound: number }>;
 }
 
-/** Resolves every non-empty stream with table B (design §3.2) and counts the result. */
+/** Resolves every non-empty stream and counts the result. */
 export function summarizeQueue(stats: StoreStats, view: RoutingView | null): QueueSummary {
-  const s: QueueSummary = {
-    stats,
-    sendable: 0,
-    sendableOldestAt: null,
-    kept: 0,
-    perToken: {},
-    blocked: {},
-    byReason: {},
-    waiting: { keys: [], events: 0 },
-    danglingBound: 0,
-    unknown: [],
-    byKey: new Map(),
-  };
-  const waitingKeys = new Set<string>();
+  const s: QueueSummary = { stats, sendable: 0, sendableOldestAt: null, kept: 0, perServer: {}, blocked: {}, byReason: {}, noServer: {}, byKey: new Map(), unknown: [] };
   for (const st of stats.streams) {
     const ref = st.stream;
     const events = st.events;
-    if (ref.pk !== undefined) {
-      const k = s.byKey.get(ref.pk) ?? { open: 0, bound: 0 };
-      if (ref.bind?.kind === 'open') k.open += events;
-      else k.bound += events;
-      s.byKey.set(ref.pk, k);
-    }
+    if (ref.pk !== undefined) s.byKey.set(ref.pk, (s.byKey.get(ref.pk) ?? 0) + events);
     if (ref.kind === 'unknown') s.unknown.push({ dir: ref.dir, events });
-    const r = view ? resolveStream(view, identityOfRef(ref)) : ({ kind: 'held', reason: 'no-tokens' } as const);
-    if (r.kind === 'token') {
-      s.perToken[r.token.name] = (s.perToken[r.token.name] ?? 0) + events;
-      if (view && Object.prototype.hasOwnProperty.call(view.blocked, r.token.name)) {
-        s.blocked[r.token.name] = (s.blocked[r.token.name] ?? 0) + events;
+    const r = view ? resolveStream(view, identityOfRef(ref)) : ({ kind: 'held', reason: 'no-server', endpoint: ref.endpoint } as const);
+    if (r.kind === 'server') {
+      const ep = r.server.endpoint;
+      s.perServer[ep] = (s.perServer[ep] ?? 0) + events;
+      const usable = view && !Object.prototype.hasOwnProperty.call(view.blocked, endpointHost(ep)) && !isExpired(r.server, view.nowMs);
+      if (!usable) {
+        s.blocked[ep] = (s.blocked[ep] ?? 0) + events;
         s.kept += events;
       } else {
         s.sendable += events;
@@ -183,104 +270,25 @@ export function summarizeQueue(stats: StoreStats, view: RoutingView | null): Que
     }
     s.kept += events;
     s.byReason[r.reason] = (s.byReason[r.reason] ?? 0) + events;
-    if (r.reason === 'dangling' && ref.bind?.kind === 'token') s.danglingBound += events;
-    else if ((r.reason === 'unassigned' || r.reason === 'dangling') && ref.pk !== undefined) {
-      waitingKeys.add(ref.pk);
-      s.waiting.events += events;
-    }
+    if (r.reason === 'no-server') s.noServer[r.endpoint ?? ''] = (s.noServer[r.endpoint ?? ''] ?? 0) + events;
   }
-  s.waiting.keys = [...waitingKeys];
   return s;
 }
 
-/** Short words for held reasons other than "waiting for a token" (status / flush). */
+/** Short words for held reasons (status / flush / doctor). */
 export const HELD_LABEL: Record<HeldReason, string> = {
-  'no-tokens': 'no token registered',
-  'projects-unreadable': 'projects.json cannot be read',
-  unassigned: 'waiting for a token',
-  dangling: 'recorded with a token that is no longer registered',
-  unverified: 'token not confirmed (`ai-obs token list`)',
-  'company-mismatch': 'token reports another company (`ai-obs token list`)',
-  'opted-out': 'repositories not reported (`use --none`)',
-  'pre-upgrade': 'queued before the upgrade, never sent: tokens were reset',
+  'no-server': 'no server to send to',
   unresolved: 'repository could not be read yet (retried on the next send)',
+  'pre-upgrade': 'queued by ai-obs 0.1, never sent',
+  legacy: 'recorded by ai-obs 0.4 or older; converted on the next worker run',
   'unknown-stream': 'queue directory without a readable stream.json (`ai-obs doctor`)',
 };
 
-// ---------------------------------------------------------------- pre-upgrade data (owner decision 3)
-
-/** state/pre-upgrade.json: what the first registration moved aside, and whether status / doctor said so. */
-interface PreUpgradeNote {
-  moved_at: string;
-  batches: number;
-  events: number;
-  dir: string;
-  shown_at: string | null;
-}
-
-export const preUpgradeNotePath = (paths: Pick<AiObsPaths, 'state'>) => join(paths.state, 'pre-upgrade.json');
-
-/**
- * Moves the root `queue/*.ndjson` segments (written by the 0.1.x collector) to queue/dead/pre-upgrade/:
- * they are never sent, because every pre-upgrade token was reset (owner decision 3). Run by every
- * successful registration under the worker lock; returns what was moved now (null when nothing).
- */
-export function movePreUpgrade(paths: AiObsPaths, now: Date): { batches: number; events: number } | null {
-  const root = new EventQueue(paths.queue, { autoCap: false });
-  const segs = root.segments();
-  if (!segs.length) return null;
-  ensureDir(paths.deadPreUpgrade);
-  let batches = 0;
-  let events = 0;
-  for (const seg of segs) {
-    const n = root.countEvents(seg.file);
-    try {
-      renameSync(join(paths.queue, seg.file), join(paths.deadPreUpgrade, seg.file));
-    } catch {
-      continue;
-    }
-    batches++;
-    events += n;
-  }
-  if (!batches) return null;
-  const prev = readJsonFile<Partial<PreUpgradeNote>>(preUpgradeNotePath(paths));
-  const note: PreUpgradeNote = {
-    moved_at: now.toISOString(),
-    batches: (typeof prev?.batches === 'number' ? prev.batches : 0) + batches,
-    events: (typeof prev?.events === 'number' ? prev.events : 0) + events,
-    dir: paths.deadPreUpgrade,
-    shown_at: null,
-  };
-  try {
-    writeJsonAtomic(preUpgradeNotePath(paths), note, 0o600);
-  } catch {
-    /* the note is informational */
-  }
-  return { batches, events };
-}
-
-/** Number of segment files in queue/dead/pre-upgrade. */
-function preUpgradeBatches(paths: AiObsPaths): number {
-  try {
-    return readdirSync(paths.deadPreUpgrade).filter((f) => f.endsWith('.ndjson')).length;
-  } catch {
-    return 0;
-  }
-}
-
-/**
- * The pre-upgrade line, once (owner decision 3): the first `status` or `doctor` after the move prints it
- * and marks it shown. Null when there is nothing (left) to say.
- */
-export function takePreUpgradeNote(paths: AiObsPaths, now: Date): string | null {
-  const note = readJsonFile<Partial<PreUpgradeNote>>(preUpgradeNotePath(paths));
-  if (!note || note.shown_at) return null;
-  const batches = preUpgradeBatches(paths);
-  if (!batches) return null;
-  try {
-    writeJsonAtomic(preUpgradeNotePath(paths), { ...note, shown_at: now.toISOString() }, 0o600);
-  } catch {
-    /* shown again next time */
-  }
-  return `${batches} pre-upgrade batches kept in ${paths.deadPreUpgrade}, not sent: tokens were reset (delete the directory when you no longer need them)`;
+/** One line per endpoint whose events wait for a server (status, doctor). */
+export function noServerLines(q: QueueSummary): string[] {
+  return Object.entries(q.noServer).map(([ep, n]) =>
+    ep === ''
+      ? `${n} events of repositories without a server (several are registered): run \`ai-obs link --server <url> --team <slug>\` in each`
+      : `${n} events for ${ep}, which this machine is not logged in to: run \`ai-obs login --server ${ep}\``,
+  );
 }

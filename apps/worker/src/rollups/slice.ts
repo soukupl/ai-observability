@@ -1,14 +1,14 @@
 import { randomUUID } from 'node:crypto';
 
 /**
- * Rules for rewriting one (company, day) slice of daily_rollups without losing history (ADR-0012).
+ * Rules for rewriting one day slice of daily_rollups without losing history (ADR-0012).
  *
  * Two kinds of rows must survive a slice rewrite because their raw rows are gone for good:
  *
- * 1. **Anonymised rows.** Deleting a user identity (operator only; removing a company member keeps their rows,
+ * 1. **Anonymised rows.** Deleting a user identity (operator only; removing a member keeps their rows,
  *    ADR-0022) deletes their raw turns (ON DELETE CASCADE) and sets
  *    daily_rollups.user_id to null (ON DELETE SET NULL). Those rows cannot be told apart from rows of
- *    unverified (company-token) turns by their columns, so the worker marks every row it writes in its id:
+ *    ownerless turns (old company-token turns from before ADR-0029) by their columns, so the worker marks every row it writes in its id:
  *    a random UUID with version digit 8, followed by `a` when the row had a user when written and `0`
  *    when it did not. A row with user_id null whose id says "had a user" lost its user afterwards and is
  *    kept as it is. Rows written by anything else (seeds, rows from before this rule) count as ordinary.

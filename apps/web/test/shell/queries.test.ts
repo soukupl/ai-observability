@@ -1,6 +1,5 @@
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { Database } from '@ai-obs/db';
 import { defaultFilters, type Filters } from '../../src/lib/filters';
 import {
   buildExportTable,
@@ -26,14 +25,14 @@ import {
   usesAggregateFunctions,
   type QueryCtx,
 } from '../../src/lib/queries';
-import { asPerson, connect, dropShellDatabase, FIXTURE_DAYS, prepareShellDatabase, seedCompany, SUB_AGENT_MODEL, type Fixture } from './harness';
+import { asPerson, dropShellDatabase, FIXTURE_DAYS, prepareShellDatabase, seedDeployment, SUB_AGENT_MODEL, type Fixture } from './harness';
 
 const skipReason = await prepareShellDatabase();
 if (skipReason) console.warn(`[web/shell] query tests skipped: ${skipReason}`);
 
 const f = (over: Partial<Filters> = {}): Filters => ({ ...defaultFilters(), ...over });
 const R30 = f({ range: '30d' });
-/** Row ids differ between the two companies and float sums differ in the last bits: compare canonical forms. */
+/** Row ids differ between the fixtures and float sums differ in the last bits: compare canonical forms. */
 const canon = (v: unknown) =>
   JSON.parse(
     JSON.stringify(v, (_k, x) =>
@@ -42,23 +41,20 @@ const canon = (v: unknown) =>
   );
 
 describe.skipIf(skipReason !== null)(skipReason ? `dashboard queries - SKIPPED: ${skipReason}` : 'dashboard queries (real Postgres)', () => {
-  let web: Database;
   let A: Fixture; // aggregates-only
   let B: Fixture; // full detail (identical data)
   let C: Fixture; // full detail, mixed-model turns (sub-agents on SUB_AGENT_MODEL)
   let D: Fixture; // aggregates-only, mixed-model turns
 
   beforeAll(async () => {
-    const owner = connect();
-    A = await seedCompany(owner, 'agg-co', 'aggregates-only');
-    B = await seedCompany(owner, 'full-co', 'full');
-    C = await seedCompany(owner, 'mixed-full-co', 'full', { mixed: true });
-    D = await seedCompany(owner, 'mixed-agg-co', 'aggregates-only', { mixed: true });
-    web = connect('app_web');
+    A = await seedDeployment('agg-co', 'aggregates-only');
+    B = await seedDeployment('full-co', 'full');
+    C = await seedDeployment('mixed-full-co', 'full', { mixed: true });
+    D = await seedDeployment('mixed-agg-co', 'aggregates-only', { mixed: true });
   }, 120_000);
   afterAll(dropShellDatabase);
 
-  const run = <T>(fx: Fixture, who: string, fn: (ctx: QueryCtx) => Promise<T>) => asPerson(web, fx.people[who]!, (ctx) => fn(ctx));
+  const run = <T>(fx: Fixture, who: string, fn: (ctx: QueryCtx) => Promise<T>) => asPerson(fx.people[who]!, (ctx) => fn(ctx));
   const kpis = (fx: Fixture, who: string, filters: Filters, force?: 'raw' | 'rollup') =>
     run(fx, who, (ctx) => getKpis({ ...ctx, forceSource: force }, filters));
 
@@ -104,7 +100,7 @@ describe.skipIf(skipReason !== null)(skipReason ? `dashboard queries - SKIPPED: 
       });
     }
 
-    it('counts company-wide for admin and own rows for a member', async () => {
+    it('counts deployment-wide for admin and own rows for a member', async () => {
       const admin = await kpis(B, 'admin', R30);
       const member = await kpis(B, 'm1', R30);
       expect(admin.turns).toBe(member.turns * 4);
@@ -404,24 +400,23 @@ describe.skipIf(skipReason !== null)(skipReason ? `dashboard queries - SKIPPED: 
     it('turn detail: stage / flow / orchestration fields and links (stored + derived) on both paths', async () => {
       // Two workflow agents with a stored `item` link and an Agent-tool sibling after the Explore run (derived
       // `sequence` link), on B's admin turn (direct path) and A's m2 turn seen by A's admin (aggregate path).
-      const owner = connect();
       const seed = async (fx: Fixture, turnId: string) => {
         const add = (ext: string, type: string, group: string | null, orch: string | null, stage: number | null, flow: string | null, from: number, to: number) =>
-          owner.execute(sql`insert into runs (company_id, team_id, user_id, turn_id, turn_external_id, external_id, agent_type, agent_group,
+          fx.owner.execute(sql`insert into runs (team_id, user_id, turn_id, turn_external_id, external_id, agent_type, agent_group,
               orchestration_id, stage_index, flow_key, depth, model, started_at, ended_at, duration_ms, outcome)
-            select r.company_id, r.team_id, r.user_id, r.turn_id, r.turn_external_id, ${ext}, ${type}, ${group}, ${orch}, ${stage}, ${flow}, 1,
+            select r.team_id, r.user_id, r.turn_id, r.turn_external_id, ${ext}, ${type}, ${group}, ${orch}, ${stage}, ${flow}, 1,
               r.model, t.started_at + make_interval(secs => ${from}), t.started_at + make_interval(secs => ${to}), ${(to - from) * 1000}, 'success'
             from runs r join turns t on t.id = r.turn_id
             where t.id = ${turnId}::uuid and r.external_id = 'r1'`);
         await add('w1', 'workflow:review:bugs', 'workflow:review', 'wf_t', 0, 'bugs', 3, 5);
         await add('w2', 'workflow:verify:bugs', 'workflow:verify', 'wf_t', 1, 'bugs', 6, 8);
         await add('p1', 'Plan', null, null, null, null, 200, 210);
-        await owner.execute(sql`insert into run_links (company_id, turn_id, turn_external_id, from_run_id, to_run_id, from_external_id, to_external_id, kind)
-          select f.company_id, f.turn_id, f.turn_external_id, f.id, t.id, 'w1', 'w2', 'item'
+        await fx.owner.execute(sql`insert into run_links (turn_id, turn_external_id, from_run_id, to_run_id, from_external_id, to_external_id, kind)
+          select f.turn_id, f.turn_external_id, f.id, t.id, 'w1', 'w2', 'item'
           from runs f join runs t on t.turn_id = f.turn_id and t.external_id = 'w2'
           where f.turn_id = ${turnId}::uuid and f.external_id = 'w1'`);
       };
-      const cleanup = (fx: Fixture) => owner.execute(sql`delete from runs where company_id = ${fx.id}::uuid and external_id in ('w1', 'w2', 'p1')`);
+      const cleanup = (fx: Fixture) => fx.owner.execute(sql`delete from runs where external_id in ('w1', 'w2', 'p1')`);
       const own = B.turnIds.find((t) => t.userKey === 'admin')!;
       const other = A.turnIds.find((t) => t.userKey === 'm2')!;
       await seed(B, own.id);
@@ -455,12 +450,11 @@ describe.skipIf(skipReason !== null)(skipReason ? `dashboard queries - SKIPPED: 
     it('agent flows: list (direct = aggregate path), outcome filter, totals, detail, visibility, CSV', async () => {
       // A two-stage workflow (stored `item` link, failed second step, a skill on the first) and an Agent-tool run after
       // the Explore run (derived `sequence` link) on m2's turn in B (direct path) and in A (aggregate path): identical data, so both paths must agree.
-      const owner = connect();
-      const seed = async (turnId: string) => {
+      const seed = async (fx: Fixture, turnId: string) => {
         const add = (ext: string, type: string, group: string | null, orch: string | null, stage: number | null, from: number, to: number, outcome: string, skills: string) =>
-          owner.execute(sql`insert into runs (company_id, team_id, user_id, turn_id, turn_external_id, external_id, agent_type, agent_group,
+          fx.owner.execute(sql`insert into runs (team_id, user_id, turn_id, turn_external_id, external_id, agent_type, agent_group,
               orchestration_id, stage_index, depth, model, started_at, ended_at, duration_ms, input_tokens, output_tokens, outcome, skills)
-            select r.company_id, r.team_id, r.user_id, r.turn_id, r.turn_external_id, ${ext}, ${type}, ${group}, ${orch}, ${stage}, 1,
+            select r.team_id, r.user_id, r.turn_id, r.turn_external_id, ${ext}, ${type}, ${group}, ${orch}, ${stage}, 1,
               r.model, t.started_at + make_interval(secs => ${from}), t.started_at + make_interval(secs => ${to}), ${(to - from) * 1000},
               1000, 100, ${outcome}::outcome, ${skills}::jsonb
             from runs r join turns t on t.id = r.turn_id
@@ -468,16 +462,16 @@ describe.skipIf(skipReason !== null)(skipReason ? `dashboard queries - SKIPPED: 
         await add('fw1', 'workflow:review:bugs', 'workflow:review', 'wf_f', 0, 3, 5, 'success', '{"tdd":{"model":1,"user":0}}');
         await add('fw2', 'workflow:verify:bugs', 'workflow:verify', 'wf_f', 1, 6, 8, 'failed', '{}');
         await add('fp1', 'Plan', null, null, null, 200, 210, 'success', '{}');
-        await owner.execute(sql`insert into run_links (company_id, turn_id, turn_external_id, from_run_id, to_run_id, from_external_id, to_external_id, kind)
-          select f.company_id, f.turn_id, f.turn_external_id, f.id, t.id, 'fw1', 'fw2', 'item'
+        await fx.owner.execute(sql`insert into run_links (turn_id, turn_external_id, from_run_id, to_run_id, from_external_id, to_external_id, kind)
+          select f.turn_id, f.turn_external_id, f.id, t.id, 'fw1', 'fw2', 'item'
           from runs f join runs t on t.turn_id = f.turn_id and t.external_id = 'fw2'
           where f.turn_id = ${turnId}::uuid and f.external_id = 'fw1'`);
       };
-      const cleanup = (fx: Fixture) => owner.execute(sql`delete from runs where company_id = ${fx.id}::uuid and external_id in ('fw1', 'fw2', 'fp1')`);
+      const cleanup = (fx: Fixture) => fx.owner.execute(sql`delete from runs where external_id in ('fw1', 'fw2', 'fp1')`);
       const own = B.turnIds.find((t) => t.userKey === 'm2')!;
       const other = A.turnIds.find((t) => t.userKey === 'm2')!;
-      await seed(own.id);
-      await seed(other.id);
+      await seed(B, own.id);
+      await seed(A, other.id);
       try {
         const direct = await run(B, 'admin', (ctx) => getFlows(ctx, R30, { page: 1, outcome: null }));
         const agg = await run(A, 'admin', (ctx) => getFlows(ctx, R30, { page: 1, outcome: null }));
@@ -596,7 +590,7 @@ describe.skipIf(skipReason !== null)(skipReason ? `dashboard queries - SKIPPED: 
     it('cells: direct = aggregate path, counts match the turns, medians are priced per usage model', async () => {
       const direct = await run(B, 'admin', (ctx) => getEffortCells(ctx, R30));
       const agg = await run(A, 'admin', (ctx) => getEffortCells(ctx, R30));
-      // project ids differ between the two companies: compare the cells without them, in a stable order
+      // project ids differ between the fixtures: compare the cells without them, in a stable order
       const strip = (cells: typeof direct) => cells.map(({ projectId: _p, ...c }) => JSON.stringify(canon(c))).sort();
       expect(strip(agg)).toEqual(strip(direct));
       const k = await kpis(B, 'admin', R30);

@@ -2,6 +2,7 @@ import { dailyRollups, dailySkillMcpRollups, runs, turns, usage, type Database }
 import { and, eq, gte, lt, sql } from 'drizzle-orm';
 import type { WorkerContext } from '../context.js';
 import { addDays, dayStart, utcDay } from '../lib/dates.js';
+import { loadDeployment } from '../lib/deployment.js';
 import { effectiveRetentionDays, retentionCutoffDay } from '../lib/retention-policy.js';
 import {
   aggregateDay,
@@ -27,7 +28,7 @@ const num = (v: unknown): number => Number(v ?? 0);
 const ANONYMISED = sql`(user_id is null and substr(id::text, 15, 2) = '8a')`;
 
 /**
- * Rewrites one (company, day) slice from raw rows in one transaction (daily_rollups and
+ * Rewrites one day slice (deployment-wide, ADR-0028) from raw rows in one transaction (daily_rollups and
  * daily_skill_mcp_rollups together, with the same mode and the same picked turns) (daily_rollups has no unique key, see
  * packages/db/README.md). Returns null, touching nothing, when the day has no raw turns (their rows were
  * expired or never existed; the permanent rollup stays as it is) or nothing new to add.
@@ -36,14 +37,14 @@ const ANONYMISED = sql`(user_id is null and substr(id::text, 15, 2) = '8a')`;
  * when raw rows of the day were already deleted (raw turns < rolled-up turns) only turns that arrived after
  * the last rewrite are added on top instead of rebuilding the slice from partial raw rows.
  */
-export async function recomputeDay(db: Database, companyId: string, day: string): Promise<{ turns: number; rows: number } | null> {
+export async function recomputeDay(db: Database, day: string): Promise<{ turns: number; rows: number } | null> {
   const from = dayStart(day);
   const to = dayStart(addDays(day, 1));
   return db.transaction(async (tx) => {
     // Serialise workers recomputing the same slice.
-    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`rollups:${companyId}:${day}`}))`);
-    const inDay = and(eq(turns.companyId, companyId), gte(turns.startedAt, from), lt(turns.startedAt, to));
-    const inSlice = sql`company_id = ${companyId} and day = ${day}::date`;
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`rollups:${day}`}))`);
+    const inDay = and(gte(turns.startedAt, from), lt(turns.startedAt, to));
+    const inSlice = sql`day = ${day}::date`;
 
     const [slice] = (await tx.execute(sql`
       select coalesce(sum(turns) filter (where not ${ANONYMISED}), 0)::int as rolled
@@ -73,7 +74,7 @@ export async function recomputeDay(db: Database, companyId: string, day: string)
         cacheWriteTokens: usage.cacheWriteTokens, reasoningTokens: usage.reasoningTokens, requests: usage.requests,
       })
       .from(usage)
-      .innerJoin(turns, and(eq(usage.turnId, turns.id), eq(usage.companyId, turns.companyId)))
+      .innerJoin(turns, eq(usage.turnId, turns.id))
       .where(inDay)
       .then((rows) => rows.map((r) => ({ ...r, turnId: r.turnId! })));
 
@@ -81,7 +82,7 @@ export async function recomputeDay(db: Database, companyId: string, day: string)
     const runAgg = await tx
       .select({ turnId: runs.turnId, n: sql<number>`count(*)` })
       .from(runs)
-      .innerJoin(turns, and(eq(runs.turnId, turns.id), eq(runs.companyId, turns.companyId)))
+      .innerJoin(turns, eq(runs.turnId, turns.id))
       .where(inDay)
       .groupBy(runs.turnId);
     for (const r of runAgg) if (r.turnId) runCounts.set(r.turnId, num(r.n));
@@ -90,7 +91,7 @@ export async function recomputeDay(db: Database, companyId: string, day: string)
     const runUses = await tx
       .select({ turnId: runs.turnId, skills: runs.skills, mcp: runs.mcp, mcpStats: runs.mcpStats })
       .from(runs)
-      .innerJoin(turns, and(eq(runs.turnId, turns.id), eq(runs.companyId, turns.companyId)))
+      .innerJoin(turns, eq(runs.turnId, turns.id))
       .where(and(inDay, sql`(${runs.skills} <> '{}'::jsonb or ${runs.mcp} <> '{}'::jsonb)`));
     const uses: SkillMcpUse[] = [
       ...picked.map((t) => ({ turnId: t.id, skills: t.skills, mcp: t.mcp, mcpStats: t.mcpStats })),
@@ -105,21 +106,21 @@ export async function recomputeDay(db: Database, companyId: string, day: string)
       await tx.delete(dailySkillMcpRollups).where(sql`${inSlice} and not ${ANONYMISED}`);
     }
     for (let i = 0; i < rows.length; i += INSERT_CHUNK) {
-      await tx.insert(dailyRollups).values(rows.slice(i, i + INSERT_CHUNK).map((r) => toInsert(companyId, day, r)));
+      await tx.insert(dailyRollups).values(rows.slice(i, i + INSERT_CHUNK).map((r) => toInsert(day, r)));
     }
     for (let i = 0; i < skillRows.length; i += INSERT_CHUNK) {
-      await tx.insert(dailySkillMcpRollups).values(skillRows.slice(i, i + INSERT_CHUNK).map((r) => toSkillInsert(companyId, day, r)));
+      await tx.insert(dailySkillMcpRollups).values(skillRows.slice(i, i + INSERT_CHUNK).map((r) => toSkillInsert(day, r)));
     }
     return { turns: picked.length, rows: rows.length + skillRows.length };
   });
 }
 
-const toInsert = (companyId: string, day: string, r: RollupRow): typeof dailyRollups.$inferInsert => ({
-  id: rollupRowId(r.userId !== null), companyId, day, ...r,
+const toInsert = (day: string, r: RollupRow): typeof dailyRollups.$inferInsert => ({
+  id: rollupRowId(r.userId !== null), day, ...r,
 });
 
-const toSkillInsert = (companyId: string, day: string, r: SkillMcpRollupRow): typeof dailySkillMcpRollups.$inferInsert => ({
-  id: rollupRowId(r.userId !== null), companyId, day, ...r,
+const toSkillInsert = (day: string, r: SkillMcpRollupRow): typeof dailySkillMcpRollups.$inferInsert => ({
+  id: rollupRowId(r.userId !== null), day, ...r,
 });
 
 export interface RollupsSummary {
@@ -137,44 +138,37 @@ export async function runRollups(ctx: WorkerContext, signal?: AbortSignal): Prom
   const full = !watermark;
   const since = watermark ? new Date(Date.parse(watermark) - WATERMARK_OVERLAP_MS) : null;
 
-  const companies = (await db.execute(sql`select id, plan, settings from companies`)) as unknown as Array<{
-    id: string;
-    plan: 'free' | 'team' | 'business';
-    settings: { retentionDays?: number };
-  }>;
-  const cutoffs = companies.map((c) => ({
-    id: c.id,
-    cutoffDay: retentionCutoffDay(startedAt, effectiveRetentionDays(c.plan, c.settings)),
-  }));
+  const { settings } = await loadDeployment(db);
+  const cutoffDay = retentionCutoffDay(startedAt, effectiveRetentionDays(settings));
 
-  // Slices touched since the last pass; on a cold start (no watermark) every slice that has raw turns.
+  // Days touched since the last pass; on a cold start (no watermark) every day that has raw turns.
   // turns.updated_at is set on insert and bumped by every ingest write to a turn (so it is never older
   // than created_at); both branches are index scans (turns_updated_idx, runs_created_idx, migration 0002).
   const dayExpr = sql`(t.started_at at time zone 'UTC')::date::text`;
   const changedRows = (await (full
-    ? db.execute(sql`select distinct t.company_id as "companyId", ${dayExpr} as day from turns t`)
+    ? db.execute(sql`select distinct ${dayExpr} as day from turns t`)
     : db.execute(sql`
-        select t.company_id as "companyId", ${dayExpr} as day from turns t
+        select ${dayExpr} as day from turns t
         where t.updated_at >= ${since!.toISOString()}::timestamptz
         union
-        select r.company_id, ${dayExpr} from runs r join turns t on t.id = r.turn_id and t.company_id = r.company_id
-        where r.created_at >= ${since!.toISOString()}::timestamptz`))) as unknown as Array<{ companyId: string; day: string }>;
+        select ${dayExpr} from runs r join turns t on t.id = r.turn_id
+        where r.created_at >= ${since!.toISOString()}::timestamptz`))) as unknown as Array<{ day: string }>;
 
-  const plan = planDays({ today, companies: cutoffs, changed: changedRows }, addDays);
+  const plan = planDays({ today, cutoffDay, changed: changedRows.map((r) => r.day) }, addDays);
   let rows = 0;
   let days = 0;
   let failed = 0;
-  for (const slice of plan) {
+  for (const day of plan) {
     if (signal?.aborted) break;
     try {
-      const r = await recomputeDay(db, slice.companyId, slice.day);
+      const r = await recomputeDay(db, day);
       if (r) {
         days += 1;
         rows += r.rows;
       }
     } catch (err) {
       failed += 1;
-      ctx.log.error(`rollups: company ${slice.companyId} day ${slice.day} failed`, err);
+      ctx.log.error(`rollups: day ${day} failed`, err);
     }
   }
   // Advance the watermark only when every slice succeeded and the pass was not interrupted.

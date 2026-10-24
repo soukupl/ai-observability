@@ -1,14 +1,15 @@
 import { sql } from 'drizzle-orm';
-import { bigint, boolean, check, date, foreignKey, index, jsonb, numeric, pgTable, text, unique, uuid } from 'drizzle-orm/pg-core';
+import { bigint, boolean, check, date, index, jsonb, numeric, pgTable, text, unique, uuid } from 'drizzle-orm/pg-core';
 import { count, createdAt, pk, tokenColumns, tstz, updatedAt, type PhasesMs } from './columns.js';
 import { budgetKindEnum } from './enums.js';
 import { projects } from './ingest.js';
-import { companies, companyMemberships, teams, users } from './tenancy.js';
+import { memberships, teams, users } from './tenancy.js';
 
 const big = (name: string) => bigint(name, { mode: 'number' }).notNull().default(0);
 
 /**
- * API list prices in USD per million tokens, effective from a date (global, not tenant data).
+ * API list prices in USD per million tokens, effective from a date. Admins edit them in the console (audited, RLS:
+ * admin-only writes); `ensureDefaultModelPrices` adds missing defaults.
  * Cost is computed at query time (SQL function estimate_cost_usd) with the row effective on the usage
  * date. Reasoning tokens are a subset of output tokens and are not billed separately.
  */
@@ -31,15 +32,12 @@ export const modelPrices = pgTable(
 /**
  * Daily aggregates kept forever (ADR-0012); no summaries. user_id becomes null when a user is deleted.
  * No unique key on the dimensions (that would collide after anonymization): the worker recomputes a
- * whole (company_id, day) slice inside one transaction (delete + insert).
+ * whole day slice inside one transaction (delete + insert).
  */
 export const dailyRollups = pgTable(
   'daily_rollups',
   {
     id: pk(),
-    companyId: uuid('company_id')
-      .notNull()
-      .references(() => companies.id, { onDelete: 'cascade' }),
     day: date('day', { mode: 'string' }).notNull(),
     teamId: uuid('team_id').references(() => teams.id, { onDelete: 'set null' }),
     userId: uuid('user_id').references(() => users.id, { onDelete: 'set null' }),
@@ -73,8 +71,8 @@ export const dailyRollups = pgTable(
     updatedAt: updatedAt(),
   },
   (t) => [
-    index('daily_rollups_company_day_idx').on(t.companyId, t.day),
-    index('daily_rollups_company_team_day_idx').on(t.companyId, t.teamId, t.day),
+    index('daily_rollups_day_idx').on(t.day),
+    index('daily_rollups_team_day_idx').on(t.teamId, t.day),
     index('daily_rollups_user_idx').on(t.userId),
   ],
 );
@@ -82,7 +80,7 @@ export const dailyRollups = pgTable(
 /**
  * Daily skill / MCP use (docs/briefs/skills-and-mcp-stats.md), written by the worker together with
  * daily_rollups in the same slice transaction and with the same rules (no unique key, anonymised rows
- * kept, ADR-0012). One row per company × UTC day of the turn's `started_at` × team × user × project ×
+ * kept, ADR-0012). One row per UTC day of the turn's `started_at` × team × user × project ×
  * harness × primary model × kind × name × tool, counting the turn and its runs:
  *   kind 'skill': name = skill, tool = '' (calls = model_calls + user_calls);
  *   kind 'mcp':   name = server, tool = '' for the server total, or the tool name for one tool.
@@ -92,9 +90,6 @@ export const dailySkillMcpRollups = pgTable(
   'daily_skill_mcp_rollups',
   {
     id: pk(),
-    companyId: uuid('company_id')
-      .notNull()
-      .references(() => companies.id, { onDelete: 'cascade' }),
     day: date('day', { mode: 'string' }).notNull(),
     teamId: uuid('team_id').references(() => teams.id, { onDelete: 'set null' }),
     userId: uuid('user_id').references(() => users.id, { onDelete: 'set null' }),
@@ -129,8 +124,8 @@ export const dailySkillMcpRollups = pgTable(
     updatedAt: updatedAt(),
   },
   (t) => [
-    index('daily_skill_mcp_rollups_company_day_idx').on(t.companyId, t.day),
-    index('daily_skill_mcp_rollups_company_team_day_idx').on(t.companyId, t.teamId, t.day),
+    index('daily_skill_mcp_rollups_day_idx').on(t.day),
+    index('daily_skill_mcp_rollups_team_day_idx').on(t.teamId, t.day),
     index('daily_skill_mcp_rollups_user_idx').on(t.userId),
     check('daily_skill_mcp_rollups_kind', sql`${t.kind} in ('skill', 'mcp')`),
   ],
@@ -141,11 +136,9 @@ export const budgets = pgTable(
   'budgets',
   {
     id: pk(),
-    companyId: uuid('company_id')
-      .notNull()
-      .references(() => companies.id, { onDelete: 'cascade' }),
-    teamId: uuid('team_id'),
-    userId: uuid('user_id'),
+    teamId: uuid('team_id').references(() => teams.id, { onDelete: 'cascade' }),
+    /** A per-user budget goes with the membership. */
+    userId: uuid('user_id').references(() => memberships.userId, { onDelete: 'cascade' }),
     kind: budgetKindEnum('kind').notNull(),
     period: text('period').notNull().default('month'),
     /** Tokens, or USD for kind = 'cost'. */
@@ -158,15 +151,8 @@ export const budgets = pgTable(
     updatedAt: updatedAt(),
   },
   (t) => [
-    index('budgets_company_idx').on(t.companyId),
     check('budgets_has_scope', sql`${t.teamId} is not null or ${t.userId} is not null`),
     check('budgets_period', sql`${t.period} = 'month'`),
     check('budgets_limit_positive', sql`${t.limitValue} > 0`),
-    foreignKey({ columns: [t.companyId, t.teamId], foreignColumns: [teams.companyId, teams.id] }).onDelete('cascade'),
-    foreignKey({
-      name: 'budgets_membership_fk',
-      columns: [t.companyId, t.userId],
-      foreignColumns: [companyMemberships.companyId, companyMemberships.userId],
-    }).onDelete('cascade'),
   ],
 );

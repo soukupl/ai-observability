@@ -457,7 +457,7 @@ export async function listFlows(
   if (sessionId) {
     // One session (ADR-0026): every flow of its turns, whatever the date range; raw rows under RLS (in aggregates-only
     // mode a lead / admin reads only their own session this way).
-    input = await readFlowInputs(ctx, [sql`t.company_id = ${ctx.viewer.companyId}::uuid`, sql`t.session_id = ${sessionId}::uuid`]);
+    input = await readFlowInputs(ctx, [sql`t.session_id = ${sessionId}::uuid`]);
   } else if (ctx.agg) {
     const args = aggArgs(d, 'ts');
     const projectsP = listProjects(ctx);
@@ -507,7 +507,7 @@ export async function readFlowInputs(ctx: QueryCtx, conds: SQL[]): Promise<FlowI
             r.phases_ms, r.skills, r.mcp,
             ${MS('t.started_at')} as turn_started_ms, t.project_id as turn_project_id, t.harness as turn_harness, t.summary as turn_summary,
             (t.user_id is not distinct from ${ctx.viewer.id}::uuid) as turn_is_mine
-          from turns t join runs r on r.turn_id = t.id and r.company_id = t.company_id
+          from turns t join runs r on r.turn_id = t.id
           ${where(conds)}
           order by r.started_at, r.id limit ${FLOW_MAX_RUNS + 1}`,
     ),
@@ -515,8 +515,8 @@ export async function readFlowInputs(ctx: QueryCtx, conds: SQL[]): Promise<FlowI
     rows<Record<string, unknown>>(
       ctx.tx,
       sql`select l.from_run_id, l.to_run_id, l.kind
-          from turns t join runs r on r.turn_id = t.id and r.company_id = t.company_id
-            join run_links l on l.to_run_id = r.id and l.company_id = r.company_id
+          from turns t join runs r on r.turn_id = t.id
+            join run_links l on l.to_run_id = r.id
           ${where([...conds, sql`l.from_run_id is not null`])}
           order by r.started_at, r.id, l.from_run_id, l.kind limit ${FLOW_MAX_RUNS + 1}`,
     ),

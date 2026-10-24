@@ -1,8 +1,11 @@
 # ai-obs
 
-Multi-tenant SaaS that shows companies, teams and developers **how AI coding agents are used**:
+Self-hosted dashboard that shows a company, its teams and its developers **how AI coding agents are used**:
 projects, models and effort levels, tokens and ≈ cost, where the time goes (thinking / exploring /
 coding / documenting / testing / validating), sub-agent usage and how often work succeeds.
+
+One deployment serves one company (ADR-0028): you run the Docker image on your own infrastructure, the company's
+people are grouped into **teams**, and every developer reports with a **personal token**.
 
 A tiny zero-dependency collector (`ai-obs`) reads exact numbers from Claude Code and Codex hooks and
 local transcripts and pushes batched, idempotent events to the ingest API. Prompts, code, diffs and
@@ -14,11 +17,84 @@ on your own machine in a terminal, from local files only (see [packages/collecto
 
 - Requirements: [BRIEF.md](BRIEF.md) · Architecture: [ARCHITECTURE.md](ARCHITECTURE.md) · Decisions: [docs/adr/](docs/adr/README.md)
 
-## Quick start
+## Quick start (self-hosting)
+
+Requirements: Docker. (Node 22 and pnpm 10 only for development.)
+
+```sh
+cp .env.example .env     # set SESSION_SECRET (openssl rand -base64 48), APP_URL, ADMIN_EMAILS, SMTP_*, OAuth keys
+docker compose up --build   # postgres -> migrate (one-shot) -> web + worker
+```
+
+1. **Set `ADMIN_EMAILS`** in `.env` to the e-mail(s) of the first administrator(s), comma-separated.
+2. **First login.** Open `APP_URL`, enter that e-mail at `/login` and follow the magic link (or use Google / GitHub when
+   configured). A listed e-mail becomes an admin member of the deployment at its first login. Rename the deployment and
+   choose the privacy mode in Admin → Settings, then create the teams.
+3. **Bring people in.** Invite them from Admin → Invitations (a team and a role each; the invitation is accepted by their
+   first login), or set `ALLOWED_EMAIL_DOMAINS=example.com` so everyone with a verified address in that domain joins as a
+   member by themselves. An unknown e-mail that is neither listed, invited nor in an allowed domain is refused.
+4. **Connect collectors** (below). Service users for CI or shared machines are made in Admin → Service users.
+
+One image serves three entry points: `web` (Next.js standalone, port 3000), `worker` and `migrate`
+(`docker run ai-obs:local migrate`). The image has no demo seed. `SESSION_SECRET` must be a real secret in production:
+OAuth cookies are signed with it, and in production the app refuses the `change-me…` placeholder: OAuth and magic-link
+requests redirect to `/login?error=config` with a clear message (the cause is logged once). Without a mounted volume at
+`WORKER_STATE_DIR` the worker re-folds all rollups after a restart (safe, just slower). Compose services: `postgres`,
+`migrate`, `web`, `worker`, plus `mailpit` in the `dev` profile (`docker compose --profile dev up --build`).
+
+### Connect a developer machine
+
+```sh
+npx @soukupl/ai-obs login --server https://obs.example.com   # prints a code; approve it at <server>/device in the browser
+npx @soukupl/ai-obs init                                     # hooks for every detected harness (Claude Code, Codex)
+cd path/to/repo && npx @soukupl/ai-obs link --team platform  # once per repository: which team it reports to
+git add .ai-obs.json && git commit -m "Report to the platform team"
+```
+
+`login` uses a device code like `gh auth login`: the CLI shows `ABCD-EFGH`, you open `/device`, check the client name and
+approve. The token it receives is yours (not a company token), lasts 90 days and is stored in `~/.ai-obs/config.json`
+(mode 0600). A machine can hold one token per server, so a developer who works for two companies logs in to both servers.
+`login --token <t>` stores a token made on the dashboard's "My tokens" page instead (CI uses a service-user token).
+
+`ai-obs link --team <slug>` writes the **dot file** `.ai-obs.json` at the repository root, `{"server": "https://…", "team": "<slug>"}`:
+commit it so everyone who clones the repository reports to the same server and team. `--local` writes the git-ignored
+`.ai-obs.local.json` instead, which overrides the committed one key by key. Tokens never go into either file, and the collector
+sends only to servers it holds a token for. The team is checked on the server: the admin's project → team mapping always
+wins; otherwise the dot-file team counts if you are a member of it, else your primary team. A refused team shows in
+`ai-obs status` and `doctor`. Details: [packages/collector/README.md](packages/collector/README.md), ADR-0029, ADR-0030.
+
+### Upgrading to one deployment per company (ADR-0028 to 0030)
+
+Order matters (the brief's release order):
+
+1. **Server first.** Stop `web` and `worker`, back up the database, then start the new image: migration 0018 turns the
+   one company into the `deployment` row, drops every `company_id`, the plans and the company tokens, strips the
+   `app_platform` role of every privilege, and refuses to run while more than one company exists. Set `ADMIN_EMAILS`;
+   remove the old `SUPER_ADMIN_EMAILS`, `DATABASE_URL_PLATFORM` and `DB_APP_PLATFORM_PASSWORD`. The cluster role
+   `app_platform` itself stays until you drop it by hand (`DROP ROLE app_platform;`) once no database uses it. Existing user tokens stay valid and expire 90 days after the cutover.
+2. **Then the collectors.** Each developer updates to **0.5.0** (`npx @soukupl/ai-obs@latest login --server …`, then `init`); it migrates
+   `~/.ai-obs/config.json` to v3, keeps queued data (re-bound to its server) and ignores the old `projects.json`. 0.4.0 was
+   never published, so 0.5.0 also carries the live-session work. Run `ai-obs link --team <slug>` in each repository.
+3. **Last, `MIN_COLLECTOR_VERSION=0.5.0`**, once every collector is on 0.5.0: older ones are then told to upgrade.
+
+**Dev deployment with several companies.** Only the development database has more than one company. Merge them first,
+BEFORE migration 0018, and stop `web` and `worker` while it runs (it locks the telemetry tables for about a second):
+
+```sh
+pnpm --filter @ai-obs/db db:merge-companies -- --survivor <slug> --name SPECTADO --slug spectado --dry-run   # rehearse
+pnpm --filter @ai-obs/db db:merge-companies -- --survivor <slug> --name SPECTADO --slug spectado
+```
+
+It folds the other companies into the survivor in one transaction (teams stay separate, one user per e-mail with the highest
+role, rollup rows kept and re-pointed with their sums checked), prints per-table row counts before and after, and aborts on a duplicate session, turn or run id (duplicate events and parked patches are
+de-duplicated). It applies the dev settings **full visibility, retention 395 days, runaway 20 USD, plain project naming**
+unless you pass `--visibility aggregates-only`, `--retention-days`, `--runaway-cost-usd` or `--project-naming` to keep
+your mode. Point it at a `pg_dump` copy with `--url <postgres url>`; without `--url` it uses `MIGRATE_DATABASE_URL`, else
+`DATABASE_URL` (the live database named in `.env`). Rehearse on a copy first. See [packages/db/README.md](packages/db/README.md).
+
+## Local development
 
 Requirements: Node 22, pnpm 10, Docker.
-
-### Local development
 
 ```sh
 cp .env.example .env
@@ -34,69 +110,38 @@ repo-root `.env`.
 
 ### Pre-seeded dev logins
 
-There are no passwords anywhere: sign-in is by magic link (or Google / GitHub OAuth when configured). `pnpm db:seed` creates
-the demo company **Acme** (Team plan, aggregates-only visibility, two teams, two projects, about 300 turns over 60 days) and a
-second company **Globex** (Free plan, one team, no telemetry) with these accounts. alice belongs to both, so the company switcher in the header has
-something to show. Enter an e-mail at `/login` and open the link that arrives in Mailpit.
+There are no passwords anywhere: sign-in is by magic link (or Google / GitHub OAuth when configured). `pnpm db:seed` names the
+deployment **SPECTADO** (slug `spectado`, aggregates-only visibility) and creates two teams (Platform, Mobile), two projects, about 300
+turns over 60 days, these accounts and a service user **Demo CI** (no login, primary team Platform) with an admin-made token.
+Enter an e-mail at `/login` and open the link that arrives in Mailpit.
 
 | E-mail | Role | What they see |
 |---|---|---|
-| `alice@acme.example` | Company admin of Acme (Platform team); member of Globex | Acme: whole company, every `/admin` page. Switch to Globex: an empty dashboard (isolation) |
-| `gina@globex.example` | Company admin of Globex | Globex only |
-| `bob@acme.example` | Lead of the Platform team | Platform aggregates, company tokens and budgets |
+| `alice@acme.example` | Admin; member of Platform | The whole deployment, every `/admin` page |
+| `bob@acme.example` | Lead of the Platform team | Platform aggregates and budgets |
 | `carol@acme.example` | Member, Platform team | Only her own turns |
 | `dave@acme.example` | Member, Mobile team | Only his own turns |
-| `admin@example.com` | Super admin (listed in `SUPER_ADMIN_EMAILS`) | `/super` console only, no telemetry |
+| `admin@example.com` (first `ADMIN_EMAILS` address) | Admin member, no team | Every `/admin` page, no telemetry of their own |
 
 Mailpit UI: http://localhost:8025 by default. If another mail catcher such as MailHog already uses ports 1025 / 8025, set
 `MAILPIT_SMTP_PORT` / `MAILPIT_UI_PORT` in `.env` (for example `MAILPIT_UI_PORT=8026`) before starting the stack. Inside
 Docker Compose the apps reach Mailpit by service name, so keep `SMTP_HOST` empty in dev. Magic links expire after 15 minutes.
-The Docker-only path (`docker compose up`) does not seed; run `pnpm db:seed` against it or create the first company via `/signup`.
+The Docker-only path (`docker compose up`) does not seed; log in with an `ADMIN_EMAILS` address, or run `pnpm db:seed` against it.
 
 To try the collector against your dev server:
 
 ```sh
-TOKEN=$(pnpm -s dev:token)                      # user token for a seeded user in their active company (scripts/dev-token.ts)
-# pnpm -s dev:token alice@acme.example globex   # the same user in another company
 pnpm --filter @soukupl/ai-obs build
-AI_OBS_HOME=/tmp/ai-obs-dev node packages/collector/bin/ai-obs.js init --token "$TOKEN" --endpoint http://localhost:3000
+export AI_OBS_HOME=/tmp/ai-obs-dev                # scratch state; also point HOME at a scratch dir (init edits ~/.claude and ~/.codex)
+node packages/collector/bin/ai-obs.js login --server http://localhost:3000   # approve at http://localhost:3000/device as alice
+node packages/collector/bin/ai-obs.js init
+# or skip the browser: a seeded user's token, made by scripts/dev-token.ts
+TOKEN=$(pnpm -s dev:token alice@acme.example my-laptop 30)   # [email] [label] [days|none]
+node packages/collector/bin/ai-obs.js login --server http://localhost:3000 --token "$TOKEN"
 ```
 
-`init` edits the real `~/.claude/settings.json` and `~/.codex/hooks.json`; point `HOME` at a scratch
-directory to try it without touching them.
-
-A machine can hold several tokens. To report to a second company, register its token and choose per repository:
-
-```sh
-AI_OBS_HOME=/tmp/ai-obs-dev node packages/collector/bin/ai-obs.js token add --token "$GLOBEX_TOKEN" --endpoint http://localhost:3000
-cd path/to/repo && AI_OBS_HOME=/tmp/ai-obs-dev node /path/to/packages/collector/bin/ai-obs.js use globex
-```
-
-With one token nothing changes. With two or more, a repository's events stay on the machine until `ai-obs use <name>`, and
-the AI harness asks you at session start. See [packages/collector/README.md](packages/collector/README.md).
-
-### Upgrading to company memberships (ADR-0022)
-
-Migration 0014 revokes **every existing ingest token** (a clean break): each developer re-runs `ai-obs init --token <new token>`
-with a user token from the dashboard (or a company token from an admin). Right after the upgrade every old collector gets
-401s, which can use up the per-IP failed-auth budget behind one office NAT and answer a fresh token's first request with 429.
-For the first day raise `INGEST_FAILED_AUTH_BURST` / `INGEST_FAILED_AUTH_PER_MINUTE` (for example 200 / 120), restore the
-defaults afterwards (a restart of the web process also resets the guard), and set `MIN_COLLECTOR_VERSION` to `0.2.0`, the first
-collector release that supports company tokens and several tokens per machine.
-
-### Full stack in Docker
-
-```sh
-cp .env.example .env        # set SESSION_SECRET (openssl rand -base64 48), APP_URL, SMTP_*, OAuth keys
-docker compose up --build   # postgres -> migrate (one-shot) -> web + worker
-docker compose --profile dev up --build   # same, plus Mailpit
-```
-
-One image serves three entry points: `web` (Next.js standalone, port 3000), `worker` and `migrate`
-(`docker run ai-obs:local migrate`). The image has no demo seed: open `/login`, enter your e-mail and
-create the first company on `/signup` (or list the e-mail in `SUPER_ADMIN_EMAILS` for the platform
-console). `SESSION_SECRET` must be a real secret in production: sign-up and OAuth cookies are signed with it, and in production the app refuses the `change-me…` placeholder: sign-up, OAuth and magic-link requests redirect to `/login?error=config` with a clear message (the cause is logged once). Without a mounted volume at `WORKER_STATE_DIR` the worker re-folds all rollups after a
-restart (safe, just slower).
+To report to a second server, run `login --server <other>` again; in each repository `ai-obs link --team <slug> --server <url>`
+picks the server and team. With two or more servers and no dot file, a repository's events stay on the machine until it is linked.
 
 ## Repository map
 
@@ -104,9 +149,9 @@ restart (safe, just slower).
 |---|---|---|
 | `packages/protocol` | `@ai-obs/protocol` | Ingest schema v1: types, zod schemas, `validateBatch()`, shared constants, `fixtures/` |
 | `packages/db` | `@ai-obs/db` | Drizzle schema, `migrations/` (incl. roles + RLS), `dbFor()`, `withRlsContext()`, migrate + seed — see [packages/db/README.md](packages/db/README.md) |
-| `packages/collector` | `ai-obs` | Zero-runtime-dependency CLI: `init`, `token`, `use`, `doctor`, `status`, `flush`, `live`, `uninstall`, `hook` |
-| `apps/web` | `@ai-obs/web` | Next.js App Router + Tailwind + Recharts: dashboard, admin, super admin, `/api/v1/*` |
-| `apps/worker` | `@ai-obs/worker` | Rollups, budgets, retention, e-mail jobs |
+| `packages/collector` | `@soukupl/ai-obs` | Zero-runtime-dependency CLI: `login`, `init`, `link`, `token`, `doctor`, `status`, `flush`, `live`, `uninstall`, `hook` |
+| `apps/web` | `@ai-obs/web` | Next.js App Router + Tailwind + Recharts: dashboard, admin, device login, `/api/v1/*` |
+| `apps/worker` | `@ai-obs/worker` | Rollups, budgets, retention, runaway alerts, e-mail jobs |
 | `docs/adr` | – | Architecture Decision Records |
 
 Workspace packages are consumed from source in type-checking and tests (custom export condition
@@ -123,9 +168,9 @@ Workspace packages are consumed from source in type-checking and tests (custom e
 | `pnpm typecheck` | `tsc --noEmit` in every package |
 | `pnpm db:generate` | Generate a Drizzle migration from `packages/db/src/schema` |
 | `pnpm db:migrate` | Apply Drizzle migrations incl. roles + RLS, default model prices, role passwords (uses `MIGRATE_DATABASE_URL`, else `DATABASE_URL`) |
-| `pnpm db:seed` | Reset and seed the demo company "Acme" (~300 turns over 60 days) and a super admin |
-| `RUN_ONCE=<rollups\|budgets\|retention> pnpm --filter @ai-obs/worker once` | Run one worker job and exit (e.g. after `pnpm db:seed` to fill `daily_rollups`) |
-| `pnpm dev:token [email] [company-slug]` | Dev only: create a user ingest token for a seeded user (in their active company, or the given one) and print it |
+| `pnpm db:seed` | Reset and seed the demo deployment SPECTADO (~300 turns over 60 days), its people, a service user and an admin |
+| `RUN_ONCE=<rollups\|budgets\|retention\|runaways> pnpm --filter @ai-obs/worker once` | Run one worker job and exit (e.g. after `pnpm db:seed` to fill `daily_rollups`) |
+| `pnpm dev:token [email] [label] [days\|none]` | Dev only: create a manual user ingest token (default alice@acme.example, label `dev-token`, 90 days) and print it |
 
 ## Configuration
 
@@ -135,8 +180,10 @@ environment only; they are never baked into the image.
 Behind a reverse proxy, set `TRUSTED_PROXY_HOPS` (login rate limits) and `INGEST_TRUSTED_PROXY_HOPS` (ingest failed-auth
 budget) to the number of proxies that append to `X-Forwarded-For` (default 1; the client IP is the n-th entry from the
 right). The compose file publishes the web port directly, in which case those headers are client-controlled and only
-the per-e-mail and per-token limits protect you: put a proxy in front for production. `SUPER_ADMIN_EMAILS` is the
-source of truth for super admins; removing an e-mail revokes the role at once.
+the per-e-mail and per-token limits protect you: put a proxy in front for production. `ADMIN_EMAILS` and
+`ALLOWED_EMAIL_DOMAINS` only decide who may join at first login; roles are managed in Admin → Members afterwards.
+Production database logins: set `DB_APP_WEB_PASSWORD`, `DB_APP_INGEST_PASSWORD`, `DB_APP_WORKER_PASSWORD` and the matching
+`DATABASE_URL_WEB` / `_INGEST` / `_WORKER` (roles `app_web`, `app_ingest`, `app_worker`).
 
 ## Dependencies
 

@@ -74,37 +74,28 @@ describe('aggregateDay', () => {
 });
 
 describe('planDays', () => {
-  const companies = [
-    { id: 'c1', cutoffDay: '2026-09-01' },
-    { id: 'c2', cutoffDay: '2026-10-04' },
-  ];
-
-  it('always includes today and yesterday for every company', () => {
-    const plan = planDays({ today: '2026-10-05', companies, changed: [] }, addDays);
-    expect(plan).toEqual([
-      { companyId: 'c1', day: '2026-10-05' }, { companyId: 'c2', day: '2026-10-05' },
-      { companyId: 'c1', day: '2026-10-04' }, { companyId: 'c2', day: '2026-10-04' },
-    ]);
+  it('always includes today and yesterday', () => {
+    expect(planDays({ today: '2026-10-05', cutoffDay: '2026-09-01', changed: [] }, addDays)).toEqual(['2026-10-05', '2026-10-04']);
   });
 
-  it('adds changed slices, de-duplicates, and drops days outside the retention window or in the future', () => {
+  it('adds changed days, de-duplicates, and drops days outside the retention window or in the future', () => {
     const plan = planDays(
       {
         today: '2026-10-05',
-        companies,
+        cutoffDay: '2026-09-01',
         changed: [
-          { companyId: 'c1', day: '2026-09-15' }, { companyId: 'c1', day: '2026-10-05' },
-          { companyId: 'c1', day: '2026-08-31' }, // before c1 cutoff
-          { companyId: 'c2', day: '2026-10-03' }, // before c2 cutoff
-          { companyId: 'c1', day: '2026-10-06' }, // future (clock skew)
-          { companyId: 'gone', day: '2026-10-05' }, // unknown company
+          '2026-09-15', '2026-10-05', '2026-09-15',
+          '2026-08-31', // before the cutoff
+          '2026-10-06', // future (clock skew)
         ],
       },
       addDays,
     );
-    expect(plan.map((p) => `${p.companyId}:${p.day}`)).toEqual([
-      'c1:2026-10-05', 'c2:2026-10-05', 'c1:2026-10-04', 'c2:2026-10-04', 'c1:2026-09-15',
-    ]);
+    expect(plan).toEqual(['2026-10-05', '2026-10-04', '2026-09-15']);
+  });
+
+  it('never plans yesterday when it is already outside the window', () => {
+    expect(planDays({ today: '2026-10-05', cutoffDay: '2026-10-05', changed: ['2026-10-04'] }, addDays)).toEqual(['2026-10-05']);
   });
 });
 

@@ -85,13 +85,35 @@ export const PROJECT_NAMING_MODES = ['plain', 'hashed'] as const;
 export type ProjectNamingMode = (typeof PROJECT_NAMING_MODES)[number];
 
 /**
- * Ingest token prefixes (ADR-0007, ADR-0022): user tokens identify one member of one company; company tokens
- * (CI, bots, rollout) match users by git e-mail company-wide. Tokens are never bound to a team.
+ * Ingest token prefix: one prefix for person and service users (single deployment, per-user tokens). The retired
+ * company-token prefix `aiobs_c_` is no longer a token kind; the server answers it with an explicit 401.
  */
 export const USER_TOKEN_PREFIX = 'aiobs_u_' as const;
-export const COMPANY_TOKEN_PREFIX = 'aiobs_c_' as const;
-export const TOKEN_PREFIXES = { user: USER_TOKEN_PREFIX, company: COMPANY_TOKEN_PREFIX } as const;
+export const TOKEN_PREFIXES = { user: USER_TOKEN_PREFIX } as const;
 export type TokenKind = keyof typeof TOKEN_PREFIXES;
+/** Retired prefixes (company token `aiobs_c_`, team token `aiobs_t_`) that ingest rejects with an explicit 401. */
+export const REJECTED_TOKEN_PREFIXES = ['aiobs_c_', 'aiobs_t_'] as const;
+
+/** Where a collector token came from: device login or pasted by hand. */
+export const TOKEN_SOURCES = ['device', 'manual'] as const;
+export type TokenSource = (typeof TOKEN_SOURCES)[number];
+
+/** Kinds of user a token identifies. */
+export const USER_KINDS = ['person', 'service'] as const;
+export type UserKind = (typeof USER_KINDS)[number];
+
+/** Ingest warning codes (batch response `warnings`). */
+export const INGEST_WARNING_CODES = ['team_not_member', 'team_unknown'] as const;
+export type IngestWarningCode = (typeof INGEST_WARNING_CODES)[number];
+
+/** Team slug: 1-63 of a-z0-9-. */
+export const TEAM_SLUG_RE = /^[a-z0-9-]{1,63}$/;
+
+/**
+ * Longest `session_start.project.team` ingest accepts. The wire field is not slug-checked: a malformed team names no
+ * team, so ingest answers it with `team_unknown` and falls back instead of rejecting the session (ADR-0030 R2).
+ */
+export const MAX_TEAM_REF_LENGTH = 128;
 
 /** Environment variable that marks the collector's own summarizer child process (recursion guard, BRIEF §5.6). */
 export const SUMMARIZING_ENV = 'AI_OBS_SUMMARIZING' as const;

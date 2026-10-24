@@ -43,13 +43,31 @@ export function setMailer(m: Mailer | null): void {
 const escapeHtml = (s: string) =>
   s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 
-export function magicLinkEmail(to: string, link: string, ttlMinutes: number): MailMessage {
+/** The sign-in link, naming the deployment (ADR-0028). */
+export function magicLinkEmail(to: string, link: string, ttlMinutes: number, deploymentName: string): MailMessage {
+  const name = deploymentName;
   return {
     to,
-    subject: 'Your ai-obs sign-in link',
-    text: `Sign in to ai-obs:\n\n${link}\n\nThe link works once and expires in ${ttlMinutes} minutes. If you did not ask for it, ignore this e-mail.\n`,
+    subject: `Your ${name} sign-in link`,
+    text: `Sign in to ${name}:\n\n${link}\n\nThe link works once and expires in ${ttlMinutes} minutes. If you did not ask for it, ignore this e-mail.\n`,
     html:
-      `<p>Sign in to ai-obs:</p><p><a href="${escapeHtml(link)}">Sign in</a></p>` +
+      `<p>Sign in to ${escapeHtml(name)}:</p><p><a href="${escapeHtml(link)}">Sign in</a></p>` +
       `<p>The link works once and expires in ${ttlMinutes} minutes. If you did not ask for it, ignore this e-mail.</p>`,
+  };
+}
+
+/** An invitation to join the deployment (and a team), naming the deployment and the inviter. */
+export function invitationEmail(
+  to: string,
+  opts: { deploymentName: string; inviter: string; teamName: string | null; loginUrl: string; expiresInDays: number },
+): MailMessage {
+  const team = opts.teamName ? ` (team ${opts.teamName})` : '';
+  const what = `${opts.inviter} invited you to ${opts.deploymentName}${team} on ai-obs.`;
+  const how = `Sign in with this e-mail address within ${opts.expiresInDays} days to join:`;
+  return {
+    to,
+    subject: `You are invited to ${opts.deploymentName}`,
+    text: `${what}\n\n${how}\n${opts.loginUrl}\n`,
+    html: `<p>${escapeHtml(what)}</p><p>${escapeHtml(how)}</p><p><a href="${escapeHtml(opts.loginUrl)}">Sign in</a></p>`,
   };
 }

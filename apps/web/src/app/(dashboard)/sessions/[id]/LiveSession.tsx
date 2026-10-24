@@ -23,9 +23,9 @@ interface LiveSessionValue {
 
 const LiveSessionContext = createContext<LiveSessionValue | null>(null);
 
-export function LiveSessionProvider({ sessionId, companyId, initial, children }: { sessionId: string; companyId: string; initial: LiveSessionPayload; children: ReactNode }) {
+export function LiveSessionProvider({ sessionId, initial, children }: { sessionId: string; initial: LiveSessionPayload; children: ReactNode }) {
   const router = useRouter();
-  const { data, receivedAtMs, failing, halted } = useLivePoll(`/api/live/sessions/${sessionId}?company=${encodeURIComponent(companyId)}`, initial, {
+  const { data, receivedAtMs, failing, halted } = useLivePoll(`/api/live/sessions/${sessionId}`, initial, {
     enabled: initial.status.state !== 'ended',
   });
   useEffect(() => {

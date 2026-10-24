@@ -6,21 +6,24 @@ import { createClaudeCodeAdapter } from '../src/adapters/claude-code/index.js';
 import { newSessionState as newCodexState } from '../src/adapters/codex/session.js';
 import type { CollectorContext, HarnessAdapter, HookInvocation } from '../src/adapters/types.js';
 import { runSummaryBatch } from '../src/analysis/summaries.js';
-import { identityOf, loadConfig, saveConfig, type CollectorConfig, type TokenEntry } from '../src/config.js';
+import { loadConfig, saveConfig, type CollectorConfig } from '../src/config.js';
 import { createContext } from '../src/context.js';
+import type { DotFileValue } from '../src/dotfile.js';
 import { nullLogger } from '../src/log.js';
 import type { AiObsPaths } from '../src/paths.js';
-import { loadRouting, resolveStream } from '../src/projects.js';
 import type { IngestEvent } from '../src/protocol-types.js';
-import { identityOfRef, type QueueStore, type StreamKey } from '../src/queue.js';
+import type { QueueStore } from '../src/queue.js';
+import type { StreamKey } from '../src/routing.js';
 import { FAKE_SUMMARIZER } from './claude-code/helpers.js';
 import { at, CWD, SESSION, threeTurnSession, writeSession } from './claude-code/fixture.js';
 import { codexTestEnv, copyFixtures, SESSION as CODEX_SESSION } from './codex/codex-helpers.js';
-import { cleanupHomes, tmpHome, writeProjects, writeTestTokens } from './helpers.js';
+import { cleanupHomes, tmpHome, writeTestServers } from './helpers.js';
 import { queueStore } from './queue-helpers.js';
 
 afterEach(cleanupHomes);
 
+const A = 'https://obs.acme.io';
+const B = 'https://obs.globex.io';
 const KEYS: Record<string, string> = {
   [CWD]: 'github.com/acme/billing',
   '/work/other-repo': 'github.com/acme/other',
@@ -34,8 +37,8 @@ interface Recorded {
   key: StreamKey | null;
 }
 
-/** A context over a real QueueStore that also records every enqueue call. */
-function contextFor(adapter: HarnessAdapter, paths: AiObsPaths, config: CollectorConfig, now: () => Date) {
+/** A context over a real QueueStore that records every enqueue call; dot files come from `dots` (cwd → value). */
+function contextFor(adapter: HarnessAdapter, paths: AiObsPaths, config: CollectorConfig, now: () => Date, dots: Record<string, DotFileValue> = {}) {
   const store: QueueStore = queueStore(paths);
   const calls: Recorded[] = [];
   const ctx: CollectorContext = createContext({
@@ -51,22 +54,19 @@ function contextFor(adapter: HarnessAdapter, paths: AiObsPaths, config: Collecto
     log: nullLogger,
     now,
     resolveProject,
+    dotFile: (cwd) => dots[cwd] ?? {},
   });
-  return { ctx, store, calls };
+  return { ctx, store, calls, dots };
 }
 
-function assign(paths: AiObsPaths, pk: string, t: TokenEntry) {
-  writeProjects(paths, { [pk]: { token: t.name, ...identityOf(t), assigned_at: new Date().toISOString() } });
-}
-
-function claudeHarness(specs: Parameters<typeof writeTestTokens>[1]) {
+function claudeHarness(servers: string[], dots: Record<string, DotFileValue> = {}) {
   const paths = tmpHome();
-  const config = writeTestTokens(paths, specs);
+  const config = writeTestServers(paths, servers.map((endpoint) => ({ endpoint })));
   const claudeDir = mkdtempSync(join(tmpdir(), 'ai-obs-claude-'));
   const projectDir = join(claudeDir, 'projects', CWD.replace(/[^A-Za-z0-9]/g, '-'));
   mkdirSync(projectDir, { recursive: true });
   const adapter = createClaudeCodeAdapter({ probe: async () => '2.1.289', summaryArgv: FAKE_SUMMARIZER, claudeDir });
-  const { ctx, store, calls } = contextFor(adapter, paths, config, () => new Date());
+  const { ctx, store, calls } = contextFor(adapter, paths, config, () => new Date(), dots);
   const hook = (name: string, receivedAtMs: number, cwd = CWD, payload: Record<string, unknown> = {}, sessionId = SESSION) => {
     const inv: HookInvocation = {
       harness: 'claude-code',
@@ -78,7 +78,7 @@ function claudeHarness(specs: Parameters<typeof writeTestTokens>[1]) {
     };
     return adapter.handleHook(inv, ctx);
   };
-  return { paths, config, adapter, ctx, store, calls, hook, projectDir };
+  return { paths, config, adapter, ctx, store, calls, hook, projectDir, dots };
 }
 
 /** The worker's summary phase after its flush (ADR-0027): the staged digests' summaries go to their pinned stream. */
@@ -92,9 +92,11 @@ const summaries = (adapter: HarnessAdapter, ctx: CollectorContext) =>
 
 const pkOf = (k: StreamKey | null) => (k?.kind === 'project' ? k.pk : null);
 
+const target = (k: StreamKey | null) => (k ? `${k.endpoint}|${k.team}` : null);
+
 describe('session pinning (C12, C15)', () => {
   it('Claude Code: a session started in repo X keeps every event in X’s stream, even after cwd changes and in the sweep', async () => {
-    const h = claudeHarness([{ name: 'acme' }]);
+    const h = claudeHarness([A]);
     const fx = threeTurnSession();
     writeSession(h.projectDir, fx, { upTo: fx.turn2End });
     await h.hook('SessionStart', at(-1), CWD, { source: 'startup' });
@@ -102,106 +104,84 @@ describe('session pinning (C12, C15)', () => {
     utimesSync(h.ctx.state.path(SESSION), new Date(Date.now() - 25 * 3600_000), new Date(Date.now() - 25 * 3600_000));
     await h.adapter.sweepCrashedSessions(h.ctx);
     await summaries(h.adapter, h.ctx);
-
     const types = h.calls.flatMap((c) => c.events.map((e) => e.type));
-    expect(types).toContain('session_start');
-    expect(types).toContain('turn');
-    expect(types).toContain('turn_outcome');
-    expect(types).toContain('session_end');
-    expect(types).toContain('turn_summary');
+    expect(types).toEqual(expect.arrayContaining(['session_start', 'turn', 'turn_outcome', 'session_end', 'turn_summary']));
     expect(new Set(h.calls.map((c) => pkOf(c.key)))).toEqual(new Set(['github.com/acme/billing']));
     const streams = h.store.stats().streams;
     expect(streams).toHaveLength(1);
-    expect(streams[0]!.stream).toMatchObject({ kind: 'project', pk: 'github.com/acme/billing', bind: { kind: 'token', name: 'acme' } });
+    expect(streams[0]!.stream).toMatchObject({ kind: 'project', pk: 'github.com/acme/billing', endpoint: A, team: '' });
   });
 
-  it('a session bound to A keeps its binding after `use b`; a new session goes to B (no split)', async () => {
-    const h = claudeHarness([{ name: 'acme' }, { name: 'globex' }]);
-    const [acme, globex] = h.config.tokens as [TokenEntry, TokenEntry];
-    assign(h.paths, 'github.com/acme/billing', acme);
+  it('the dot file in force at the first hook pins server and team; a dot file changed mid-session never retargets it', async () => {
+    const h = claudeHarness([A, B], { [CWD]: { server: A, team: 'platform' } });
     const fx = threeTurnSession();
     writeSession(h.projectDir, fx, { upTo: fx.turn2End });
     await h.hook('SessionStart', at(-1), CWD, { source: 'startup' });
-    assign(h.paths, 'github.com/acme/billing', globex); // `ai-obs use globex`
+    h.dots[CWD] = { server: B, team: 'web' }; // `ai-obs link` while the session runs
     await h.hook('Stop', at(31.5));
     await h.hook('SessionStart', at(400), CWD, { source: 'startup' }, 'second-session');
-
-    const names = h.calls.map((c) => (c.key?.bind.kind === 'token' ? c.key.bind.name : 'open'));
-    expect(names).toEqual(['acme', 'acme', 'globex']);
-    const acmeStream = h.store.stats().streams.find((s) => s.stream.bind?.kind === 'token' && s.stream.bind.name === 'acme')!;
-    const q = h.store.stream(acmeStream.stream);
-    const queued = q.readBatch()!.events;
+    expect(h.calls.map((c) => target(c.key))).toEqual([`${A}|platform`, `${A}|platform`, `${B}|web`]);
+    const first = h.store.stats().streams.find((s) => s.stream.endpoint === A)!;
+    const queued = h.store.stream(first.stream).readBatch()!.events;
     expect(queued.filter((e) => e.type === 'session_start')).toHaveLength(1);
     expect(queued.some((e) => e.type === 'turn')).toBe(true);
   });
 
-  it('a session pinned open is released whole by `use b`', async () => {
-    const h = claudeHarness([{ name: 'acme' }, { name: 'globex' }]);
+  it('a session recorded while no server was chosen joins the link from its next event (C12)', async () => {
+    const h = claudeHarness([A, B]);
     const fx = threeTurnSession();
     writeSession(h.projectDir, fx, { upTo: fx.turn2End });
-    await h.hook('SessionStart', at(-1), CWD, { source: 'startup' });
+    await h.hook('SessionStart', at(-1), CWD, { source: 'startup' }); // two servers, no dot file: no server
+    expect(target(h.calls[0]!.key)).toBe('|');
+    h.dots[CWD] = { server: B, team: 'web' };
     await h.hook('Stop', at(31.5));
-    const [ref] = h.store.streams();
-    expect(ref).toMatchObject({ pk: 'github.com/acme/billing', bind: { kind: 'open' } });
-    expect(resolveStream(loadRouting(h.paths)!, identityOfRef(ref!))).toMatchObject({ kind: 'held', reason: 'unassigned' });
-    assign(h.paths, 'github.com/acme/billing', h.config.tokens[1]!);
-    expect(resolveStream(loadRouting(h.paths)!, identityOfRef(ref!))).toMatchObject({ kind: 'token', token: { name: 'globex' }, via: 'explicit' });
-    expect(h.store.streams()).toHaveLength(1);
-  });
-
-  it('an open session joins `use a` from its next event: `use b` later does not take those events to B (C12)', async () => {
-    const h = claudeHarness([{ name: 'acme' }, { name: 'globex' }]);
-    const [acme, globex] = h.config.tokens as [TokenEntry, TokenEntry];
-    const fx = threeTurnSession();
-    writeSession(h.projectDir, fx, { upTo: fx.turn2End });
-    await h.hook('SessionStart', at(-1), CWD, { source: 'startup' }); // no choice yet: open
-    assign(h.paths, 'github.com/acme/billing', acme); // `ai-obs use acme` (acme cannot send right now)
-    await h.hook('Stop', at(31.5));
-    assign(h.paths, 'github.com/acme/billing', globex); // `ai-obs use globex`
+    expect(h.calls.slice(1).every((c) => target(c.key) === `${B}|web`)).toBe(true);
+    h.dots[CWD] = { server: A }; // a later change does not take those events away
     await h.hook('Stop', at(32));
-
-    const names = h.calls.map((c) => (c.key?.bind.kind === 'token' ? c.key.bind.name : 'open'));
-    expect(names[0]).toBe('open');
-    expect(names.slice(1).every((n) => n === 'acme')).toBe(true);
-    const view = loadRouting(h.paths)!;
-    const routes = h.store.streams().map((ref) => [ref.bind?.kind, (resolveStream(view, identityOfRef(ref)) as { token?: TokenEntry }).token?.name]);
-    // recorded with no choice → follows the choice (globex); recorded after `use acme` → stays with acme
-    expect(routes.sort()).toEqual([
-      ['open', 'globex'],
-      ['token', 'acme'],
-    ]);
+    expect(h.calls.slice(1).every((c) => target(c.key) === `${B}|web`)).toBe(true);
   });
 
-  it('Codex: the binding is the routing at the session’s first hook, even when that hook enqueued nothing (C18)', async () => {
-    const env = codexTestEnv();
-    const paths = env.ctx.paths;
-    const t0 = Date.now();
-    const { ctx, calls } = contextFor(env.adapter, paths, env.ctx.config, () => new Date(t0 + 5000));
-    const hook = (name: string, receivedAt: number) =>
-      env.adapter.handleHook(
-        { harness: 'codex', hook: name, payload: { session_id: CODEX_SESSION, transcript_path: env.mainPath, cwd: '/work/first' }, cwd: '/work/first', env: {}, receivedAt: new Date(receivedAt).toISOString() },
-        ctx,
-      );
-    await hook('SessionStart', t0 - 60_000); // one token; the rollout is not written yet: nothing enqueued
-    expect(calls).toEqual([]);
-    const c = loadConfig(paths)!;
-    const globex: TokenEntry = { name: 'globex', company: { name: 'Globex', slug: 'globex' }, endpoint: 'http://127.0.0.1:9', token: 'aiobs_c_test-globex', added_at: new Date(t0).toISOString() };
-    saveConfig(paths, { ...c, tokens: [...c.tokens, globex] }, new Date(t0 + 1000)); // `ai-obs token add`
-    copyFixtures(env);
-    await hook('SessionEnd', t0 + 2000);
-    expect(calls.length).toBeGreaterThan(0);
-    expect(new Set(calls.map((x) => (x.key?.bind.kind === 'token' ? x.key.bind.name : 'open')))).toEqual(new Set([c.tokens[0]!.name]));
-  });
-
-  it('`use --none`: a new session is not recorded at all', async () => {
-    const h = claudeHarness([{ name: 'acme' }]);
-    writeProjects(h.paths, { 'github.com/acme/billing': { token: null, none: true, assigned_at: new Date().toISOString() } });
+  it('not logged in to any server: nothing is recorded', async () => {
+    const h = claudeHarness([]);
     const fx = threeTurnSession();
     writeSession(h.projectDir, fx, { upTo: fx.turn2End });
     await h.hook('SessionStart', at(-1), CWD, { source: 'startup' });
     await h.hook('Stop', at(31.5));
     expect(h.calls.every((c) => c.key === null)).toBe(true);
     expect(h.store.stats().events).toBe(0);
+  });
+
+  it('a session pinned by 0.4 (`bind`) keeps its server after the upgrade', async () => {
+    const h = claudeHarness([A, B], { [CWD]: { server: B } });
+    const fx = threeTurnSession();
+    writeSession(h.projectDir, fx, { upTo: fx.turn2End });
+    await h.hook('SessionStart', at(-1), CWD, { source: 'startup' });
+    const st = h.ctx.state.get<{ stream?: unknown }>(SESSION)!;
+    h.ctx.state.set(SESSION, { ...st, stream: { kind: 'project', pk: 'github.com/acme/billing', bind: { kind: 'token', id: { endpoint: A, company_slug: 'acme', token_fp: 'f' }, name: 'acme' } } });
+    await h.hook('Stop', at(31.5));
+    expect(target(h.calls.at(-1)!.key)).toBe(`${A}|`);
+    expect(h.ctx.state.get<{ stream?: StreamKey }>(SESSION)!.stream).toEqual({ kind: 'project', pk: 'github.com/acme/billing', endpoint: A, team: '' });
+  });
+
+  it('Codex: the stream is the dot file at the session’s first hook, even when that hook enqueued nothing (C18)', async () => {
+    const env = codexTestEnv();
+    const paths = env.ctx.paths;
+    const t0 = Date.now();
+    const c = loadConfig(paths)!;
+    const { ctx, calls, dots } = contextFor(env.adapter, paths, c, () => new Date(t0 + 5000), { '/work/first': { team: 'platform' } });
+    const hook = (name: string, receivedAt: number) =>
+      env.adapter.handleHook(
+        { harness: 'codex', hook: name, payload: { session_id: CODEX_SESSION, transcript_path: env.mainPath, cwd: '/work/first' }, cwd: '/work/first', env: {}, receivedAt: new Date(receivedAt).toISOString() },
+        ctx,
+      );
+    await hook('SessionStart', t0 - 60_000); // the rollout is not written yet: nothing enqueued, but the stream is pinned
+    expect(calls).toEqual([]);
+    saveConfig(paths, { ...c, servers: [...c.servers, { ...c.servers[0]!, endpoint: B, token: 'aiobs_u_b' }] }); // a second login
+    dots['/work/first'] = { server: B, team: 'web' };
+    copyFixtures(env);
+    await hook('SessionEnd', t0 + 2000);
+    expect(calls.length).toBeGreaterThan(0);
+    expect(new Set(calls.map((x) => target(x.key)))).toEqual(new Set([`${c.servers[0]!.endpoint}|platform`]));
   });
 
   it('Codex: a session whose first hook precedes session_meta stays in one stream', async () => {

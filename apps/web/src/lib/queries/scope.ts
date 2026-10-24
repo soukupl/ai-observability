@@ -1,5 +1,5 @@
 import { eq } from 'drizzle-orm';
-import { MAX_RETENTION_DAYS, MIN_RETENTION_DAYS, modelPrices, PLAN_LIMITS, type Plan, type Tx } from '@ai-obs/db';
+import { effectiveRetentionDays as clampRetentionDays, modelPrices, type Tx } from '@ai-obs/db';
 import { PriceBook, type PriceRow } from '../cost';
 import type { Filters } from '../filters';
 import type { SourceKind } from './range';
@@ -9,37 +9,34 @@ import type { SourceKind } from './range';
  */
 export interface Viewer {
   id: string;
-  companyId: string;
-  companyRole: 'admin' | 'member';
+  /** Deployment role (memberships.role). */
+  role: 'admin' | 'member';
   teams: { id: string; role: 'member' | 'lead' }[];
-  /** `plan` and `settings.retentionDays` (both on the session user) feed the raw / rollup source choice. */
-  company: { plan?: Plan; settings: { individualVisibility: 'aggregates-only' | 'full'; retentionDays?: number } };
+  /** `settings.retentionDays` (on the session user) feeds the raw / rollup source choice. */
+  deployment: { settings: { individualVisibility: 'aggregates-only' | 'full'; retentionDays?: number } };
 }
 
 /**
- * The company's effective raw retention in days: the setting (default 395) bounded by the plan maximum
- * and the global 30 days - 24 months range. Mirrors the worker's effectiveRetentionDays (ADR-0012).
- * null when the viewer carries neither a plan nor a setting (hand-built viewers in tests).
+ * The deployment's effective raw retention in days: the setting (default 395) bounded by the global
+ * 30 days - 24 months range. Same rule as the worker (effectiveRetentionDays in @ai-obs/db, ADR-0012).
+ * null when the viewer carries no setting (hand-built viewers in tests).
  */
 export function effectiveRetentionDays(v: Viewer): number | null {
-  const configured = Number(v.company.settings.retentionDays);
-  const plan = v.company.plan;
-  if (!plan && !Number.isFinite(configured)) return null;
-  const wanted = Number.isFinite(configured) ? Math.floor(configured) : 395;
-  const planMax = plan ? (PLAN_LIMITS[plan]?.maxRetentionDays ?? MIN_RETENTION_DAYS) : MAX_RETENTION_DAYS;
-  return Math.max(MIN_RETENTION_DAYS, Math.min(wanted, planMax, MAX_RETENTION_DAYS));
+  const configured = Number(v.deployment.settings.retentionDays);
+  if (!Number.isFinite(configured)) return null;
+  return clampRetentionDays(v.deployment.settings);
 }
 
 export const isLead = (v: Viewer): boolean => v.teams.some((t) => t.role === 'lead');
-const isManager = (v: Viewer): boolean => v.companyRole === 'admin' || isLead(v);
+const isManager = (v: Viewer): boolean => v.role === 'admin' || isLead(v);
 
 /**
  * May this viewer see WHO did something (user column, user filter, per-user rows)? Only leads and
- * admins in the company's "full" mode. Members only ever see their own rows, so there is nobody else
+ * admins in the deployment's "full" mode. Members only ever see their own rows, so there is nobody else
  * to show. In aggregates-only mode nobody sees individuals except themselves (ADR-0008).
  */
 export function canSeeUsers(v: Viewer): boolean {
-  return v.company.settings.individualVisibility === 'full' && isManager(v);
+  return v.deployment.settings.individualVisibility === 'full' && isManager(v);
 }
 
 /**
@@ -47,7 +44,7 @@ export function canSeeUsers(v: Viewer): boolean {
  * goes through the agg_* SQL functions, which never return user_id. Everyone else reads tables.
  */
 export function usesAggregateFunctions(v: Viewer): boolean {
-  return v.company.settings.individualVisibility === 'aggregates-only' && isManager(v);
+  return v.deployment.settings.individualVisibility === 'aggregates-only' && isManager(v);
 }
 
 /** The user filter that may actually be applied for this viewer (null when not allowed). */
@@ -65,7 +62,7 @@ export interface QueryCtx {
   now: Date;
   /** Overrides the automatic raw / rollup choice (tests, tooling). */
   forceSource?: SourceKind;
-  /** Effective raw retention of the viewer's company (days); ranges reaching back past it read rollups. */
+  /** Effective raw retention of the deployment (days); ranges reaching back past it read rollups. */
   retentionDays?: number;
 }
 

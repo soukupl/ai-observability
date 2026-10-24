@@ -19,7 +19,7 @@ const esc = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 const REASON_TEXT: Record<RunawayReason, string> = {
   tokens: 'far more tokens than usual',
-  cost: '≈ cost above the company threshold',
+  cost: '≈ cost above the deployment threshold',
   duration: 'ran for hours with above-normal tokens',
 };
 const hours = (ms: number) => (ms >= 3_600_000 ? `${(ms / 3_600_000).toFixed(1)} h` : `${Math.round(ms / 60_000)} min`);
@@ -28,13 +28,13 @@ const hours = (ms: number) => (ms >= 3_600_000 ? `${(ms / 3_600_000).toFixed(1)}
  * A digest of runaway turns for one recipient. `anonymous`: no person and no turn links (aggregates-only admins);
  * otherwise each turn links to its detail page.
  */
-export function buildRunawayEmail(i: { companyName: string; appUrl: string; anonymous: boolean; items: RunawayMailItem[] }): {
+export function buildRunawayEmail(i: { deploymentName: string; appUrl: string; anonymous: boolean; items: RunawayMailItem[] }): {
   subject: string;
   text: string;
   html: string;
 } {
   const n = i.items.length;
-  const subject = `[ai-obs] ${n === 1 ? 'A runaway turn' : `${n} runaway turns`} (${i.companyName})`;
+  const subject = `[ai-obs] ${n === 1 ? 'A runaway turn' : `${n} runaway turns`} (${i.deploymentName})`;
   const line = (x: RunawayMailItem) => {
     const where = [x.projectName, x.teamName && `team ${x.teamName}`, x.person].filter(Boolean).join(' · ');
     const cost = x.costUsd === null ? 'n/a' : `≈ $${x.costUsd.toFixed(2)}`;
@@ -49,7 +49,7 @@ export function buildRunawayEmail(i: { companyName: string; appUrl: string; anon
     '',
     'Cost is an estimate at API list prices, not an invoice.',
     '',
-    `-- ai-obs, ${i.companyName}`,
+    `-- ai-obs, ${i.deploymentName}`,
   ].join('\n');
   const html = `<!doctype html><html><body style="font-family:system-ui,-apple-system,Segoe UI,sans-serif;color:#1f2937;line-height:1.5">
 <h2 style="margin:0 0 12px;color:#b42318">${esc(n === 1 ? 'A runaway turn' : `${n} runaway turns`)}</h2>
@@ -58,7 +58,7 @@ export function buildRunawayEmail(i: { companyName: string; appUrl: string; anon
 ${i.items.map((x) => `<li style="margin:0 0 6px">${esc(line(x))}${i.anonymous ? '' : ` <a href="${esc(link(x))}">Open</a>`}</li>`).join('\n')}
 </ul>
 <p style="margin:0 0 4px;color:#6b7280">Cost is an estimate at API list prices, not an invoice.</p>
-<p style="margin:0;color:#9ca3af;font-size:12px">ai-obs, ${esc(i.companyName)}</p>
+<p style="margin:0;color:#9ca3af;font-size:12px">ai-obs, ${esc(i.deploymentName)}</p>
 </body></html>`;
   return { subject, text, html };
 }

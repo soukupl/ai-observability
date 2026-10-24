@@ -86,7 +86,7 @@ export function createCodexAdapter(deps: CodexAdapterDeps = {}): HarnessAdapter 
    * Enqueues into the session's stream and saves the state with the pin. `pin` (a hook of the session
    * itself) pins the stream even when nothing is enqueued yet, so the binding is the routing in force at
    * the session's first hook (C12, C18), not at its first event: a SessionStart whose rollout is not
-   * written yet must not leave the session to be bound under a later `token add` / `use`.
+   * written yet must not leave the session to be bound under a later login or dot file.
    */
   async function save(ctx: CollectorContext, state: CodexSessionState, out: IngestEvent[], capturedAt: number, pin = false): Promise<void> {
     if (out.length) ctx.queue.enqueue(out.splice(0), await ctx.streamFor(state, capturedAt));

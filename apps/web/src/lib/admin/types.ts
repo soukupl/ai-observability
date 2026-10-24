@@ -3,24 +3,22 @@
  * components import this file.
  */
 export type TeamRole = 'member' | 'lead';
-export type CompanyRole = 'admin' | 'member';
+export type MemberRole = 'admin' | 'member';
 
-/** Who performs an admin operation. `CompanyUser` (lib/auth/session) satisfies it structurally. */
+/** Who performs an admin operation. `CurrentUser` (lib/auth/session) satisfies it structurally. */
 export interface Actor {
   id: string;
-  companyId: string;
-  companyRole: CompanyRole;
+  role: MemberRole;
   teams: { id: string; role: TeamRole }[];
 }
 
 /** A freshly created ingest token, shown once in the browser and never stored in plain text. */
 export interface TokenReveal {
-  kind: 'user' | 'company';
   plaintext: string;
+  /** The `ai-obs login --server … --token …` command for the machine that uses it. */
   command: string;
-  /** Company tokens: collector settings JSON for MDM / dotfiles rollout. */
-  mdmJson?: string;
-  mdmFilename?: string;
+  /** ISO date-time, or null for a token without expiry. */
+  expiresAt: string | null;
 }
 
 /** Result of a server action, rendered by the client form (useActionState). */

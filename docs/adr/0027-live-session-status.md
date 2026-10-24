@@ -1,6 +1,6 @@
 # ADR-0027: Live session status: `turn_started`, "Active now" and `ai-obs live`
 
-- **Status:** Accepted
+- **Status:** Accepted; amended 2026-10-24
 - **Date:** 2026-10-23
 - **Deciders:** Ladislav Soukup (owner: asked for a live session monitor and chose the tiers, 2026-10-23; accepted the
   defaults of the brief interview); design by Claude
@@ -61,7 +61,7 @@ dashboard and in the developer's terminal.
   finds sessions only through turns.
 - **Transport:** client polling every 10 s while the tab is visible of read-only JSON routes
   `GET /api/live/sessions` and `GET /api/live/sessions/<id>`, under the same RLS context as the pages, `no-store`, with
-  `?company=` bound to the active company (409 on mismatch). Elapsed timers tick on the client between polls. Polling
+  `?company=` bound to the active company (409 on mismatch; removed by ADR-0028, see the amendment). Elapsed timers tick on the client between polls. Polling
   keeps the login session sliding (`touchSession`, `lib/auth/login.ts:245`), so a tab left open does not time out
   while the tab is visible.
 - **Summaries after the flush (summaries.lock):** the hook job only stages due digests to
@@ -100,3 +100,10 @@ dashboard and in the developer's terminal.
 - **Summarising inside `worker.lock`** (as before): delays the next prompt's `turn_started` by up to 120 s per chunk.
 - **Clearing C by `turn.started_at`** (the brief's first draft): wrong for Claude Code, whose turn starts at the prompt
   entry, before the hook time.
+
+## Amendment 2026-10-24 (ADR-0028)
+
+- The live routes no longer take `?company=` and have no 409: they authenticate by session only (401 `unauthorized`,
+  and 404 `not_found` on the detail route). The client poll halts on 401, 403 and 404.
+- The index is now `agent_sessions_last_seen_idx` on `(last_seen_at) WHERE ended_at IS NULL` (migration 0018).
+- The collector release that carries `turn_started` is 0.5.0; 0.4.0 was never published.

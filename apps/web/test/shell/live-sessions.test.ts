@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { turns, usage, type Database } from '@ai-obs/db';
+import { turns, usage } from '@ai-obs/db';
 import { defaultFilters } from '../../src/lib/filters';
 import { getLiveSession, getSessionDetail, listActiveSessions, listSessions, toLiveSessionPayload, type QueryCtx } from '../../src/lib/queries';
-import { asPerson, connect, dropShellDatabase, NOW, prepareShellDatabase, seedCompany, type Fixture, type Person } from './harness';
+import { asPerson, dropShellDatabase, NOW, prepareShellDatabase, seedDeployment, type Fixture, type Person } from './harness';
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -26,26 +26,25 @@ interface Live {
   L9: string; // admin working: a prompt 1 min ago
 }
 
-async function seedLive(owner: Database, fx: Fixture): Promise<Live> {
-  return owner.transaction(async (tx) => {
+async function seedLive(fx: Fixture): Promise<Live> {
+  return fx.owner.transaction(async (tx) => {
     await tx.execute(sql`set local role app_definer`);
-    const companyId = fx.id;
     const p = (k: string) => fx.people[k]!;
     const teamOf = (k: string) => (k === 'm2' ? fx.teams.t2! : fx.teams.t1!);
     const iso = (ms: number | null | undefined) => (ms === null || ms === undefined ? null : new Date(ms).toISOString());
     const session = async (who: string, o: { startedMs: number; currentMs?: number; lastSeenMs?: number | null; endedMs?: number; title?: string }) => {
       const id = randomUUID();
       const hid = randomUUID();
-      await tx.execute(sql`insert into agent_sessions (id, company_id, team_id, user_id, project_id, external_id, harness, started_at, ended_at, end_reason,
+      await tx.execute(sql`insert into agent_sessions (id, team_id, user_id, project_id, external_id, harness, started_at, ended_at, end_reason,
           title, title_source, current_turn_started_at, last_seen_at)
-        values (${id}::uuid, ${companyId}::uuid, ${teamOf(who)}::uuid, ${p(who).id}::uuid, ${fx.projects.alpha!}::uuid, ${`claude-code:${hid}`}, 'claude-code',
+        values (${id}::uuid, ${teamOf(who)}::uuid, ${p(who).id}::uuid, ${fx.projects.alpha!}::uuid, ${`claude-code:${hid}`}, 'claude-code',
           ${iso(o.startedMs)}::timestamptz, ${iso(o.endedMs)}::timestamptz, ${o.endedMs ? 'exit' : null}, ${o.title ?? null}, ${o.title ? 'custom' : null},
           ${iso(o.currentMs)}::timestamptz, ${iso(o.lastSeenMs)}::timestamptz)`);
       return { id, hid };
     };
     const turn = async (who: string, sessionId: string, startedMs: number, endedMs: number) => {
       const id = randomUUID();
-      const own = { companyId, teamId: teamOf(who), userId: p(who).id };
+      const own = { teamId: teamOf(who), userId: p(who).id };
       await tx.insert(turns).values({
         id, ...own, attribution: 'verified', sessionId, projectId: fx.projects.alpha!, externalId: `lx-${id}`, harness: 'claude-code',
         model: 'claude-opus-5-5', effort: 'high', startedAt: new Date(startedMs), endedAt: new Date(endedMs), durationMs: endedMs - startedMs,
@@ -73,24 +72,21 @@ async function seedLive(owner: Database, fx: Fixture): Promise<Live> {
 }
 
 describe.skipIf(skipReason !== null)(skipReason ? `live sessions - SKIPPED: ${skipReason}` : 'live sessions (real Postgres, ADR-0027)', () => {
-  let web: Database;
   let A: Fixture; // aggregates-only
   let B: Fixture; // full detail
   let LA: Live;
   let LB: Live;
 
   beforeAll(async () => {
-    const owner = connect();
-    A = await seedCompany(owner, 'live-agg-co', 'aggregates-only');
-    B = await seedCompany(owner, 'live-full-co', 'full');
-    LA = await seedLive(owner, A);
-    LB = await seedLive(owner, B);
-    web = connect('app_web');
+    A = await seedDeployment('live-agg-co', 'aggregates-only');
+    B = await seedDeployment('live-full-co', 'full');
+    LA = await seedLive(A);
+    LB = await seedLive(B);
   }, 120_000);
   afterAll(dropShellDatabase);
 
-  const withRetention = (p: Person): Person => ({ ...p, company: { settings: { ...p.company.settings, retentionDays: 395 } } });
-  const run = <T>(fx: Fixture, who: string, fn: (ctx: QueryCtx) => Promise<T>, now: Date = NOW) => asPerson(web, withRetention(fx.people[who]!), (ctx) => fn(ctx), now);
+  const withRetention = (p: Person): Person => ({ ...p, deployment: { settings: { ...p.deployment.settings, retentionDays: 395 } } });
+  const run = <T>(fx: Fixture, who: string, fn: (ctx: QueryCtx) => Promise<T>, now: Date = NOW) => asPerson(withRetention(fx.people[who]!), (ctx) => fn(ctx), now);
 
   describe('listActiveSessions', () => {
     it('full-mode admin: working (newest first) then idle; stale, ended, too old and pre-0017 sessions are absent', async () => {
@@ -144,21 +140,20 @@ describe.skipIf(skipReason !== null)(skipReason ? `live sessions - SKIPPED: ${sk
     });
 
     it('stale sessions do not crowd a long-running working session out of the row limit', async () => {
-      const owner = connect();
-      const C = await seedCompany(owner, 'live-crowd-co', 'full');
+      const C = await seedDeployment('live-crowd-co', 'full');
       const m1 = C.people.m1!;
       const iso = (ms: number) => new Date(ms).toISOString();
       const workingId = '00000000-0000-4000-8000-0000000000aa';
-      await owner.transaction(async (tx) => {
+      await C.owner.transaction(async (tx) => {
         await tx.execute(sql`set local role app_definer`);
         // 101 stale sessions seen 31+ min ago (newer than the working one's last signal) ...
-        await tx.execute(sql`insert into agent_sessions (company_id, team_id, user_id, external_id, harness, started_at, last_seen_at)
-          select ${C.id}::uuid, ${C.teams.t1!}::uuid, ${m1.id}::uuid, 'claude-code:crowd-' || g, 'claude-code',
+        await tx.execute(sql`insert into agent_sessions (team_id, user_id, external_id, harness, started_at, last_seen_at)
+          select ${C.teams.t1!}::uuid, ${m1.id}::uuid, 'claude-code:crowd-' || g, 'claude-code',
             ${iso(nowMs - 3 * HOUR)}::timestamptz, ${iso(nowMs - 31 * MIN)}::timestamptz - (g * interval '5 seconds')
           from generate_series(1, 101) g`);
         // ... and one session working since 60 min ago.
-        await tx.execute(sql`insert into agent_sessions (id, company_id, team_id, user_id, external_id, harness, started_at, current_turn_started_at, last_seen_at)
-          values (${workingId}::uuid, ${C.id}::uuid, ${C.teams.t1!}::uuid, ${m1.id}::uuid, 'claude-code:crowd-work', 'claude-code',
+        await tx.execute(sql`insert into agent_sessions (id, team_id, user_id, external_id, harness, started_at, current_turn_started_at, last_seen_at)
+          values (${workingId}::uuid, ${C.teams.t1!}::uuid, ${m1.id}::uuid, 'claude-code:crowd-work', 'claude-code',
             ${iso(nowMs - 2 * HOUR)}::timestamptz, ${iso(nowMs - HOUR)}::timestamptz, ${iso(nowMs - HOUR)}::timestamptz)`);
       });
       const out = await run(C, 'admin', (ctx) => listActiveSessions(ctx));

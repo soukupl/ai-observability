@@ -55,11 +55,11 @@ export async function getAgents(ctx: QueryCtx, f: Filters): Promise<AgentsResult
             sum(r.output_tokens)::bigint as output_tokens, sum(r.cache_read_tokens)::bigint as cache_read_tokens,
             sum(r.cache_write_tokens)::bigint as cache_write_tokens, sum(r.reasoning_tokens)::bigint as reasoning_tokens,
             avg(r.depth) as avg_depth, max(r.depth) as max_depth
-          from turns t join runs r on r.turn_id = t.id and r.company_id = t.company_id ${where(conds)} group by 1, 2`,
+          from turns t join runs r on r.turn_id = t.id ${where(conds)} group by 1, 2`,
     );
     const h = await rows<{ depth: number; runs: unknown }>(
       ctx.tx,
-      sql`select r.depth, count(*) as runs from turns t join runs r on r.turn_id = t.id and r.company_id = t.company_id
+      sql`select r.depth, count(*) as runs from turns t join runs r on r.turn_id = t.id
           ${where(conds)} group by 1 order by 1`,
     );
     histogram = h.map((x) => ({ depth: Number(x.depth), runs: num(x.runs) }));

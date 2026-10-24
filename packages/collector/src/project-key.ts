@@ -86,7 +86,7 @@ export function isPathKey(pk: string): boolean {
 /**
  * Send-time project reference for the receiving token (C3, contract §5.5). Path key →
  * `sha256:` + HMAC(local path secret, `path:` + path) (plain sha256 without a secret); hashed →
- * `sha256:` + HMAC(company salt, key) (plain sha256 without a salt), no name; plain → the key and its
+ * `sha256:` + HMAC(deployment salt, key) (plain sha256 without a salt), no name; plain → the key and its
  * last segment as name.
  */
 export function sendRef(pk: string, o: { naming: ProjectNamingMode; salt?: string | null; pathSecret: string | null }): ProjectRef {

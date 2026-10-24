@@ -12,7 +12,8 @@ import { listCrashedJobs, listJobs, toInvocation, type JobFile } from './jobs.js
 import { tryLock, type Release } from './lock.js';
 import { createLogger, type Logger } from './log.js';
 import type { AiObsPaths } from './paths.js';
-import { loadRouting } from './projects.js';
+import { migrateHome } from './migrate.js';
+import { loadRouting } from './routing.js';
 import { QueueStore } from './queue.js';
 import { flushQueue, type FlushResult } from './sender.js';
 
@@ -24,7 +25,7 @@ export const SUMMARY_COMMIT_WAIT_MS = 60_000;
 export const MAX_SUMMARY_PASSES = 3;
 /** A worker lock older than this is considered abandoned. */
 const LOCK_STALE_MS = 15 * 60_000;
-/** Extra loops when config.json / projects.json changed during a flush (C17). */
+/** Extra loops when config.json changed during a flush (C17). */
 const MAX_REPLAN_LOOPS = 5;
 /** SessionStart nudge markers older than this are deleted. */
 const NUDGED_KEEP_MS = 7 * 24 * 3600_000;
@@ -57,9 +58,9 @@ export interface WorkerResult {
   summaries?: { summarized: number; flush?: FlushResult };
 }
 
-/** mtimes of the routing inputs the user changes (config.json, projects.json); a change during a flush means "run again". */
+/** mtime of the routing input the user changes (config.json: a login, a removed server); a change during a flush means "run again". */
 function routingStamp(paths: AiObsPaths): string {
-  return [paths.config, paths.projects]
+  return [paths.config]
     .map((f) => {
       try {
         const st = statSync(f);
@@ -89,7 +90,7 @@ function sweepNudged(paths: AiObsPaths, now: number): void {
   }
 }
 
-/** No config, or no valid token: nothing is recorded (C6). */
+/** No config, or not logged in to any server: nothing is recorded (C6). */
 function dropJobs(paths: AiObsPaths): void {
   for (const j of listJobs(paths.jobs)) rmSync(j, { force: true });
 }
@@ -97,9 +98,10 @@ function dropJobs(paths: AiObsPaths): void {
 /**
  * The detached worker (spawned by the hook fast path). Holds ~/.ai-obs/worker.lock, so exactly one
  * worker processes jobs at a time, in hook order; a worker that finds the lock taken exits, because
- * the holder re-scans the jobs dir after releasing. Config is re-read every loop; without a token
- * jobs are dropped (C6). Events go to per-project streams (design §3.1) and are flushed per token
- * (§5.3); when config.json / projects.json changed during the flush, it runs again (C17). Then the
+ * the holder re-scans the jobs dir after releasing. Config is re-read every loop; without a server
+ * jobs are dropped (C6). A 0.2 – 0.4 home is migrated first (migrate.ts). Events go to per-project streams
+ * (project key, server, team) and are flushed per server; when config.json changed during the flush, it
+ * runs again (C17). Then the
  * summary phase summarises the staged digests and sends the summaries (ADR-0027). Never throws.
  */
 export async function runWorker(deps: WorkerDeps): Promise<WorkerResult> {
@@ -107,7 +109,7 @@ export async function runWorker(deps: WorkerDeps): Promise<WorkerResult> {
   const adapters = deps.adapters ?? ADAPTERS;
   const result: WorkerResult = { ran: false, jobs: 0, failed: 0 };
   const first = loadConfig(deps.paths);
-  if (!first || !first.tokens.length) {
+  if (!first || !first.servers.length) {
     dropJobs(deps.paths);
     return result;
   }
@@ -142,8 +144,9 @@ async function drainJobs(deps: WorkerDeps, adapters: readonly HarnessAdapter[], 
     result.ran = true;
     let again = false;
     try {
+      migrateHome(deps.paths, { log, ...(deps.now ? { now: deps.now() } : {}) });
       const config = loadConfig(deps.paths);
-      if (!config || !config.tokens.length) {
+      if (!config || !config.servers.length) {
         dropJobs(deps.paths);
         return;
       }
@@ -235,13 +238,13 @@ async function lockWithin(path: string, waitMs: number): Promise<Release | null>
  * and sends the summaries under worker.lock (waiting up to SUMMARY_COMMIT_WAIT_MS for it). Each chunk is bounded
  * (SUMMARY_CHUNK_TIMEOUT_MS, a failed attempt) and no chunk starts after summaryTimeoutMs, so a batch always ends
  * and commits its progress; the digests not tried yet wait in the pending file. A batch that cannot get
- * worker.lock changes nothing: its staged and pending files stay for the next run. False when there is no token,
+ * worker.lock changes nothing: its staged and pending files stay for the next run. False when there is no server,
  * another process holds summaries.lock (it summarises them), or a commit was refused (another pass would only run
  * the model again).
  */
 async function summarizeStaged(deps: WorkerDeps, adapters: readonly HarnessAdapter[], log: Logger, result: WorkerResult): Promise<boolean> {
   const config = loadConfig(deps.paths);
-  if (!config || !config.tokens.length) return false;
+  if (!config || !config.servers.length) return false;
   const release = tryLock(deps.paths.summariesLock, LOCK_STALE_MS);
   if (!release) return false;
   let progress = true;

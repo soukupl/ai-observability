@@ -14,7 +14,7 @@ import {
 } from './apply-events';
 import { OwnerConflictError, rows, type BatchContext, type TokenContext } from './context';
 import { enforceLimits, timeWindowProblem } from './limits';
-import { resolveAttribution, upsertMachine } from './resolve';
+import { sessionKey, upsertMachine } from './resolve';
 
 /** Apply order inside a batch: sessions, turn starts, turns, runs (parents first), patches, session ends. */
 const TYPE_ORDER: Record<IngestEvent['type'], number> = {
@@ -73,23 +73,25 @@ async function applyEvent(tx: Tx, ctx: BatchContext, e: IngestEvent): Promise<vo
 export const EVENTS_PER_SAVEPOINT = 25;
 
 /**
- * De-duplication key of an event in the ledger. Namespaced by sender (the attributed user, else the
- * token) so one sender cannot pre-claim another's event ids and get the real events dropped as
- * duplicates (SEC-3). Collector ids are unique per sender anyway; the same user's several tokens and
- * machines share a namespace, so their retries still de-duplicate.
+ * De-duplication key of an event in the ledger. Namespaced by the token's user so one sender cannot pre-claim
+ * another's event ids and get the real events dropped as duplicates (SEC-3). Collector ids are unique per sender
+ * anyway; the same user's several tokens and machines share a namespace, so their retries still de-duplicate.
  */
-export function ledgerKey(ctx: Pick<BatchContext, 'userId' | 'token'>, eventId: string): string {
-  return `${ctx.userId ?? `token:${ctx.token.tokenId}`}:${eventId}`;
+export function ledgerKey(ctx: Pick<BatchContext, 'userId'>, eventId: string): string {
+  return `${ctx.userId}:${eventId}`;
 }
 
 type Outcome = 'accepted' | 'duplicate';
 
 /**
- * Applies validated events of one batch. Must run inside withIngestContext(db, token.companyId).
+ * Applies validated events of one batch. Must run inside withIngestContext(db, token.userId).
  * Events are applied in chunks, each chunk under one savepoint, together with the events' ledger rows
  * (ingest_events): a replayed event is counted as a duplicate and changes nothing. When a chunk fails,
  * it is rolled back as a whole and its events are retried one per savepoint, so a failing event is
  * rejected without losing the rest of the batch and without being marked as seen.
+ *
+ * Every row belongs to the token's user (attribution `verified`, ADR-0029); `header.identity.git_email` is ignored.
+ * Team warnings of session_start events (ADR-0030) come back in `warnings`, at most one per session.
  */
 export async function processBatch(
   tx: Tx,
@@ -99,13 +101,13 @@ export async function processBatch(
   log: (msg: string, err: unknown) => void = defaultLog,
   now: number = Date.now(),
 ): Promise<IngestResponse> {
-  const who = await resolveAttribution(tx, token, header.identity.git_email);
   const ctx: BatchContext = {
-    companyId: token.companyId,
     token,
-    ...who,
-    machineRowId: await upsertMachine(tx, token.companyId, header.machine, who.userId),
-    projectTeams: new Map(),
+    userId: token.userId,
+    attribution: 'verified',
+    primaryTeamId: token.primaryTeamId,
+    machineRowId: await upsertMachine(tx, header.machine, token.userId),
+    warnings: new Map(),
   };
 
   let accepted = 0;
@@ -115,9 +117,9 @@ export async function processBatch(
   const applyOne = async (sp: Tx, event: IngestEvent): Promise<Outcome> => {
     const [row] = await rows<{ id: string }>(
       sp,
-      sql`insert into ingest_events (company_id, event_id, type)
-          values (${ctx.companyId}::uuid, ${ledgerKey(ctx, event.event_id)}, ${event.type})
-          on conflict (company_id, event_id) do nothing returning id`,
+      sql`insert into ingest_events (event_id, type)
+          values (${ledgerKey(ctx, event.event_id)}, ${event.type})
+          on conflict (event_id) do nothing returning id`,
     );
     if (!row) return 'duplicate';
     await applyEvent(sp, ctx, event);
@@ -138,7 +140,7 @@ export async function processBatch(
   }
 
   // Every session lock of the batch first, outside the savepoints (ADR-0026): keeps the lock order sessions → turns.
-  await lockBatchSessions(tx, ctx, ordered);
+  await lockBatchSessions(tx, ordered);
 
   for (let i = 0; i < ordered.length; i += EVENTS_PER_SAVEPOINT) {
     const chunk = ordered.slice(i, i + EVENTS_PER_SAVEPOINT);
@@ -151,14 +153,14 @@ export async function processBatch(
       outcomes.forEach(tally);
       continue;
     } catch {
-      // Rolled back as a whole; find the failing event(s) below.
-      ctx.projectTeams.clear();
+      // Rolled back as a whole (its warnings are re-collected below); find the failing event(s).
+      for (const event of chunk) forgetWarning(ctx, event);
     }
     for (const event of chunk) {
       try {
         tally(await tx.transaction((sp) => applyOne(sp, event)));
       } catch (err) {
-        ctx.projectTeams.clear();
+        forgetWarning(ctx, event);
         if (err instanceof OwnerConflictError) {
           rejected.push({ event_id: event.event_id, reason: 'conflicts with data owned by another user' });
           continue;
@@ -168,7 +170,13 @@ export async function processBatch(
       }
     }
   }
-  return { accepted, duplicates, rejected };
+  const warnings = [...ctx.warnings.values()];
+  return warnings.length ? { accepted, duplicates, rejected, warnings } : { accepted, duplicates, rejected };
+}
+
+/** Drops the team warning a rolled-back session_start left behind. */
+function forgetWarning(ctx: BatchContext, event: IngestEvent): void {
+  if (event.type === 'session_start') ctx.warnings.delete(sessionKey(event.harness, event.session_id));
 }
 
 function defaultLog(msg: string, err: unknown) {

@@ -3,13 +3,13 @@
  * (skipped until `pnpm --filter @soukupl/ai-obs build` has run). Node startup is included in the timing.
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { listJobs } from '../src/jobs.js';
 import type { AiObsPaths } from '../src/paths.js';
-import { rememberPk } from '../src/pk-cache.js';
-import { cleanupHomes, gitRepo, tmpHome, writeTestConfig, writeTestTokens } from './helpers.js';
+import { cleanupHomes, gitRepo, tmpHome, writeDotFile, writeTestConfig, writeTestServers } from './helpers.js';
 
 afterEach(cleanupHomes);
 
@@ -39,7 +39,7 @@ function waitForWorker(paths: AiObsPaths): void {
 }
 
 describe.skipIf(!built)('real process (needs `pnpm --filter @soukupl/ai-obs build`)', () => {
-  it('one token: `ai-obs hook` exits 0 quickly, prints nothing and leaves a job for the worker', () => {
+  it('one server: `ai-obs hook` exits 0 quickly, prints nothing and leaves a job for the worker', () => {
     const paths = tmpHome();
     writeTestConfig(paths);
     const { res, ms } = runHookProcess(paths, ['claude-code', 'SessionStart'], { session_id: 's1' });
@@ -49,13 +49,10 @@ describe.skipIf(!built)('real process (needs `pnpm --filter @soukupl/ai-obs buil
     waitForWorker(paths);
   });
 
-  it('two tokens and an unassigned repository: one valid JSON line on stdout, within the same budget', () => {
+  it('two servers and a repository without a dot file: one valid JSON line on stdout, within the same budget', () => {
     const paths = tmpHome();
-    writeTestTokens(paths, [{ name: 'acme' }, { name: 'globex', token: 'aiobs_c_test-globex' }]);
+    writeTestServers(paths, [{ endpoint: 'https://obs.acme.io' }, { endpoint: 'https://obs.globex.io' }]);
     const repo = gitRepo({ remote: 'git@github.com:acme/billing.git' });
-    // The worker fills this cache for every session it processes; a miss would leave the answer to a
-    // 40 ms git run, which a loaded test machine may not meet (the question then waits for the next session).
-    rememberPk(paths, repo, 'github.com/acme/billing');
     const { res, ms } = runHookProcess(paths, ['claude-code', 'SessionStart'], { session_id: 's1', cwd: repo, hook_event_name: 'SessionStart' });
     expect(res.status).toBe(0);
     expect(ms).toBeLessThan(LIMIT_MS);
@@ -65,30 +62,29 @@ describe.skipIf(!built)('real process (needs `pnpm --filter @soukupl/ai-obs buil
     const out = JSON.parse(lines[0]!) as { hookSpecificOutput: { hookEventName: string; additionalContext: string } };
     expect(out.hookSpecificOutput.hookEventName).toBe('SessionStart');
     const text = out.hookSpecificOutput.additionalContext;
-    expect(text).toContain('"github.com/acme/billing"');
-    expect(text).toContain('"acme"');
-    // the text is capped at 1000 characters: with this long temp --home the details and the repeated command are
-    // shortened, never the token list
-    expect(text).toContain('"globex"');
+    expect(text).toContain('obs.acme.io, obs.globex.io');
+    expect(text).toContain('link --server <url> --team <team>');
     expect(text.length).toBeLessThanOrEqual(1000);
     expect(text).not.toContain('aiobs_');
     expect(res.stderr.toString()).toBe('');
     waitForWorker(paths);
   });
 
-  it('two tokens, Codex: the same question as plain text', () => {
+  it('the dot-file lookup runs inside the budget: a dot file naming a server without a token asks to log in (Codex: plain text)', () => {
     const paths = tmpHome();
-    writeTestTokens(paths, [{ name: 'acme' }, { name: 'globex' }]);
+    writeTestConfig(paths, 'https://obs.acme.io');
     const repo = gitRepo({ remote: 'git@github.com:acme/billing.git' });
-    rememberPk(paths, repo, 'github.com/acme/billing');
-    const { res } = runHookProcess(paths, ['codex', 'SessionStart'], { session_id: 's1', cwd: repo, hook_event_name: 'SessionStart' });
+    writeDotFile(repo, { server: 'https://obs.other.io', team: 'platform' });
+    const deep = join(repo, 'a', 'b', 'c', 'd');
+    mkdirSync(deep, { recursive: true });
+    const { res, ms } = runHookProcess(paths, ['codex', 'SessionStart'], { session_id: 's1', cwd: deep, hook_event_name: 'SessionStart' });
     expect(res.status).toBe(0);
+    expect(ms).toBeLessThan(LIMIT_MS);
     const out = res.stdout.toString();
     expect(out.endsWith('\n')).toBe(true);
     expect(out.trimEnd()).not.toContain('\n');
     expect(() => JSON.parse(out)).toThrow();
-    expect(out).toContain('"github.com/acme/billing"');
-    expect(out).toContain('"globex"');
+    expect(out).toContain('login --server https://obs.other.io');
     waitForWorker(paths);
   });
 });

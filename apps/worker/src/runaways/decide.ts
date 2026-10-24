@@ -4,9 +4,9 @@
  * (owner, 2026-10-07) because they dominate long agentic turns while costing little; the cost rule covers spend.
  * The user's percentiles are computed on the same measure.
  *   tokens   - its tokens exceed 3 × the user's own p99 of the 30 days before it (with ≥ 50 turns of history),
- *              or the absolute floor while there is too little history (or no user: unverified turns);
- *   cost     - its ≈ cost reaches the company threshold (default $20);
- *   duration - it ran at least the company's hours (default 2) AND its tokens exceed the user's p95
+ *              or the absolute floor while there is too little history (or no user: ownerless turns from before ADR-0029);
+ *   cost     - its ≈ cost reaches the deployment threshold (deployment.settings.runawayCostUsd, default $20);
+ *   duration - it ran at least the deployment's hours (runawayHours, default 2) AND its tokens exceed the user's p95
  *              (or a quarter of the floor without history).
  */
 

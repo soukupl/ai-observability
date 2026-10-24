@@ -1,6 +1,5 @@
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { Database } from '@ai-obs/db';
 import { defaultFilters, type Filters } from '../../src/lib/filters';
 import type { QueryCtx } from '../../src/lib/queries/scope';
 import {
@@ -15,7 +14,7 @@ import {
   TIMELINE_PARAMS,
 } from '../../src/lib/queries/agent-timeline';
 import { TIMELINE_WINDOW_PARAMS } from '../../src/components/charts/agent-graph-layout';
-import { asPerson, connect, dropShellDatabase, prepareShellDatabase, seedCompany, type Fixture } from './harness';
+import { asPerson, dropShellDatabase, prepareShellDatabase, seedDeployment, type Fixture } from './harness';
 
 const range = { fromDay: '2026-09-29', toDay: '2026-10-06' }; // 7 days, last = 2026-10-05
 const DAY = Date.parse('2026-10-03T00:00:00Z');
@@ -152,24 +151,21 @@ const skipReason = await prepareShellDatabase();
 if (skipReason) console.warn(`[web/shell] agent timeline tests skipped: ${skipReason}`);
 
 const R30: Filters = { ...defaultFilters(), range: '30d' };
-/** Row ids differ between the two companies: compare canonical forms. */
+/** Row ids differ between the two fixtures: compare canonical forms. */
 const canon = (v: unknown) =>
   JSON.parse(JSON.stringify(v, (_k, x) => (typeof x === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-/.test(x) ? '<id>' : x)));
 
 describe.skipIf(skipReason !== null)(skipReason ? `agent timeline - SKIPPED: ${skipReason}` : 'agent timeline (real Postgres)', () => {
-  let web: Database;
   let A: Fixture; // aggregates-only
   let B: Fixture; // full detail (identical data)
 
   beforeAll(async () => {
-    const owner = connect();
-    A = await seedCompany(owner, 'tl-agg-co', 'aggregates-only');
-    B = await seedCompany(owner, 'tl-full-co', 'full');
-    web = connect('app_web');
+    A = await seedDeployment('tl-agg-co', 'aggregates-only');
+    B = await seedDeployment('tl-full-co', 'full');
   }, 120_000);
   afterAll(dropShellDatabase);
 
-  const run = <T>(fx: Fixture, who: string, fn: (ctx: QueryCtx) => Promise<T>) => asPerson(web, fx.people[who]!, (ctx) => fn(ctx));
+  const run = <T>(fx: Fixture, who: string, fn: (ctx: QueryCtx) => Promise<T>) => asPerson(fx.people[who]!, (ctx) => fn(ctx));
 
   it('defaults to the last day with turns; turns, runs and groups of the whole day', async () => {
     const d = await run(B, 'admin', (ctx) => getAgentTimeline(ctx, R30, {}));
@@ -229,26 +225,25 @@ describe.skipIf(skipReason !== null)(skipReason ? `agent timeline - SKIPPED: ${s
   it('returns stored links and derived sequence links on both paths; stage / flow fields come through', async () => {
     // The 10:00 turn of 2026-10-05: add two workflow agents (review:bugs -> verify:bugs, stored `item` link) and an
     // Agent-tool sibling of the Explore run that starts after it ended (derived `sequence` link Explore -> Plan).
-    const owner = connect();
     const turnStart = '2026-10-05T10:00:00Z';
     const at = (s: number) => new Date(Date.parse(turnStart) + s * 1000).toISOString();
     const seed = async (fx: Fixture) => {
       const add = (ext: string, type: string, group: string | null, orch: string | null, stage: number | null, flow: string | null, from: number, to: number) =>
-        owner.execute(sql`insert into runs (company_id, team_id, user_id, turn_id, turn_external_id, external_id, agent_type, agent_group,
+        fx.owner.execute(sql`insert into runs (team_id, user_id, turn_id, turn_external_id, external_id, agent_type, agent_group,
             orchestration_id, stage_index, flow_key, depth, model, started_at, ended_at, duration_ms, outcome)
-          select r.company_id, r.team_id, r.user_id, r.turn_id, r.turn_external_id, ${ext}, ${type}, ${group}, ${orch}, ${stage}, ${flow}, 1,
+          select r.team_id, r.user_id, r.turn_id, r.turn_external_id, ${ext}, ${type}, ${group}, ${orch}, ${stage}, ${flow}, 1,
             r.model, ${at(from)}::timestamptz, ${at(to)}::timestamptz, ${(to - from) * 1000}, 'success'
           from runs r join turns t on t.id = r.turn_id
-          where t.company_id = ${fx.id}::uuid and t.started_at = ${turnStart}::timestamptz and r.depth = 1 and r.external_id = 'r1'`);
+          where t.started_at = ${turnStart}::timestamptz and r.depth = 1 and r.external_id = 'r1'`);
       await add('w1', 'workflow:review:bugs', 'workflow:review', 'wf_t', 0, 'bugs', 3, 5);
       await add('w2', 'workflow:verify:bugs', 'workflow:verify', 'wf_t', 1, 'bugs', 6, 8);
       await add('p1', 'Plan', null, null, null, null, 100, 110);
-      await owner.execute(sql`insert into run_links (company_id, turn_id, turn_external_id, from_run_id, to_run_id, from_external_id, to_external_id, kind)
-        select f.company_id, f.turn_id, f.turn_external_id, f.id, t.id, 'w1', 'w2', 'item'
+      await fx.owner.execute(sql`insert into run_links (turn_id, turn_external_id, from_run_id, to_run_id, from_external_id, to_external_id, kind)
+        select f.turn_id, f.turn_external_id, f.id, t.id, 'w1', 'w2', 'item'
         from runs f join runs t on t.turn_id = f.turn_id and t.external_id = 'w2'
-        where f.company_id = ${fx.id}::uuid and f.external_id = 'w1'`);
+        where f.external_id = 'w1'`);
     };
-    const cleanup = (fx: Fixture) => owner.execute(sql`delete from runs where company_id = ${fx.id}::uuid and external_id in ('w1', 'w2', 'p1')`);
+    const cleanup = (fx: Fixture) => fx.owner.execute(sql`delete from runs where external_id in ('w1', 'w2', 'p1')`);
     await seed(A);
     await seed(B);
     try {
@@ -279,13 +274,12 @@ describe.skipIf(skipReason !== null)(skipReason ? `agent timeline - SKIPPED: ${s
 
   it('a run that outlives its turn keeps its parent turn in a later window (background agents)', async () => {
     // The 10:00 turn on 2026-10-05 ends within minutes; let its depth-1 run go on until 13:30.
-    const owner = connect();
     const turnStart = '2026-10-05T10:00:00Z';
     const outlive = (fx: Fixture, endedAt: string) =>
-      owner.execute(sql`update runs r set ended_at = ${endedAt}::timestamptz from turns t
-        where r.turn_id = t.id and t.company_id = ${fx.id}::uuid and t.started_at = ${turnStart}::timestamptz and r.depth = 1`);
-    const original = await owner.execute(sql`select r.ended_at from runs r join turns t on t.id = r.turn_id
-      where t.company_id = ${B.id}::uuid and t.started_at = ${turnStart}::timestamptz and r.depth = 1`);
+      fx.owner.execute(sql`update runs r set ended_at = ${endedAt}::timestamptz from turns t
+        where r.turn_id = t.id and t.started_at = ${turnStart}::timestamptz and r.depth = 1`);
+    const original = await B.owner.execute(sql`select r.ended_at from runs r join turns t on t.id = r.turn_id
+      where t.started_at = ${turnStart}::timestamptz and r.depth = 1`);
     const was = new Date(String((original as unknown as { ended_at: string }[])[0]!.ended_at)).toISOString();
     await outlive(A, '2026-10-05T13:30:00Z');
     await outlive(B, '2026-10-05T13:30:00Z');

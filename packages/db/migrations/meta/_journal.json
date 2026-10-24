@@ -127,6 +127,13 @@
       "when": 1792791229410,
       "tag": "0017_live_session_status",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1792828874632,
+      "tag": "0018_single_deployment",
+      "breakpoints": true
     }
   ]
 }

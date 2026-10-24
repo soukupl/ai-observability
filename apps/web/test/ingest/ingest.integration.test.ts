@@ -3,7 +3,7 @@ import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { Database, Tx } from '@ai-obs/db';
 import { schemas, validateBatch, type IngestBatchInput, type IngestEventInput, type IngestResponse } from '@ai-obs/protocol';
-import { handleCollectorConfig, handleIngest } from '../../src/lib/ingest/handler';
+import { handleCollectorConfig, handleIngest, TOKEN_REJECTED, TOKEN_RETIRED } from '../../src/lib/ingest/handler';
 import { batchSessionKeys } from '../../src/lib/ingest/apply-events';
 import { lookupToken } from '../../src/lib/ingest/context';
 import { EVENTS_PER_SAVEPOINT, processBatch } from '../../src/lib/ingest/process-batch';
@@ -17,7 +17,7 @@ import { createQueryContext, type Viewer } from '../../src/lib/queries/scope';
 import { generateToken, hashToken } from '../../src/lib/ingest/tokens';
 import { INT4_MAX, timeWindowProblem, MAX_TOKENS_PER_ENTRY } from '../../src/lib/ingest/limits';
 import { connectIngest, connectOwner, connectRole, dropIngestTestDb, prepareIngestTestDb } from './db-harness';
-import { batch, createWorld, ev, insertMember, insertToken, insertUser, protocolFixture, ulid, type World } from './fixtures';
+import { batch, createWorld, ev, insertMember, insertTeam, insertToken, insertUser, protocolFixture, setSettings, ulid, type World } from './fixtures';
 
 const skip = await prepareIngestTestDb();
 
@@ -76,10 +76,9 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
         cache_write_tokens::int, reasoning_tokens::int, requests::int, duration_ms::int
         from turns where external_id = 'claude-code:turn-1'`);
       expect(t).toMatchObject({
-        company_id: w.companyId,
         user_id: w.users.alice,
         attribution: 'verified',
-        team_id: w.teams.mobile, // project mapping wins over alice's primary team (Platform)
+        team_id: w.teams.mobile, // the admin's project mapping wins over the dot-file team and alice's primary team
         session_id: s!.id,
         project_id: w.projects.billing,
         model: 'claude-opus-5-5',
@@ -143,68 +142,159 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
     });
   });
 
-  describe('attribution', () => {
-    it("company token + git e-mail of a member → matched user, that member's primary team in this company", async () => {
-      const b = batch([ev.sessionStart('ct-1', 'github.com/acme/unmapped', 'unmapped'), ev.turn('ct-1', 'ct-turn-1')], {
-        identity: { git_email: 'Bob@Acme.test' },
+  describe('attribution and team resolution (ADR-0029, ADR-0030)', () => {
+    const teamOf = async (table: 'turns' | 'agent_sessions', id: string) =>
+      (await q<{ team_id: string | null; user_id: string | null; attribution?: string }>(
+        table === 'turns'
+          ? sql`select team_id, user_id, attribution from turns where external_id = ${`claude-code:${id}`}`
+          : sql`select team_id, user_id from agent_sessions where external_id = ${`claude-code:${id}`}`,
+      ))[0];
+
+    it("every row belongs to the token's user and is verified; the git e-mail is ignored", async () => {
+      const b = batch([ev.sessionStart('at-1', 'github.com/acme/unmapped', 'unmapped'), ev.turn('at-1', 'at-turn-1')], {
+        identity: { git_email: 'alice@acme.test' },
       });
-      expect((await post(w.tokens.ci, b)).body).toMatchObject({ accepted: 2, rejected: [] });
-      const [t] = await q(sql`select user_id, attribution, team_id from turns where external_id = 'claude-code:ct-turn-1'`);
-      expect(t).toEqual({ user_id: w.users.bob, attribution: 'matched', team_id: w.teams.mobile });
+      expect((await post(w.tokens.bob, b)).body).toEqual({ accepted: 2, duplicates: 0, rejected: [] });
+      expect(await teamOf('turns', 'at-turn-1')).toEqual({ user_id: w.users.bob, attribution: 'verified', team_id: w.teams.mobile });
       const [p] = await q(sql`select display_name from projects where key = 'github.com/acme/unmapped'`);
       expect(p!.display_name).toBe('unmapped');
     });
 
-    it('company token + member e-mail on a mapped project → matched, the project mapping wins', async () => {
-      const b = batch([ev.sessionStart('ct-2', 'github.com/acme/billing'), ev.turn('ct-2', 'ct-turn-2')], {
-        identity: { git_email: 'dave@acme.test' },
-      });
-      expect((await post(w.tokens.ci, b)).body).toMatchObject({ accepted: 2, rejected: [] });
-      const [t] = await q(sql`select user_id, attribution, team_id from turns where external_id = 'claude-code:ct-turn-2'`);
-      expect(t).toEqual({ user_id: w.users.dave, attribution: 'matched', team_id: w.teams.mobile });
+    it('a service-user token reports as that service user, with its primary team', async () => {
+      const res = await post(w.tokens.svc, batch([ev.sessionStart('svc-s'), ev.turn('svc-s', 'svc-t')]));
+      expect(res.body).toEqual({ accepted: 2, duplicates: 0, rejected: [] });
+      expect(await teamOf('turns', 'svc-t')).toEqual({ user_id: w.users.svc, attribution: 'verified', team_id: w.teams.mobile });
     });
 
-    it('company token + unknown, missing or another company member\'s e-mail → unverified, no user, no team', async () => {
-      const cases = [['cu-1', { git_email: 'stranger@else.test' }], ['cu-2', {}], ['cu-3', { git_email: 'hank@hush.test' }]] as const;
-      for (const [id, identity] of cases) {
-        const res = await post(w.tokens.ci, batch([ev.turn(id, `${id}-turn`), ev.run(`${id}-turn`, 'r', null, 1)], { identity }));
-        expect(res.body).toMatchObject({ accepted: 2, rejected: [] });
-        const [t] = await q(sql`select user_id, attribution, team_id from turns where external_id = ${`claude-code:${id}-turn`}`);
-        expect(t).toEqual({ user_id: null, attribution: 'unverified', team_id: null });
-        const [r] = await q(sql`select user_id, team_id from runs where turn_external_id = ${`claude-code:${id}-turn`}`);
-        expect(r).toEqual({ user_id: null, team_id: null });
+    it('the admin mapping wins over the dot-file team (no warning, even for a team the user is not in)', async () => {
+      for (const [id, team] of [['tr-map-1', 'design'], ['tr-map-2', 'nope'], ['tr-map-3', 'mobile']] as const) {
+        const res = await post(w.tokens.alice, batch([ev.sessionStart(id, 'github.com/acme/billing', undefined, team), ev.turn(id, `${id}-t`)]));
+        expect(res.body).toEqual({ accepted: 2, duplicates: 0, rejected: [] });
+        expect((await teamOf('agent_sessions', id))!.team_id).toBe(w.teams.mobile);
+        expect((await teamOf('turns', `${id}-t`))!.team_id).toBe(w.teams.mobile);
       }
-      // On a mapped project the unverified turn still gets the project's team.
-      const mapped = batch([ev.sessionStart('cu-4', 'github.com/acme/billing'), ev.turn('cu-4', 'cu-4-turn')], {
-        identity: { git_email: 'hank@hush.test' },
+    });
+
+    it("the dot-file team applies when the user is a member of it; the session's turns, runs and usage follow", async () => {
+      const res = await post(w.tokens.alice, batch([
+        ev.sessionStart('tr-dot', 'github.com/acme/web', 'web', 'design'),
+        ev.turn('tr-dot', 'tr-dot-t'),
+        ev.run('tr-dot-t', 'tr-dot-r', null, 1),
+      ]));
+      expect(res.body).toEqual({ accepted: 3, duplicates: 0, rejected: [] });
+      expect((await teamOf('agent_sessions', 'tr-dot'))!.team_id).toBe(w.teams.design);
+      expect((await teamOf('turns', 'tr-dot-t'))!.team_id).toBe(w.teams.design);
+      expect(await q(sql`select team_id from runs where external_id = 'tr-dot-r'`)).toEqual([{ team_id: w.teams.design }]);
+      expect(await q(sql`select distinct u.team_id from usage u join turns t on t.id = u.turn_id where t.external_id = 'claude-code:tr-dot-t'`))
+        .toEqual([{ team_id: w.teams.design }]);
+    });
+
+    it('a dot-file team the user is not in, or that does not exist, falls through to the primary team with a warning', async () => {
+      const res = await post(w.tokens.alice, batch([
+        ev.sessionStart('tr-nm', 'github.com/acme/web', undefined, 'mobile'),
+        ev.turn('tr-nm', 'tr-nm-t'),
+        ev.sessionStart('tr-unk', 'github.com/acme/web', undefined, 'no-such-team'),
+      ]));
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ accepted: 3, duplicates: 0, rejected: [] });
+      expect(res.body.warnings).toEqual(expect.arrayContaining([
+        { code: 'team_not_member', team: 'mobile', session_id: 'tr-nm' },
+        { code: 'team_unknown', team: 'no-such-team', session_id: 'tr-unk' },
+      ]));
+      expect(res.body.warnings).toHaveLength(2);
+      expect(schemas.ingestResponse.safeParse(res.body).success).toBe(true);
+      expect((await teamOf('agent_sessions', 'tr-nm'))!.team_id).toBe(w.teams.platform);
+      expect((await teamOf('turns', 'tr-nm-t'))!.team_id).toBe(w.teams.platform);
+      expect((await teamOf('agent_sessions', 'tr-unk'))!.team_id).toBe(w.teams.platform);
+    });
+
+    it('without a primary team the fall-through ends at no team; without a dot file there is no warning', async () => {
+      const res = await post(w.tokens.nora, batch([
+        ev.sessionStart('tr-nora', 'github.com/acme/web', undefined, 'design'),
+        ev.turn('tr-nora', 'tr-nora-t'),
+        ev.sessionStart('tr-nora2', 'github.com/acme/web'),
+      ]));
+      expect(res.body).toEqual({
+        accepted: 3, duplicates: 0, rejected: [],
+        warnings: [{ code: 'team_not_member', team: 'design', session_id: 'tr-nora' }],
       });
-      expect((await post(w.tokens.ci, mapped)).body).toMatchObject({ accepted: 2, rejected: [] });
-      const [t] = await q(sql`select user_id, attribution, team_id from turns where external_id = 'claude-code:cu-4-turn'`);
-      expect(t).toEqual({ user_id: null, attribution: 'unverified', team_id: w.teams.mobile });
-      // hank's e-mail never matched across companies.
-      expect(await q(sql`select 1 from turns where user_id = ${w.users.hank}`)).toEqual([]);
+      expect(await teamOf('turns', 'tr-nora-t')).toEqual({ user_id: w.users.nora, attribution: 'verified', team_id: null });
+      expect((await teamOf('agent_sessions', 'tr-nora2'))!.team_id).toBeNull();
     });
 
-    it('a user token is verified and ignores the git e-mail', async () => {
-      const b = batch([ev.turn('ut-1', 'ut-turn-1')], { identity: { git_email: 'bob@acme.test' } });
-      expect((await post(w.tokens.alice, b)).body).toMatchObject({ accepted: 1, rejected: [] });
-      const [t] = await q(sql`select user_id, attribution, team_id from turns where external_id = 'claude-code:ut-turn-1'`);
-      expect(t).toEqual({ user_id: w.users.alice, attribution: 'verified', team_id: w.teams.platform });
+    it('at most one warning per session per batch; a replayed batch is all duplicates and warns no more', async () => {
+      const b = batch([
+        ev.sessionStart('tr-once', 'github.com/acme/web', undefined, 'nope'),
+        ev.sessionStart('tr-once', 'github.com/acme/web', undefined, 'nope'),
+      ]);
+      const first = await post(w.tokens.alice, b);
+      expect(first.body).toEqual({
+        accepted: 2, duplicates: 0, rejected: [], warnings: [{ code: 'team_unknown', team: 'nope', session_id: 'tr-once' }],
+      });
+      expect((await post(w.tokens.alice, b)).body).toEqual({ accepted: 0, duplicates: 2, rejected: [] });
     });
 
-    it('hashed company: plain keys are hashed and names dropped', async () => {
-      const b = batch([ev.sessionStart('h-1', 'github.com/hush/secret', 'secret')]);
-      expect((await post(w.tokens.hashedCo, b)).body).toMatchObject({ accepted: 1 });
-      const rows = await q(sql`select key, display_name from projects where company_id = ${w.hashedCompanyId}`);
-      expect(rows).toEqual([{ key: hashProjectKey('github.com/hush/secret'), display_name: null }]);
+    it('the team is pinned at session_start: a later mapping does not move the running session, a new session follows it', async () => {
+      await post(w.tokens.alice, batch([ev.sessionStart('tr-pin', 'github.com/acme/pinned', undefined, 'design'), ev.turn('tr-pin', 'tr-pin-1')]));
+      expect((await teamOf('turns', 'tr-pin-1'))!.team_id).toBe(w.teams.design);
+      await q(sql`update projects set team_id = ${w.teams.mobile} where key = 'github.com/acme/pinned'`);
+      await post(w.tokens.alice, batch([ev.turn('tr-pin', 'tr-pin-2'), ev.run('tr-pin-2', 'tr-pin-r', null, 1)]));
+      expect((await teamOf('turns', 'tr-pin-2'))!.team_id).toBe(w.teams.design);
+      expect(await q(sql`select team_id from runs where external_id = 'tr-pin-r'`)).toEqual([{ team_id: w.teams.design }]);
+      await post(w.tokens.alice, batch([ev.sessionStart('tr-pin-new', 'github.com/acme/pinned', undefined, 'design'), ev.turn('tr-pin-new', 'tr-pin-3')]));
+      expect((await teamOf('turns', 'tr-pin-3'))!.team_id).toBe(w.teams.mobile);
     });
 
-    it('hashed company: plain skill and MCP names are hashed before they are stored', async () => {
-      const turn = { ...ev.turn('h-2', 'h-turn-2'), skills: { 'secret-skill': { model: 1, user: 0 } }, mcp: { 'internal-db': { drop_table: 1 } } };
-      expect((await post(w.tokens.hashedCo, batch([turn as never]))).body).toMatchObject({ accepted: 1, rejected: [] });
-      const [t] = await q(sql`select skills, mcp from turns where external_id = 'claude-code:h-turn-2'`);
-      expect(JSON.stringify(t)).not.toMatch(/secret-skill|internal-db|drop_table/);
-      expect(Object.keys(t!.skills as object)[0]).toMatch(/^sha256:[0-9a-f]{64}$/);
+    it('a later session_start of the same session keeps the pinned team, so its turns never split across teams', async () => {
+      await post(w.tokens.alice, batch([ev.sessionStart('tr-rr', 'github.com/acme/repin', undefined, 'design'), ev.turn('tr-rr', 'tr-rr-1')]));
+      await q(sql`update projects set team_id = ${w.teams.mobile} where key = 'github.com/acme/repin'`);
+      // A lost collector state sends a fresh session_start for the running session.
+      const res = await post(w.tokens.alice, batch([ev.sessionStart('tr-rr', 'github.com/acme/repin', undefined, 'design'), ev.turn('tr-rr', 'tr-rr-2')]));
+      expect(res.body).toEqual({ accepted: 2, duplicates: 0, rejected: [] });
+      expect((await teamOf('agent_sessions', 'tr-rr'))!.team_id).toBe(w.teams.design);
+      expect((await teamOf('turns', 'tr-rr-1'))!.team_id).toBe(w.teams.design);
+      expect((await teamOf('turns', 'tr-rr-2'))!.team_id).toBe(w.teams.design);
+      // A re-sent old turn stays on the pinned team as well.
+      await post(w.tokens.alice, batch([ev.turn('tr-rr', 'tr-rr-1')]));
+      expect((await teamOf('turns', 'tr-rr-1'))!.team_id).toBe(w.teams.design);
+    });
+
+    it('turns, runs and usage that arrived before session_start move to the resolved team when it arrives', async () => {
+      await post(w.tokens.alice, batch([ev.turn('tr-late', 'tr-late-t'), ev.run('tr-late-t', 'tr-late-r', null, 1)]));
+      expect((await teamOf('turns', 'tr-late-t'))!.team_id).toBe(w.teams.platform); // primary team meanwhile
+      const res = await post(w.tokens.alice, batch([ev.sessionStart('tr-late', 'github.com/acme/web', undefined, 'design')]));
+      expect(res.body).toEqual({ accepted: 1, duplicates: 0, rejected: [] });
+      expect((await teamOf('agent_sessions', 'tr-late'))!.team_id).toBe(w.teams.design);
+      expect((await teamOf('turns', 'tr-late-t'))!.team_id).toBe(w.teams.design);
+      expect(await q(sql`select team_id from runs where external_id = 'tr-late-r'`)).toEqual([{ team_id: w.teams.design }]);
+      expect(await q(sql`select distinct team_id from usage where turn_id = (select id from turns where external_id = 'claude-code:tr-late-t')
+        or run_id = (select id from runs where external_id = 'tr-late-r')`)).toEqual([{ team_id: w.teams.design }]);
+    });
+
+    it('a session_start without a project keeps the team the session already has', async () => {
+      await post(w.tokens.alice, batch([ev.sessionStart('tr-keep', 'github.com/acme/web', undefined, 'design')]));
+      await post(w.tokens.alice, batch([ev.sessionStart('tr-keep')]));
+      expect((await teamOf('agent_sessions', 'tr-keep'))!.team_id).toBe(w.teams.design);
+    });
+
+    describe('hashed project naming', () => {
+      beforeAll(() => owner.run((tx) => setSettings(tx, { projectNaming: 'hashed' })));
+      afterAll(() => owner.run((tx) => setSettings(tx, { projectNaming: 'plain' })));
+
+      it('plain keys are hashed and names dropped', async () => {
+        const b = batch([ev.sessionStart('h-1', 'github.com/hush/secret', 'secret')]);
+        expect((await post(w.tokens.alice, b)).body).toMatchObject({ accepted: 1 });
+        const rows = await q(sql`select key, display_name from projects where key like 'sha256:%' or key = 'github.com/hush/secret'`);
+        expect(rows).toEqual([{ key: hashProjectKey('github.com/hush/secret'), display_name: null }]);
+      });
+
+      it('plain skill and MCP names are hashed before they are stored', async () => {
+        const turn = { ...ev.turn('h-2', 'h-turn-2'), skills: { 'secret-skill': { model: 1, user: 0 } }, mcp: { 'internal-db': { drop_table: 1 } } };
+        expect((await post(w.tokens.alice, batch([turn as never]))).body).toMatchObject({ accepted: 1, rejected: [] });
+        const [t] = await q(sql`select skills, mcp from turns where external_id = 'claude-code:h-turn-2'`);
+        expect(JSON.stringify(t)).not.toMatch(/secret-skill|internal-db|drop_table/);
+        expect(Object.keys(t!.skills as object)[0]).toMatch(/^sha256:[0-9a-f]{64}$/);
+      });
     });
   });
 
@@ -235,9 +325,9 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
       const res = await post(w.tokens.alice, batch([ev.outcome(turnId, 'failed'), ev.summary(turnId, 'Fixed flaky test')]));
       expect(res.body).toMatchObject({ accepted: 2, rejected: [] });
       expect(await q(sql`select id from turns where external_id = ${key}`)).toEqual([]);
-      const [parked] = await q(sql`select company_id, outcome, outcome_provisional, summary from pending_turn_patches
+      const [parked] = await q(sql`select user_id, outcome, outcome_provisional, summary from pending_turn_patches
         where turn_external_id = ${key}`);
-      expect(parked).toEqual({ company_id: w.companyId, outcome: 'failed', outcome_provisional: false, summary: 'Fixed flaky test' });
+      expect(parked).toEqual({ user_id: w.users.alice, outcome: 'failed', outcome_provisional: false, summary: 'Fixed flaky test' });
 
       await post(w.tokens.alice, batch([ev.turn('late-s', turnId, 4242, 'success')]));
       const [t] = await q(sql`select session_id, outcome, outcome_provisional, outcome_signals, summary, input_tokens::int from turns
@@ -262,7 +352,7 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
       await post(w.tokens.alice, batch([ev.summary('never-turn', 'Parked')]));
       const denied = (query: ReturnType<typeof sql>) =>
         db.transaction(async (tx) => {
-          await tx.execute(sql`select set_config('app.company_id', ${w.companyId}, true)`);
+          await tx.execute(sql`select set_config('app.user_id', ${w.users.alice}, true)`);
           await tx.execute(query);
         });
       const denial = { cause: expect.objectContaining({ code: '42501' }) };
@@ -294,17 +384,30 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
   });
 
   describe('errors', () => {
-    it('401 for missing, malformed, unknown and revoked tokens', async () => {
+    it('401 for missing, malformed, unknown, revoked and expired tokens', async () => {
       const b = batch([ev.sessionStart('e-1')]);
-      for (const token of [null, 'ghp_nope', 'aiobs_u_doesnotexist', w.tokens.revoked]) {
+      for (const token of [null, 'ghp_nope', 'aiobs_u_doesnotexist', w.tokens.revoked, w.tokens.expired]) {
         const res = await post(token, b);
         expect(res.status).toBe(401);
+        expect(res.body.error).toBe(TOKEN_REJECTED);
       }
-      // A company token presented with the user prefix is not accepted either.
-      expect((await post(w.tokens.ci.replace('aiobs_c_', 'aiobs_u_'), b)).status).toBe(401);
-      // The retired team prefix is refused, even with a secret that exists under another prefix (ADR-0022).
-      expect((await post(w.tokens.ci.replace('aiobs_c_', 'aiobs_t_'), b)).status).toBe(401);
-      expect((await post(`aiobs_t_${'x'.repeat(43)}`, b)).status).toBe(401);
+      expect(TOKEN_REJECTED).toMatch(/expired or revoked, run `ai-obs login`/);
+    });
+
+    it('401 explicitly for the retired company and team prefixes, even with a secret that exists as a user token', async () => {
+      const b = batch([ev.sessionStart('e-2')]);
+      for (const token of [w.tokens.alice.replace('aiobs_u_', 'aiobs_c_'), w.tokens.alice.replace('aiobs_u_', 'aiobs_t_'), `aiobs_c_${'x'.repeat(43)}`]) {
+        const res = await post(token, b);
+        expect(res).toEqual({ status: 401, body: { error: TOKEN_RETIRED } });
+      }
+    });
+
+    it('a token stops working the moment it expires; one with a future expiry works', async () => {
+      const token = await owner.run((tx) => insertToken(tx, w.users.dave, { expiresAt: '2099-01-01T00:00:00Z' }));
+      expect((await post(token, batch([ev.sessionStart('exp-1')]))).status).toBe(200);
+      await q(sql`update ingest_tokens set expires_at = now() - interval '1 second' where hash = ${hashToken(token)}`);
+      expect((await post(token, batch([ev.sessionStart('exp-2')]))).status).toBe(401);
+      expect(await lookupToken(db, hashToken(token))).toBeNull();
     });
 
     it('413 for more than 500 events or more than 1 MB', async () => {
@@ -358,81 +461,94 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
     });
   });
 
-  describe('GET /api/v1/collector-config', () => {
+  describe('GET /api/v1/collector-config (Appendix A)', () => {
     const get = (token: string | null) =>
       handleCollectorConfig(
         new Request('http://test/api/v1/collector-config', { headers: token ? { authorization: `Bearer ${token}` } : {} }),
         { db, limiter: limiter(), env: { MIN_COLLECTOR_VERSION: '1.2.3' } },
       );
 
-    it("returns naming mode, minimum collector version and the company's project salt (SEC-11)", async () => {
-      const a = (await (await get(w.tokens.alice)).json()) as Record<string, string>;
-      const h = (await (await get(w.tokens.hashedCo)).json()) as Record<string, string>;
-      expect(a).toMatchObject({ project_naming: 'plain', min_collector_version: '1.2.3' });
-      expect(h).toMatchObject({ project_naming: 'hashed', min_collector_version: '1.2.3' });
-      expect(a.project_salt).toMatch(/^[0-9a-f]{64}$/);
-      expect(h.project_salt).toMatch(/^[0-9a-f]{64}$/);
-      expect(h.project_salt).not.toBe(a.project_salt);
-      // Stable: a second call returns the same salt.
-      expect(((await (await get(w.tokens.alice)).json()) as Record<string, string>).project_salt).toBe(a.project_salt);
-    });
-
-    it('names the company, and the user for a user token (null for a company token)', async () => {
-      const res = await get(w.tokens.alice);
+    it("returns naming mode, minimum version, the deployment's salt, the deployment, user, teams, primary team and token", async () => {
+      const res = await get(w.tokens.device);
+      expect(res.status).toBe(200);
       expect(res.headers.get('cache-control')).toBe('private, max-age=300');
-      const a = (await res.json()) as Record<string, unknown>;
-      expect(a).toMatchObject({ company: { name: 'acme', slug: 'acme' }, user: { email: 'alice@acme.test' } });
-      const c = (await (await get(w.tokens.ci)).json()) as Record<string, unknown>;
-      expect(c).toMatchObject({ company: { name: 'acme', slug: 'acme' }, user: null });
-      const h = (await (await get(w.tokens.hashedCo)).json()) as Record<string, unknown>;
-      expect(h).toMatchObject({ company: { name: 'hush', slug: 'hush' }, user: null });
-      // The body satisfies the protocol schema the collector validates with.
-      expect(schemas.collectorConfigResponse.safeParse(a).success).toBe(true);
-      expect(schemas.collectorConfigResponse.safeParse(c).success).toBe(true);
+      const body = (await res.json()) as Record<string, unknown>;
+      expect(body).toEqual({
+        project_naming: 'plain',
+        min_collector_version: '1.2.3',
+        project_salt: expect.stringMatching(/^[0-9a-f]{64}$/),
+        deployment: { name: 'SPECTADO', slug: 'spectado' },
+        user: { email: 'alice@acme.test', name: 'Alice', kind: 'person' },
+        teams: [{ slug: 'design', name: 'Design' }, { slug: 'platform', name: 'Platform' }],
+        primary_team: 'platform',
+        token: { expires_at: '2027-01-22T10:00:00.000Z', label: 'mac-alice', source: 'device' },
+      });
+      expect(schemas.collectorConfigResponse.safeParse(body).success).toBe(true);
+      expect('company' in body).toBe(false);
+      // Stable: every token gets the same deployment salt.
+      const other = (await (await get(w.tokens.bob)).json()) as Record<string, unknown>;
+      expect(other.project_salt).toBe(body.project_salt);
     });
 
-    it('requires a valid token', async () => {
+    it('a manual token without expiry or label, a service user, and a user without teams', async () => {
+      const a = (await (await get(w.tokens.alice)).json()) as Record<string, unknown>;
+      expect(a.token).toEqual({ expires_at: null, label: null, source: 'manual' });
+      const svc = (await (await get(w.tokens.svc)).json()) as Record<string, unknown>;
+      expect(svc).toMatchObject({
+        user: { email: null, name: 'CI runner', kind: 'service' },
+        teams: [{ slug: 'mobile', name: 'Mobile' }],
+        primary_team: 'mobile',
+        token: { expires_at: '2099-01-01T00:00:00.000Z', label: 'ci', source: 'manual' },
+      });
+      const nora = (await (await get(w.tokens.nora)).json()) as Record<string, unknown>;
+      expect(nora).toMatchObject({ user: { email: 'nora@acme.test', name: 'Nora', kind: 'person' }, teams: [], primary_team: null });
+      for (const body of [a, svc, nora]) expect(schemas.collectorConfigResponse.safeParse(body).success).toBe(true);
+    });
+
+    it('requires a valid, unexpired user token', async () => {
       expect((await get(null)).status).toBe(401);
       expect((await get(w.tokens.revoked)).status).toBe(401);
-      expect((await get(w.tokens.ci.replace('aiobs_c_', 'aiobs_t_'))).status).toBe(401);
+      expect((await get(w.tokens.expired)).status).toBe(401);
+      expect((await get(w.tokens.alice.replace('aiobs_u_', 'aiobs_c_'))).status).toBe(401);
     });
   });
 
   describe('patch before turn: KPIs and rollups count one real turn', () => {
     it('counts nothing while only patches and runs exist, then exactly the real turn', async () => {
-      // Own company so other tests' turns do not affect the counts.
-      const co = await owner.run(async (tx) => {
-        const one = async <T>(query: ReturnType<typeof sql>) => [...(await tx.execute(query))][0] as T;
-        const c = await one<{ id: string }>(sql`insert into companies (name, slug) values ('Patch Co', 'patchco') returning id`);
-        const t = await one<{ id: string }>(sql`insert into teams (company_id, name) values (${c.id}, 'Core') returning id`);
+      // A day no other test writes to, and an own user and team, so other tests' turns do not affect the counts.
+      const DAY = '2026-09-20';
+      const at = (hms: string) => `${DAY}T${hms}Z`;
+      const pat = await owner.run(async (tx) => {
+        const teamId = await insertTeam(tx, 'Patch', 'patch');
         const userId = await insertUser(tx, 'pat@patch.test', 'Pat');
-        await insertMember(tx, c.id, userId, { role: 'admin', primaryTeamId: t.id, teamRole: 'lead' });
-        return { companyId: c.id, teamId: t.id, userId, token: await insertToken(tx, c.id, userId) };
+        await insertMember(tx, userId, { role: 'admin', primaryTeamId: teamId, teamRole: 'lead' });
+        return { teamId, userId, token: await insertToken(tx, userId) };
       });
       const web = connectRole('web');
       const worker = connectRole('worker');
-      const DAY = '2026-10-05';
       const filters: Filters = { ...defaultFilters(), range: 'custom', from: DAY, to: DAY };
       const kpis = (mode: 'full' | 'aggregates-only', source: 'raw' | 'rollup') => {
-        const viewer: Viewer = { id: co.userId, companyId: co.companyId, companyRole: 'admin', teams: [], company: { settings: { individualVisibility: mode } } };
-        return withRlsContext(web, { companyId: co.companyId, userId: co.userId, role: 'admin' }, async (tx) =>
-          getKpis({ ...(await createQueryContext(tx, viewer, new Date('2026-10-06T00:00:00Z'))), forceSource: source }, filters),
+        const viewer: Viewer = { id: pat.userId, role: 'admin', teams: [], deployment: { settings: { individualVisibility: mode } } };
+        return withRlsContext(web, { userId: pat.userId, role: 'admin' }, async (tx) =>
+          getKpis({ ...(await createQueryContext(tx, viewer, new Date(`${DAY}T23:00:00Z`))), forceSource: source }, filters),
         );
       };
       const turnCount = async () =>
-        (await q<{ n: number }>(sql`select count(*)::int n from turns where company_id = ${co.companyId}`))[0]!.n;
+        (await q<{ n: number }>(sql`select count(*)::int n from turns where user_id = ${pat.userId}`))[0]!.n;
+      const run = { ...ev.run('pt-1', 'r-1', null, 1, 70), started_at: at('09:01:10'), ended_at: at('09:01:40') } as IngestEventInput;
+      const turn = { ...ev.turn('pt-s', 'pt-1', 900, 'success'), started_at: at('09:01:00'), ended_at: at('09:03:00') } as IngestEventInput;
 
-      const early = await post(co.token, batch([ev.outcome('pt-1', 'failed'), ev.summary('pt-1', 'Patched first'), ev.run('pt-1', 'r-1', null, 1, 70)]));
+      const early = await post(pat.token, batch([ev.outcome('pt-1', 'failed'), ev.summary('pt-1', 'Patched first'), run]));
       expect(early.body).toMatchObject({ accepted: 3, rejected: [] });
       expect(await turnCount()).toBe(0);
       for (const mode of ['full', 'aggregates-only'] as const) expect((await kpis(mode, 'raw')).turns).toBe(0);
-      expect(await recomputeDay(worker, co.companyId, DAY)).toBeNull();
+      expect(await recomputeDay(worker, DAY)).toBeNull();
 
-      await post(co.token, batch([ev.sessionStart('pt-s', 'github.com/patch/app'), ev.turn('pt-s', 'pt-1', 900, 'success')]));
+      await post(pat.token, batch([{ ...ev.sessionStart('pt-s', 'github.com/patch/app'), at: at('09:00:00') } as IngestEventInput, turn]));
       expect(await turnCount()).toBe(1);
-      expect(await recomputeDay(worker, co.companyId, DAY)).toEqual({ turns: 1, rows: 1 });
+      expect(await recomputeDay(worker, DAY)).toEqual({ turns: 1, rows: 1 });
       const [roll] = await q<{ turns: number; failed: number; runs: number; input: number }>(sql`select sum(turns)::int turns,
-        sum(failed)::int failed, sum(runs)::int runs, sum(input_tokens)::int input from daily_rollups where company_id = ${co.companyId}`);
+        sum(failed)::int failed, sum(runs)::int runs, sum(input_tokens)::int input from daily_rollups where day = ${DAY}`);
       expect(roll).toEqual({ turns: 1, failed: 1, runs: 1, input: 900 });
       for (const mode of ['full', 'aggregates-only'] as const) {
         const raw = await kpis(mode, 'raw');
@@ -461,54 +577,84 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
 
     it("another user's token cannot overwrite, patch or attach to someone else's turn, run or session", async () => {
       await post(w.tokens.alice, batch([ev.sessionStart('own-s'), ev.turn('own-s', 'own-t', 111), ev.run('own-t', 'own-r', null, 1)]));
-      const stolen = [
+      const overwrites = [
         ev.turn('own-s', 'own-t', 1),
         ev.run('own-t', 'own-r', null, 1, 1),
-        ev.run('own-t', 'own-r2', null, 1),
-        ev.outcome('own-t', 'failed'),
-        ev.summary('own-t', 'overwritten by bob'),
         ev.sessionStart('own-s'),
         { ...ev.sessionStart('own-s'), type: 'session_end', reason: 'x' } as unknown as IngestEventInput,
       ];
-      const res = await post(w.tokens.bob, batch(stolen));
-      expect(res.body.accepted).toBe(0);
-      expect(res.body.rejected).toHaveLength(stolen.length);
+      // Another user's rows are invisible to the ingest role (RLS): these find nothing, so they are parked or stored
+      // unlinked under bob, and never reach alice's turn.
+      const strays = [ev.run('own-t', 'own-r2', null, 1), ev.outcome('own-t', 'failed'), ev.summary('own-t', 'overwritten by bob')];
+      const res = await post(w.tokens.bob, batch([...overwrites, ...strays]));
+      expect(res.body.accepted).toBe(strays.length);
+      expect(res.body.rejected).toHaveLength(overwrites.length);
       expect(res.body.rejected.every((r) => r.reason === OWNED)).toBe(true);
 
+      // Alice re-sends her turn: still hers, bob's parked patches are dropped instead of applied.
+      await post(w.tokens.alice, batch([ev.turn('own-s', 'own-t', 111)]));
       expect(await external('turns', 'claude-code:own-t')).toEqual([{ user_id: w.users.alice, input_tokens: 111, summary: null }]);
       expect(await external('runs', 'own-r')).toEqual([{ user_id: w.users.alice }]);
       expect(await external('agent_sessions', 'claude-code:own-s')).toEqual([{ user_id: w.users.alice }]);
-      expect(await q(sql`select 1 from runs where external_id = 'own-r2'`)).toEqual([]);
+      expect(await q(sql`select user_id, turn_id from runs where external_id = 'own-r2'`)).toEqual([{ user_id: w.users.bob, turn_id: null }]);
+      expect(await q(sql`select 1 from pending_turn_patches where turn_external_id = 'claude-code:own-t'`)).toEqual([]);
       const [t] = await q(sql`select outcome from turns where external_id = 'claude-code:own-t'`);
       expect(t!.outcome).toBe('success');
     });
 
-    it('an unverified company-token sender cannot overwrite an owned turn either', async () => {
-      const res = await post(w.tokens.ci, batch([ev.turn('own-s', 'own-t', 2)]));
-      expect(res.body.rejected).toEqual([expect.objectContaining({ reason: OWNED })]);
-    });
-
-    it('the owner can re-send from another token or machine, and an unowned row can be claimed', async () => {
-      // Same user through a company token + git e-mail (matched), from another machine.
-      const viaCompany = batch([ev.turn('own-s', 'own-t', 222)], {
-        identity: { git_email: 'alice@acme.test' },
-        machine: { id: 'ffffffff-7d4b-4c1a-9b5e-3f2d1c0b9a87', os: 'darwin' },
-      });
-      expect((await post(w.tokens.ci, viaCompany)).body).toMatchObject({ accepted: 1, rejected: [] });
+    it('the owner can re-send from another token or machine, and an ownerless (pre-ADR-0029) row can be claimed', async () => {
+      // Same user through her device token, from another machine.
+      const viaDevice = batch([ev.turn('own-s', 'own-t', 222)], { machine: { id: 'ffffffff-7d4b-4c1a-9b5e-3f2d1c0b9a87', os: 'darwin' } });
+      expect((await post(w.tokens.device, viaDevice)).body).toMatchObject({ accepted: 1, rejected: [] });
       expect(await external('turns', 'claude-code:own-t')).toEqual([{ user_id: w.users.alice, input_tokens: 222, summary: null }]);
 
-      // Unverified first, matched/verified later: the row gets its owner.
-      await post(w.tokens.ci, batch([ev.turn('claim-s', 'claim-t', 5)]));
+      // An old company-token row has no owner: the first user who sends it claims it.
+      await post(w.tokens.alice, batch([ev.turn('claim-s', 'claim-t', 5)]));
+      await q(sql`update turns set user_id = null, attribution = 'unverified' where external_id = 'claude-code:claim-t'`);
+      await q(sql`update agent_sessions set user_id = null where external_id = 'claude-code:claim-s'`);
+      await q(sql`update usage set user_id = null where turn_id = (select id from turns where external_id = 'claude-code:claim-t')`);
       expect((await external('turns', 'claude-code:claim-t'))[0]!.user_id).toBeNull();
-      expect((await post(w.tokens.bob, batch([ev.turn('claim-s', 'claim-t', 6)]))).body.accepted).toBe(1);
+      expect((await post(w.tokens.bob, batch([ev.turn('claim-s', 'claim-t', 6)]))).body).toEqual({ accepted: 1, duplicates: 0, rejected: [] });
       expect((await external('turns', 'claude-code:claim-t'))[0]!.user_id).toBe(w.users.bob);
+    });
+
+    it('every write claims an ownerless row (patch, title, turn_started, session_end, run, session_start back-fill)', async () => {
+      const orphan = async (sid: string, tid: string, rid: string) => {
+        await post(w.tokens.alice, batch([ev.turn(sid, tid, 5), ev.run(tid, rid, null, 1)]));
+        await q(sql`update turns set user_id = null, attribution = 'unverified' where external_id = ${`claude-code:${tid}`}`);
+        await q(sql`update agent_sessions set user_id = null where external_id = ${`claude-code:${sid}`}`);
+        await q(sql`update runs set user_id = null where turn_external_id = ${`claude-code:${tid}`}`);
+        await q(sql`update usage set user_id = null where turn_id = (select id from turns where external_id = ${`claude-code:${tid}`})
+          or run_id in (select id from runs where turn_external_id = ${`claude-code:${tid}`})`);
+      };
+      const owners = async (sid: string, tid: string) =>
+        q(sql`select (select user_id from agent_sessions where external_id = ${`claude-code:${sid}`}) as session,
+          (select user_id from turns where external_id = ${`claude-code:${tid}`}) as turn,
+          (select attribution from turns where external_id = ${`claude-code:${tid}`}) as attribution`);
+
+      await orphan('cl-1', 'cl-1-t', 'cl-1-r');
+      const res = await post(w.tokens.bob, batch([
+        ev.summary('cl-1-t', 'claimed by a patch'),
+        ev.title('cl-1', 'claimed by a title'),
+        ev.turnStarted('cl-1', '2026-10-05T09:10:00Z'),
+        ev.run('cl-1-t', 'cl-1-r', null, 1, 9),
+      ]));
+      expect(res.body).toEqual({ accepted: 4, duplicates: 0, rejected: [] });
+      expect(await owners('cl-1', 'cl-1-t')).toEqual([{ session: w.users.bob, turn: w.users.bob, attribution: 'verified' }]);
+      expect(await q(sql`select user_id from runs where external_id = 'cl-1-r'`)).toEqual([{ user_id: w.users.bob }]);
+
+      await orphan('cl-2', 'cl-2-t', 'cl-2-r');
+      await q(sql`update turns set project_id = null where external_id = 'claude-code:cl-2-t'`);
+      const end = { event_id: ulid(), type: 'session_end', harness: 'claude-code', session_id: 'cl-2', reason: 'exit', at: '2026-10-05T09:30:00Z' } as IngestEventInput;
+      expect((await post(w.tokens.bob, batch([ev.sessionStart('cl-2', 'github.com/acme/web'), end]))).body).toEqual({ accepted: 2, duplicates: 0, rejected: [] });
+      expect(await owners('cl-2', 'cl-2-t')).toEqual([{ session: w.users.bob, turn: w.users.bob, attribution: 'verified' }]);
     });
 
     it('a turn cannot take over runs another user filed under the same key', async () => {
       await post(w.tokens.alice, batch([ev.run('early-t', 'early-r', null, 1)]));
-      const res = await post(w.tokens.bob, batch([ev.turn('early-s', 'early-t')]));
-      expect(res.body.rejected).toEqual([expect.objectContaining({ reason: OWNED })]);
-      expect(await external('runs', 'early-r')).toEqual([{ user_id: w.users.alice }]);
+      // Bob's turn is his own row; alice's run is invisible to him and stays hers, unlinked.
+      expect((await post(w.tokens.bob, batch([ev.turn('takeover-s', 'early-t')]))).body).toMatchObject({ accepted: 1, rejected: [] });
+      expect(await q(sql`select user_id, turn_id from runs where external_id = 'early-r'`)).toEqual([{ user_id: w.users.alice, turn_id: null }]);
     });
 
     it("a sender cannot pre-claim another user's event ids", async () => {
@@ -579,8 +725,12 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
 
     it("another user cannot set or overwrite the title of someone else's session or parked title", async () => {
       await post(w.tokens.alice, batch([ev.sessionStart('ti-own'), ev.title('ti-own', 'Alice', 'custom')]));
-      expect((await post(w.tokens.bob, batch([ev.title('ti-own', 'Bob')]))).body.rejected).toEqual([expect.objectContaining({ reason: OWNED })]);
+      // Alice's session is invisible to bob's token: his title is parked under him and dropped, never applied.
+      expect((await post(w.tokens.bob, batch([ev.title('ti-own', 'Bob')]))).body).toMatchObject({ accepted: 1, rejected: [] });
       expect(await session('ti-own')).toEqual([{ user_id: w.users.alice, title: 'Alice', title_source: 'custom' }]);
+      await post(w.tokens.alice, batch([ev.sessionStart('ti-own')]));
+      expect(await session('ti-own')).toEqual([{ user_id: w.users.alice, title: 'Alice', title_source: 'custom' }]);
+      expect(await parked('ti-own')).toEqual([]);
 
       await post(w.tokens.alice, batch([ev.title('ti-pp', "Alice's parked")]));
       expect((await post(w.tokens.bob, batch([ev.title('ti-pp', 'Bob')]))).body.rejected).toEqual([expect.objectContaining({ reason: OWNED })]);
@@ -594,7 +744,7 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
       await post(w.tokens.alice, batch([ev.title('ti-never', 'Parked')]));
       const denied = (query: ReturnType<typeof sql>) =>
         db.transaction(async (tx) => {
-          await tx.execute(sql`select set_config('app.company_id', ${w.companyId}, true)`);
+          await tx.execute(sql`select set_config('app.user_id', ${w.users.alice}, true)`);
           await tx.execute(query);
         });
       const denial = { cause: expect.objectContaining({ code: '42501' }) };
@@ -744,7 +894,7 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
     it('app_ingest can read the liveness columns and ended_at only', async () => {
       const run = (query: ReturnType<typeof sql>) =>
         db.transaction(async (tx) => {
-          await tx.execute(sql`select set_config('app.company_id', ${w.companyId}, true)`);
+          await tx.execute(sql`select set_config('app.user_id', ${w.users.alice}, true)`);
           await tx.execute(query);
         });
       const denial = { cause: expect.objectContaining({ code: '42501' }) };
@@ -756,7 +906,6 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
 
   describe('event time window (DP-05, DP-08)', () => {
     const at = (iso: string) => ({ started_at: iso, ended_at: iso });
-    // The test company is on the Free plan: its 395-day setting is capped to the plan maximum, 30 days.
     it('rejects turns and runs older than the retention cutoff or more than a day in the future', async () => {
       const day = 86_400_000;
       const old = { ...ev.turn('win-s', 'win-old'), ...at(new Date(Date.now() - 400 * day).toISOString()) } as IngestEventInput;
@@ -773,82 +922,37 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
       expect(await q(sql`select external_id from turns where external_id like 'claude-code:win-%'`)).toEqual([{ external_id: 'claude-code:win-ok' }]);
     });
 
-    it('the cutoff is the plan maximum applied to the company retention setting', async () => {
+    it("the cutoff follows the deployment's retention setting", async () => {
       expect(timeWindowProblem(ev.turn('x', 'y'), 30, Date.parse('2026-10-06T12:00:00Z'))).toBeNull(); // 2026-10-05: inside 30 days
       const t = { ...ev.turn('x', 'y'), started_at: '2026-09-06T23:59:00Z', ended_at: '2026-09-07T00:01:00Z' } as IngestEventInput;
       // cutoff = 00:00 UTC of 2026-10-06 minus 30 days = 2026-09-06T00:00Z
       expect(timeWindowProblem(t, 30, Date.parse('2026-10-06T12:00:00Z'))).toBeNull();
       expect(timeWindowProblem({ ...t, started_at: '2026-09-05T23:59:00Z' } as IngestEventInput, 30, Date.parse('2026-10-06T12:00:00Z'))).toMatch(/retention/);
+
+      const day = 86_400_000;
+      const fortyDaysOld = () => ({ ...ev.turn('win-s', 'win-40'), started_at: new Date(Date.now() - 40 * day).toISOString(), ended_at: new Date(Date.now() - 40 * day).toISOString() }) as IngestEventInput;
+      await owner.run((tx) => setSettings(tx, { retentionDays: 30 })); // the minimum
+      try {
+        expect((await post(w.tokens.alice, batch([fortyDaysOld()]))).body.rejected).toEqual([
+          expect.objectContaining({ reason: 'started_at is before the retention window' }),
+        ]);
+      } finally {
+        await owner.run((tx) => setSettings(tx, { retentionDays: 395 }));
+      }
+      expect((await post(w.tokens.alice, batch([fortyDaysOld()]))).body).toMatchObject({ accepted: 1, rejected: [] });
     });
   });
 
   describe('user tokens need a live membership (SEC-4, defence in depth)', () => {
-    it("stops resolving once the user is no longer a member of the token's company; company tokens are unaffected", async () => {
+    it('stop resolving once the user is no longer a member; their data stays', async () => {
       expect((await post(w.tokens.bob, batch([ev.sessionStart('mem-s')]))).status).toBe(200);
       // Removal deletes the membership (team memberships cascade); bob's identity and data stay (D1).
-      await owner.run(async (tx) => {
-        await tx.execute(sql`delete from company_memberships where user_id = ${w.users.bob} and company_id = ${w.companyId}`);
-      });
+      await q(sql`delete from memberships where user_id = ${w.users.bob}`);
       expect((await post(w.tokens.bob, batch([ev.sessionStart('mem-s2')]))).status).toBe(401);
       expect(await lookupToken(db, hashToken(w.tokens.bob))).toBeNull();
-      expect((await post(w.tokens.ci, batch([ev.sessionStart('mem-s3')]))).status).toBe(200);
-      // A company token no longer matches the removed member's git e-mail.
-      const res = await post(w.tokens.ci, batch([ev.turn('mem-s4', 'mem-t4')], { identity: { git_email: 'bob@acme.test' } }));
-      expect(res.body).toMatchObject({ accepted: 1, rejected: [] });
-      expect(await q(sql`select user_id, attribution from turns where external_id = 'claude-code:mem-t4'`)).toEqual([
-        { user_id: null, attribution: 'unverified' },
-      ]);
       expect(await q(sql`select user_id from agent_sessions where external_id = 'claude-code:mem-s'`)).toEqual([{ user_id: w.users.bob }]);
-      await owner.run((tx) => insertMember(tx, w.companyId, w.users.bob, { primaryTeamId: w.teams.mobile }));
+      await owner.run((tx) => insertMember(tx, w.users.bob, { primaryTeamId: w.teams.mobile }));
       expect((await post(w.tokens.bob, batch([ev.sessionStart('mem-s5')]))).status).toBe(200);
-    });
-
-    it('a company token whose creator is no longer an admin or lead is refused (D2, also for a racing insert)', async () => {
-      // As a token inserted concurrently with the creator's demotion would be left: unrevoked, creator a plain member.
-      const stray = await owner.run((tx) => insertToken(tx, w.companyId, null, false, w.users.dave));
-      expect((await post(stray, batch([ev.sessionStart('stray-s')]))).status).toBe(401);
-      expect(await lookupToken(db, hashToken(stray))).toBeNull();
-    });
-  });
-
-  describe('one person in two companies (ADR-0022)', () => {
-    it("each user token writes only into its own company, and RLS keeps the two apart", async () => {
-      const beta = await owner.run(async (tx) => {
-        const [c] = [...(await tx.execute(sql`insert into companies (name, slug) values ('Beta', 'beta') returning id`))] as Array<{ id: string }>;
-        const [t] = [...(await tx.execute(sql`insert into teams (company_id, name) values (${c!.id}, 'Core') returning id`))] as Array<{ id: string }>;
-        await insertMember(tx, c!.id, w.users.dave, { primaryTeamId: t!.id });
-        return { companyId: c!.id, teamId: t!.id, daveB: await insertToken(tx, c!.id, w.users.dave) };
-      });
-      const daveA = await owner.run((tx) => insertToken(tx, w.companyId, w.users.dave));
-      const machine = { id: 'dddddddd-7d4b-4c1a-9b5e-3f2d1c0b9a87', os: 'linux' as const };
-      const send = (token: string) =>
-        post(token, batch([ev.sessionStart('dual-s', 'github.com/dave/side'), ev.turn('dual-s', 'dual-t')], { machine }));
-      expect((await send(daveA)).body).toMatchObject({ accepted: 2, rejected: [] });
-      expect((await send(beta.daveB)).body).toMatchObject({ accepted: 2, rejected: [] });
-
-      const owned = (table: 'turns' | 'agent_sessions') =>
-        q<{ company_id: string; user_id: string; team_id: string | null }>(
-          sql`select company_id, user_id, team_id from ${sql.raw(table)} where external_id = ${table === 'turns' ? 'claude-code:dual-t' : 'claude-code:dual-s'}
-              order by company_id = ${w.companyId} desc`,
-        );
-      expect(await owned('turns')).toEqual([
-        { company_id: w.companyId, user_id: w.users.dave, team_id: w.teams.mobile },
-        { company_id: beta.companyId, user_id: w.users.dave, team_id: beta.teamId },
-      ]);
-      expect((await owned('agent_sessions')).map((r) => r.company_id)).toEqual([w.companyId, beta.companyId]);
-      const machines = await q<{ company_id: string }>(
-        sql`select company_id from machines where machine_id = ${machine.id} order by company_id = ${w.companyId} desc`,
-      );
-      expect(machines.map((m) => m.company_id)).toEqual([w.companyId, beta.companyId]);
-
-      const web = connectRole('web');
-      const visible = (companyId: string) =>
-        withRlsContext(web, { companyId, userId: w.users.dave, role: 'member' }, async (tx) => ({
-          turns: [...(await tx.execute(sql`select company_id from turns where external_id = 'claude-code:dual-t'`))],
-          sessions: [...(await tx.execute(sql`select company_id from agent_sessions where external_id = 'claude-code:dual-s'`))],
-        }));
-      expect(await visible(w.companyId)).toEqual({ turns: [{ company_id: w.companyId }], sessions: [{ company_id: w.companyId }] });
-      expect(await visible(beta.companyId)).toEqual({ turns: [{ company_id: beta.companyId }], sessions: [{ company_id: beta.companyId }] });
     });
   });
 
@@ -1040,6 +1144,32 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
       await post(w.tokens.alice, batch([ev.turn('ord-s2', 'ord-t2')]));
       expect(await outcomeOf('ord-t2')).toEqual({ outcome: 'failed', p: false });
     });
+
+    it("a stray patch from another user does not freeze the owner's outcome (markers carry the sender)", async () => {
+      await post(w.tokens.alice, batch([ev.turn('mk-s', 'mk-t'), ev.turn('mk-s', 'mk-t2')]));
+      // Bob cannot see alice's turns: his final patches are parked under him and never applied.
+      const stray = await post(w.tokens.bob, batch([patch('mk-t', 'success', false), patch('mk-t2', 'success', false)]));
+      expect(stray.body).toMatchObject({ accepted: 2, rejected: [] });
+      expect(await q(sql`select event_id from ingest_events where event_id like ${'%:claude-code:mk-t%'} order by event_id`)).toEqual([
+        { event_id: `outcome-final:${w.users.bob}:claude-code:mk-t` },
+        { event_id: `outcome-final:${w.users.bob}:claude-code:mk-t2` },
+        { event_id: `outcome-patch:${w.users.bob}:claude-code:mk-t` },
+        { event_id: `outcome-patch:${w.users.bob}:claude-code:mk-t2` },
+      ]);
+      // Alice's provisional patch still applies, and so does her re-sent turn's outcome.
+      expect((await post(w.tokens.alice, batch([patch('mk-t', 'failed', true)]))).body).toMatchObject({ accepted: 1, rejected: [] });
+      expect(await outcomeOf('mk-t')).toEqual({ outcome: 'failed', p: true });
+      await post(w.tokens.alice, batch([ev.turn('mk-s', 'mk-t2', 1000, 'failed')]));
+      expect(await outcomeOf('mk-t2')).toEqual({ outcome: 'failed', p: true });
+    });
+
+    it('a marker written before 0018 (no user part) is still honoured', async () => {
+      await post(w.tokens.alice, batch([ev.turn('lg-s', 'lg-t')]));
+      await q(sql`insert into ingest_events (event_id, type) values ('outcome-patch:claude-code:lg-t', 'marker'),
+        ('outcome-final:claude-code:lg-t', 'marker')`);
+      await post(w.tokens.alice, batch([ev.turn('lg-s', 'lg-t', 1000, 'failed'), patch('lg-t', 'failed', true)]));
+      expect(await outcomeOf('lg-t')).toEqual({ outcome: 'success', p: true });
+    });
   });
 
   describe('batch transactions (DP-13, DP-14)', () => {
@@ -1060,7 +1190,7 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
       const applied = new Promise<void>((r) => (runApplied = r));
 
       // Transaction A has inserted the run (turn not visible yet) and stays open.
-      const a = withIngestContext(db, token.companyId, async (tx) => {
+      const a = withIngestContext(db, token.userId, async (tx) => {
         const res = await processBatch(tx, token, runBatch.header, runBatch.events);
         runApplied();
         await gate;
@@ -1068,7 +1198,7 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
       });
       await applied;
       let turnDone = false;
-      const b = withIngestContext(db, token.companyId, (tx) => processBatch(tx, token, turnBatch.header, turnBatch.events)).then((r) => {
+      const b = withIngestContext(db, token.userId, (tx) => processBatch(tx, token, turnBatch.header, turnBatch.events)).then((r) => {
         turnDone = true;
         return r;
       });
@@ -1090,18 +1220,18 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
       const applied = new Promise<void>((r) => (firstApplied = r));
 
       // Transaction A holds the session lock of lock-s and stays open.
-      const a = withIngestContext(db, token.companyId, async (tx) => {
+      const a = withIngestContext(db, token.userId, async (tx) => {
         const res = await processBatch(tx, token, first.header, first.events);
         firstApplied();
         await gate;
         return res;
       });
       await applied;
-      const b = withIngestContext(db, token.companyId, (tx) => processBatch(tx, token, second.header, second.events));
+      const b = withIngestContext(db, token.userId, (tx) => processBatch(tx, token, second.header, second.events));
       await new Promise((r) => setTimeout(r, 400));
       // B waits for the session lock without holding its turn lock: a batch of A that went on to lock-t2 could not
       // deadlock with it (before, B took turn:lock-t2 first and then waited for the session).
-      const turnLock = `turn:${token.companyId}:claude-code:lock-t2`;
+      const turnLock = 'turn:claude-code:lock-t2';
       const [free] = await q(sql`select pg_try_advisory_lock(hashtextextended(${turnLock}, 0)) as free`);
       expect(free).toEqual({ free: true });
       await q(sql`select pg_advisory_unlock(hashtextextended(${turnLock}, 0))`);
@@ -1130,7 +1260,7 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
 
       const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
       let savepoints = 0;
-      const res = await withIngestContext(db, token.companyId, (tx) => {
+      const res = await withIngestContext(db, token.userId, (tx) => {
         const orig = tx.transaction.bind(tx);
         tx.transaction = ((fn: never) => (savepoints++, orig(fn))) as typeof tx.transaction;
         return processBatch(tx, token, b.header, b.events);
@@ -1142,7 +1272,7 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
       // Clean batch: ceil(61 / chunk) savepoints instead of 61.
       const clean = parsed(Array.from({ length: 61 }, (_, i) => ev.sessionStart(`chunk2-${i}`)));
       savepoints = 0;
-      await withIngestContext(db, token.companyId, (tx) => {
+      await withIngestContext(db, token.userId, (tx) => {
         const orig = tx.transaction.bind(tx);
         tx.transaction = ((fn: never) => (savepoints++, orig(fn))) as typeof tx.transaction;
         return processBatch(tx, token, clean.header, clean.events);
@@ -1178,10 +1308,12 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
     });
   });
 
-  it('never lets one company write into another (RLS)', async () => {
-    // The hashed company's token wrote only into its own company.
-    const rows = await q(sql`select distinct company_id from agent_sessions where external_id = 'claude-code:h-1'`);
-    expect(rows).toEqual([{ company_id: w.hashedCompanyId }]);
+  it("app_ingest cannot write a row for another user (WITH CHECK user_id = app_user())", async () => {
+    const write = withIngestContext(db, w.users.bob, (tx) =>
+      tx.execute(sql`insert into agent_sessions (user_id, external_id, harness, started_at)
+        values (${w.users.alice}, 'claude-code:forged', 'claude-code', now())`),
+    );
+    await expect(write).rejects.toMatchObject({ cause: expect.objectContaining({ code: '42501' }) });
     expect(ulid()).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/);
   });
 });

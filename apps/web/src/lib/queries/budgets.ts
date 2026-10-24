@@ -4,7 +4,7 @@ import { listTeams } from './lookups';
 import { usageDaily, type Dims } from './providers';
 import { dayString } from './range';
 import { canSeeUsers, type QueryCtx } from './scope';
-import { costTokens, rows } from './sqlutil';
+import { costTokens, rows, userLabel } from './sqlutil';
 
 export interface BudgetProgress {
   id: string;
@@ -30,7 +30,7 @@ export interface BudgetsResult {
   /** First day of the month the progress is for (UTC), YYYY-MM-DD. */
   month: string;
   rows: BudgetProgress[];
-  /** User budgets of other people left out because the company is in aggregates-only mode. */
+  /** User budgets of other people left out because the deployment is in aggregates-only mode. */
   hiddenUserBudgets: number;
 }
 
@@ -43,9 +43,9 @@ export async function getBudgetProgress(ctx: QueryCtx): Promise<BudgetsResult> {
   const nextMonth = dayString(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 1));
   const list = await rows<{ id: string; team_id: string | null; user_id: string | null; kind: 'tokens' | 'cost'; limit_value: unknown; user_name: string | null }>(
     ctx.tx,
-    sql`select b.id, b.team_id, b.user_id, b.kind, b.limit_value::float8 as limit_value, coalesce(u.name, u.email) as user_name
+    sql`select b.id, b.team_id, b.user_id, b.kind, b.limit_value::float8 as limit_value, ${userLabel('u')} as user_name
         from budgets b left join users u on u.id = b.user_id
-        where b.company_id = ${ctx.viewer.companyId}::uuid order by b.kind, b.created_at`,
+        order by b.kind, b.created_at`,
   );
   const teams = new Map((await listTeams(ctx)).map((t) => [t.id, t.name]));
   const showUsers = canSeeUsers(ctx.viewer);

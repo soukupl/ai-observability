@@ -7,12 +7,12 @@ const TEXT: Record<Mode, { short: string; long: string }> = {
   },
   full: {
     short: 'Individual visibility: full detail',
-    long: 'Leads see their teams’ turns by person and admins see the whole company. You always see your own detail.',
+    long: 'Leads see their teams’ turns by person and admins see everyone’s. You always see your own detail.',
   },
 };
 
 /**
- * The company's individual-visibility mode (ADR-0008) must be visible to every user: this banner
+ * The deployment's individual-visibility mode (ADR-0008) must be visible to every user: this banner
  * sits on top of the dashboard and `variant="footer"` is the one-line reminder in the page footer.
  */
 export function VisibilityBanner({ mode, variant = 'banner' }: { mode: Mode; variant?: 'banner' | 'footer' }) {

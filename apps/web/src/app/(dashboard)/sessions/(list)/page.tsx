@@ -57,7 +57,7 @@ export default async function SessionsPage({ searchParams }: { searchParams: Sea
         title="Sessions"
         description="Harness sessions (what claude --resume lists), newest first: their turns, sub-agents, workflows and flows together. A session is listed when it was active in the range and has a turn matching the filters; its figures cover the whole session. Costs are ≈ at API list prices."
       />
-      <ActiveNow initial={active} companyId={user.companyId} showUser={showUser} />
+      <ActiveNow initial={active} showUser={showUser} />
       <FilterBar filters={filters} options={options} />
       {list.ownOnly && (
         <p role="note" className="mb-3 text-xs text-amber-700 dark:text-amber-400">

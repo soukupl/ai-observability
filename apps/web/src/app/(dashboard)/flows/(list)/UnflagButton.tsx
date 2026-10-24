@@ -5,11 +5,10 @@ import { unflagFlowAction } from '@/lib/flows/actions';
 import { IDLE } from '@/lib/admin/types';
 
 /** Removes one flag from the "Flagged for later" list (ADR-0024); the list re-renders after revalidation. */
-export function UnflagButton({ companyId, id }: { companyId: string; id: string }) {
+export function UnflagButton({ id }: { id: string }) {
   const [state, action, pending] = useActionState(unflagFlowAction, IDLE);
   return (
     <form action={action} className="ml-auto flex items-center gap-2">
-      <input type="hidden" name="_companyId" value={companyId} />
       <input type="hidden" name="id" value={id} />
       {state.status === 'error' && (
         <span role="alert" className="text-xs text-red-700 dark:text-red-400">

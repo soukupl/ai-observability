@@ -2,9 +2,9 @@ import { sql } from 'drizzle-orm';
 import { rollupFacts, turnsByModel, type Dims } from './providers';
 import { addDays, dayString } from './range';
 import { canSeeUsers, type QueryCtx } from './scope';
-import { rows } from './sqlutil';
+import { rows, userLabel } from './sqlutil';
 
-/** Teams, projects and users are readable by the whole company (RLS); only telemetry is restricted. */
+/** Teams, projects and users are readable by every member of the deployment (RLS); only telemetry is restricted. */
 export interface TeamRef {
   id: string;
   name: string;
@@ -27,14 +27,14 @@ export function projectLabel(key: string, displayName: string | null): string {
 }
 
 export async function listTeams(ctx: QueryCtx): Promise<TeamRef[]> {
-  const out = await rows<{ id: string; name: string }>(ctx.tx, sql`select id, name from teams where company_id = ${ctx.viewer.companyId}::uuid order by name`);
+  const out = await rows<{ id: string; name: string }>(ctx.tx, sql`select id, name from teams order by name`);
   return out.map((t) => ({ id: t.id, name: t.name }));
 }
 
 export async function listProjects(ctx: QueryCtx): Promise<ProjectRef[]> {
   const out = await rows<{ id: string; key: string; display_name: string | null; team_id: string | null }>(
     ctx.tx,
-    sql`select id, key, display_name, team_id from projects where company_id = ${ctx.viewer.companyId}::uuid`,
+    sql`select id, key, display_name, team_id from projects`,
   );
   return out
     .map((p) => ({ id: p.id, key: p.key, name: projectLabel(p.key, p.display_name), teamId: p.team_id }))
@@ -48,16 +48,15 @@ export async function listProjects(ctx: QueryCtx): Promise<ProjectRef[]> {
  */
 export async function listUsers(ctx: QueryCtx): Promise<UserRef[] | null> {
   if (!canSeeUsers(ctx.viewer)) return null;
-  const company = sql`cm.company_id = ${ctx.viewer.companyId}::uuid`;
   let scope = sql``;
-  if (ctx.viewer.companyRole !== 'admin') {
+  if (ctx.viewer.role !== 'admin') {
     const led = ctx.viewer.teams.filter((t) => t.role === 'lead').map((t) => sql`${t.id}::uuid`);
     const ledList = sql.join(led, sql`, `);
-    scope = sql` and (u.id = ${ctx.viewer.id}::uuid or cm.primary_team_id in (${ledList})
-      or u.id in (select m.user_id from team_memberships m where m.company_id = cm.company_id and m.team_id in (${ledList})))`;
+    scope = sql` where (u.id = ${ctx.viewer.id}::uuid or m.primary_team_id in (${ledList})
+      or u.id in (select tm.user_id from team_memberships tm where tm.team_id in (${ledList})))`;
   }
-  const out = await rows<{ id: string; name: string | null; email: string }>(ctx.tx, sql`select u.id, u.name, u.email from company_memberships cm join users u on u.id = cm.user_id where ${company}${scope}`);
-  return out.map((u) => ({ id: u.id, name: u.name || u.email })).sort((a, b) => a.name.localeCompare(b.name));
+  const out = await rows<{ id: string; label: string | null }>(ctx.tx, sql`select u.id, ${userLabel('u')} as label from memberships m join users u on u.id = m.user_id${scope}`);
+  return out.map((u) => ({ id: u.id, name: u.label || u.id })).sort((a, b) => a.name.localeCompare(b.name));
 }
 
 export interface FilterOptions {
@@ -101,11 +100,11 @@ async function discover(ctx: QueryCtx): Promise<{ harnesses: Set<string>; models
   } else {
     const out = await rows<{ harness: string; model: string | null; effort: string | null }>(
       ctx.tx,
-      sql`select harness, model, effort from daily_rollups where company_id = ${ctx.viewer.companyId}::uuid and day >= ${wide.fromDay}::date
+      sql`select harness, model, effort from daily_rollups where day >= ${wide.fromDay}::date
             group by 1, 2, 3
           union
-          select harness, model, effort from turns where company_id = ${ctx.viewer.companyId}::uuid
-            and started_at >= ${wide.fromIso}::timestamptz group by 1, 2, 3`,
+          select harness, model, effort from turns
+            where started_at >= ${wide.fromIso}::timestamptz group by 1, 2, 3`,
     );
     for (const x of out) seen(x.harness, x.model, x.effort);
   }
@@ -116,7 +115,7 @@ async function discover(ctx: QueryCtx): Promise<{ harnesses: Set<string>; models
 export async function loadFilterOptions(ctx: QueryCtx): Promise<FilterOptions> {
   const [allTeams, projects, users, seen] = await Promise.all([listTeams(ctx), listProjects(ctx), listUsers(ctx), discover(ctx)]);
   const mine = new Set(ctx.viewer.teams.map((t) => t.id));
-  const teams = ctx.viewer.companyRole === 'admin' ? allTeams : allTeams.filter((t) => mine.has(t.id));
+  const teams = ctx.viewer.role === 'admin' ? allTeams : allTeams.filter((t) => mine.has(t.id));
   const sorted = (s: Set<string>) => [...s].sort((a, b) => a.localeCompare(b));
   return { teams, projects, users, harnesses: sorted(seen.harnesses), models: sorted(seen.models), efforts: sorted(seen.efforts) };
 }

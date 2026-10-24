@@ -89,7 +89,7 @@ async function rawFacts(ctx: QueryCtx, d: Dims): Promise<Fact[]> {
       sql`select (u.started_at at time zone 'UTC')::date::text as day, t.project_id, u.model, u.effort,
             case when t.outcome in ('failed', 'abandoned') then 'wasted' when t.outcome = 'unknown' then 'unknown' else 'ok' end as class,
             ${TOKEN_SUMS}
-          from usage u join turns t on t.id = u.turn_id and t.company_id = u.company_id
+          from usage u join turns t on t.id = u.turn_id
           ${where(conds)} group by 1, 2, 3, 4, 5
           having sum(u.input_tokens + u.output_tokens + u.cache_read_tokens + u.cache_write_tokens) > 0`,
     );
@@ -119,7 +119,7 @@ async function rollupFacts(ctx: QueryCtx, d: Dims): Promise<Fact[]> {
     out = await rows(ctx.tx, sql`select day::text as day, project_id, model, effort, split, ${cols} from agg_wasted_rollups(${aggArgs(d, 'date')})`);
     if (d.effort) out = out.filter((r) => r.effort === d.effort);
   } else {
-    const c: SQL[] = [sql`d.company_id = ${ctx.viewer.companyId}::uuid`, sql`d.day >= ${d.fromDay}::date`, sql`d.day < ${d.toDay}::date`];
+    const c: SQL[] = [sql`d.day >= ${d.fromDay}::date`, sql`d.day < ${d.toDay}::date`];
     if (d.teamId) c.push(sql`d.team_id = ${d.teamId}::uuid`);
     if (d.projectId) c.push(sql`d.project_id = ${d.projectId}::uuid`);
     if (d.userId) c.push(sql`d.user_id = ${d.userId}::uuid`);

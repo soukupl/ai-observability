@@ -1,13 +1,26 @@
-import { inputCls, labelCls } from './ui';
+import { DEFAULT_TOKEN_LIFETIME, TOKEN_LIFETIMES, type TokenLifetime } from '@/lib/admin/tokens';
+import { inputCls, labelCls, selectCls } from './ui';
 
-/** Name field of the token form; `kind` is fixed per form (user token = own, company token = CI / bots / MDM). */
-export function TokenFields({ kind }: { kind: 'user' | 'company' }) {
+const LIFETIME_LABEL: Record<TokenLifetime, string> = { '30': '30 days', '90': '90 days', '365': '365 days', none: 'No expiry' };
+
+/** Name + lifetime of a manual token (Q6: 30 / 90 / 365 days or none, default 90). `userId` = a service user's token. */
+export function TokenFields({ userId, placeholder = 'e.g. Work laptop' }: { userId?: string; placeholder?: string }) {
   return (
     <>
-      <input type="hidden" name="kind" value={kind} />
+      {userId && <input type="hidden" name="userId" value={userId} />}
       <label className={`${labelCls} grow sm:max-w-xs`}>
         Name
-        <input name="name" required maxLength={60} placeholder={kind === 'company' ? 'e.g. CI runners or Laptop fleet 2026' : 'e.g. Work laptop'} className={inputCls} />
+        <input name="name" required maxLength={60} placeholder={placeholder} className={inputCls} />
+      </label>
+      <label className={labelCls}>
+        Lifetime
+        <select name="lifetime" defaultValue={DEFAULT_TOKEN_LIFETIME} className={selectCls}>
+          {TOKEN_LIFETIMES.map((l) => (
+            <option key={l} value={l}>
+              {LIFETIME_LABEL[l]}
+            </option>
+          ))}
+        </select>
       </label>
     </>
   );

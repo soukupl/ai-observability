@@ -9,7 +9,7 @@ import { tryLock } from '../src/lock.js';
 import { nullLogger } from '../src/log.js';
 import { type AiObsPaths } from '../src/paths.js';
 import { cleanupHomes, fakeAdapter, okResponder, startServer, tmpHome, writeTestConfig } from './helpers.js';
-import { bound, enqueueFor, queueStore } from './queue-helpers.js';
+import { enqueueFor, queueStore } from './queue-helpers.js';
 
 const closers: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -134,7 +134,7 @@ describe('flush: sweep and pending summaries', () => {
     const paths = tmpHome();
     writeTestConfig(paths, srv.url);
     mkdirSync(dirname(pendingSummariesPath(paths.state, 'codex')), { recursive: true });
-    const key = { kind: 'project', pk: 'github.com/acme/billing', bind: bound('acme', srv.url, 'acme', 'aiobs_u_testtoken') };
+    const key = { kind: 'project' as const, pk: 'github.com/acme/billing', endpoint: srv.url, team: '' };
     const digest = { turnId: 'tp', sessionId: 's', prompt: 'p', toolNames: [], lastAssistantMessage: 'm', attempts: 1, firstFailedAt: Date.now(), key };
     writeFileSync(pendingSummariesPath(paths.state, 'codex'), JSON.stringify([digest]));
     const swept: string[] = [];
@@ -173,7 +173,7 @@ describe('flush: sweep and pending summaries', () => {
     const srv = await server();
     const paths = tmpHome();
     writeTestConfig(paths, srv.url);
-    const key = { kind: 'project' as const, pk: 'github.com/acme/billing', bind: bound('acme', srv.url, 'acme', 'aiobs_u_testtoken') };
+    const key = { kind: 'project' as const, pk: 'github.com/acme/billing', endpoint: srv.url, team: '' };
     stageDigests(paths.state, 'codex', [{ turnId: 'ts', sessionId: 's', prompt: 'p', tools: [], lastAssistantMessage: 'm' }], key, Date.now(), nullLogger);
     const codex = fakeAdapter({ name: 'codex', displayName: 'Codex', summarize: async () => new Map([['ts', 'Did a thing']]) });
     const c = capture();
@@ -188,7 +188,7 @@ describe('flush: sweep and pending summaries', () => {
     const srv = await server();
     const paths = tmpHome();
     writeTestConfig(paths, srv.url);
-    const key = { kind: 'project' as const, pk: 'github.com/acme/billing', bind: bound('acme', srv.url, 'acme', 'aiobs_u_testtoken') };
+    const key = { kind: 'project' as const, pk: 'github.com/acme/billing', endpoint: srv.url, team: '' };
     stageDigests(paths.state, 'codex', [{ turnId: 'ts', sessionId: 's', prompt: 'p', tools: [], lastAssistantMessage: 'm' }], key, Date.now(), nullLogger);
     let calls = 0;
     const codex = fakeAdapter({
@@ -216,7 +216,7 @@ describe('flush: sweep and pending summaries', () => {
     const srv = await server();
     const paths = tmpHome();
     writeTestConfig(paths, srv.url);
-    const key = { kind: 'project' as const, pk: 'github.com/acme/billing', bind: bound('acme', srv.url, 'acme', 'aiobs_u_testtoken') };
+    const key = { kind: 'project' as const, pk: 'github.com/acme/billing', endpoint: srv.url, team: '' };
     const d = { turnId: 'ts', sessionId: 's', prompt: 'p', tools: [], lastAssistantMessage: 'm' };
     stageDigests(paths.state, 'codex', [d, { ...d, turnId: 'tt' }], key, Date.now(), nullLogger);
     stageDigests(paths.state, 'claude-code', [d], key, Date.now(), nullLogger);
@@ -231,7 +231,7 @@ describe('flush: sweep and pending summaries', () => {
     const srv = await server();
     const paths = tmpHome();
     writeTestConfig(paths, srv.url);
-    enqueueFor(queueStore(paths), 'github.com/acme/billing', bound('acme', srv.url, 'acme', 'aiobs_u_testtoken'), [
+    enqueueFor(queueStore(paths), 'github.com/acme/billing', srv.url, [
       sessionEndEvent({ harness: 'codex', sessionId: 's', reason: 'exit', at: 0 }),
     ]);
     const broken = fakeAdapter({

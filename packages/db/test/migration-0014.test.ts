@@ -3,26 +3,21 @@ import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDb, type Database } from '../src/client.js';
 import { DB_ROLES } from '../src/connections.js';
-import { runMigrations } from '../src/migrate.js';
-import { withIngestContext, withRlsContext } from '../src/rls.js';
 import { pgErrorCode } from './db-harness.js';
+import { legacyIngestContext, legacyRlsContext } from './legacy-context.js';
 import { migrateTo } from './migrate-to.js';
+import { adminDbUrl, testDbName, testDbUrl } from './test-db.js';
 
 /**
  * Migration 0014 (ADR-0022): the users columns company_id / company_role / primary_team_id move into
  * company_memberships, the session gets an active company, tokens of the old kind 'team' become (revoked) company
  * tokens and every token is revoked (clean break). Each case migrates its own database to 0013, writes old-shape
- * rows, then applies 0014 (runMigrations).
+ * rows, then applies 0014 only (migrateTo the 0014 tag: migration 0018 later removes the company, and refuses the
+ * two-company fixture below by design, ADR-0028).
  */
-const base = new URL(process.env.TEST_DATABASE_URL || 'postgres://ai_obs:ai_obs@localhost:5432/ai_obs_test');
-const urlOf = (name: string) => {
-  const u = new URL(base);
-  u.pathname = `/${name}`;
-  return u.toString();
-};
-const adminUrl = new URL(base);
-adminUrl.pathname = '/postgres';
-const DBS = ['ai_obs_m0014_test', 'ai_obs_m0014b_test'] as const;
+const urlOf = (suffix: string) => testDbUrl(suffix);
+const adminUrl = new URL(adminDbUrl());
+const DBS = [testDbName('m0014'), testDbName('m0014b')] as const;
 
 async function prepare(): Promise<string | null> {
   const admin = postgres(adminUrl.toString(), { max: 1, connect_timeout: 3, onnotice: () => {} });
@@ -67,7 +62,7 @@ describe.skipIf(skip !== null)(skip ? `migration 0014 - SKIPPED: ${skip}` : 'mig
     });
 
   beforeAll(async () => {
-    const url = urlOf('ai_obs_m0014_test');
+    const url = urlOf('m0014');
     await migrateTo(url, '0013_agent_flows');
     let c;
     ({ db: owner, close: c } = createDb({ url, max: 1 }));
@@ -101,7 +96,7 @@ describe.skipIf(skip !== null)(skip ? `migration 0014 - SKIPPED: ${skip}` : 'mig
         values (${ids.co}, ${ids.teamB}, ${ids.member}, 'verified', 'cc:t1', 'claude-code', now(), now()) returning id`);
     });
 
-    await quietly(() => runMigrations(url));
+    await quietly(() => migrateTo(url, '0014_company_memberships_tokens'));
     ({ db: web, close: c } = createDb({ url, role: DB_ROLES.web, max: 1 }));
     closers.push(c);
     ({ db: ingest, close: c } = createDb({ url, role: DB_ROLES.ingest, max: 1 }));
@@ -141,7 +136,7 @@ describe.skipIf(skip !== null)(skip ? `migration 0014 - SKIPPED: ${skip}` : 'mig
       { hash: 'h-user', kind: 'user', user_id: ids.member, revoked: true },
     ]);
     for (const h of ['h-team', 'h-user']) {
-      const found = await withIngestContext(ingest, ids.co, async (tx) => [...(await tx.execute(sql`select * from lookup_ingest_token(${h})`))]);
+      const found = await legacyIngestContext(ingest, ids.co, async (tx) => [...(await tx.execute(sql`select * from lookup_ingest_token(${h})`))]);
       expect(found, h).toHaveLength(0);
     }
     const kinds = await definer(sql`select unnest(enum_range(null::token_kind))::text as k`);
@@ -172,19 +167,19 @@ describe.skipIf(skip !== null)(skip ? `migration 0014 - SKIPPED: ${skip}` : 'mig
 
   it('the RLS context works after the upgrade (helpers read memberships, not the dropped column)', async () => {
     const ctx = { companyId: ids.co, userId: ids.member, role: 'member' as const };
-    const seen = await withRlsContext(web, ctx, async (tx) => ({
+    const seen = await legacyRlsContext(web, ctx, async (tx) => ({
       turns: [...(await tx.execute(sql`select id from turns`))].map((r) => r.id),
       users: [...(await tx.execute(sql`select email from users order by email`))].map((r) => r.email),
       company: [...(await tx.execute(sql`select app_company() as c`))][0]!.c,
     }));
     expect(seen).toEqual({ turns: [ids.turn], users: ['admin@old.test', 'member@old.test', 'stray@old.test'], company: ids.co });
-    const outside = await withRlsContext(web, { ...ctx, companyId: ids.other }, async (tx) =>
+    const outside = await legacyRlsContext(web, { ...ctx, companyId: ids.other }, async (tx) =>
       [...(await tx.execute(sql`select app_company() as c`))][0]!.c);
     expect(outside).toBeNull();
   });
 
   it('refuses to migrate a super admin who is also a company user (ADR-0022 message)', async () => {
-    const url = urlOf('ai_obs_m0014b_test');
+    const url = urlOf('m0014b');
     await migrateTo(url, '0013_agent_flows');
     const { db, close } = createDb({ url, max: 1 });
     closers.push(close);
@@ -193,7 +188,7 @@ describe.skipIf(skip !== null)(skip ? `migration 0014 - SKIPPED: ${skip}` : 'mig
       const [co] = [...(await tx.execute(sql`insert into companies (name, slug) values ('Both', 'both') returning id`))] as { id: string }[];
       await tx.execute(sql`insert into users (company_id, email, is_super_admin) values (${co!.id}, 'both@old.test', true)`);
     });
-    const err = await quietly(() => runMigrations(url)).then(() => null, (e: unknown) => e as Error & { cause?: Error });
+    const err = await quietly(() => migrateTo(url, '0014_company_memberships_tokens')).then(() => null, (e: unknown) => e as Error & { cause?: Error });
     expect(err).not.toBeNull();
     expect(`${err!.message} ${err!.cause?.message ?? ''}`).toMatch(/ADR-0022: super admins cannot be company members.*both@old\.test/);
     // Nothing of 0014 was applied (one transaction).

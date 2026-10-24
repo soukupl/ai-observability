@@ -21,7 +21,8 @@
     "typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx --env-file-if-exists=../../.env src/migrate.ts",
-    "db:seed": "tsx --env-file-if-exists=../../.env src/seed.ts"
+    "db:seed": "tsx --env-file-if-exists=../../.env src/seed.ts",
+    "db:merge-companies": "tsx --env-file-if-exists=../../.env src/merge-companies.ts"
   },
   "dependencies": {
     "drizzle-orm": "0.45.3",

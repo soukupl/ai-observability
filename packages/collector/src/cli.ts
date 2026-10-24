@@ -8,7 +8,7 @@ import type { CliDeps, Io } from './commands/common.js';
 
 export type { CliDeps, Io } from './commands/common.js';
 
-export const COMMANDS = ['init', 'token', 'use', 'doctor', 'status', 'flush', 'uninstall', 'live', 'hook'] as const;
+export const COMMANDS = ['init', 'login', 'link', 'token', 'doctor', 'status', 'flush', 'uninstall', 'live', 'hook'] as const;
 export type Command = (typeof COMMANDS)[number];
 
 const defaultIo: Io = {
@@ -19,36 +19,31 @@ const defaultIo: Io = {
 export const USAGE = `Usage: ai-obs <command> [options]
 
 Commands:
-  init [--token <token>] [--endpoint <url>] [--name <name>] [--project] [--project-dir <dir>] [--harness claude-code,codex] [--git-email <email>]
-                                     register a token and configure every detected harness (user-level hooks; --project: repo-level)
-  token add --token <token> [--endpoint <url>] [--name <name>]
-                                     register another company's token (no hook changes)
-  token list                         registered tokens and their projects
-  token confirm <name>               check an unconfirmed token's company and start sending with it
-  token remove <name>                forget a token (events queued for it stay on this machine)
-  token remove --invalid             delete malformed token entries from config.json
-  use <name> [--project-dir <dir>]   send this repository's data with token <name>
-  use <name> --move-queued [--project-dir <dir>]
-                                     also send events queued for this repository's previous token with <name>
-  use <name> --all-held              assign every repository that is waiting for a token
-  use --none [--project-dir <dir>]   stop reporting this repository; its queued events are kept, not sent
-  use --none --discard-queued [--project-dir <dir>]
-                                     also delete its queued events
-  use --clear [--project-dir <dir>]  remove this repository's choice
-  use --reset-projects               set an unreadable projects.json aside and start an empty one
-  doctor                             check config, tokens, server, project, harnesses, hooks and queue
-  status                             show tokens, this project's token, queue and last delivery
+  login [--server <url>] [--token <token>|-] [--no-browser] [--label <name>] [--keep-queue]
+                                     log this machine in to an ai-obs server: approve a code in the browser,
+                                     or paste a token (- reads it from stdin). One token per server; queued
+                                     events of another account are set aside (--keep-queue: sent as you)
+  init [--project] [--project-dir <dir>] [--harness claude-code,codex] [--token <token> --endpoint <url> [--label <name>]]
+                                     install the harness hooks (user level; --project: this repository);
+                                     with --token: log in without a browser first
+  link --team <slug> [--server <url>] [--local] [--project-dir <dir>]
+                                     write .ai-obs.json at the repository root (--local: .ai-obs.local.json,
+                                     git-ignored): the server and team this repository reports to
+  token list                         servers, accounts, token expiry and state
+  token remove <server>              forget a server's token (its queued events stay on this machine)
+  doctor                             check servers, tokens, this repository, harnesses, hooks and queue
+  status                             show servers, this repository's server and team, queue and last send
   live [--cwd] [--once]              watch this machine's running sessions: status, elapsed, tokens, ≈ cost (local only; q quits)
-  flush [--wait <seconds>]           send queued events now (also retries a rejected token)
+  flush [--wait <seconds>]           send queued events now (also retries a refused token)
   uninstall [--purge [--yes]] [--project-dir <dir>]
-                                     remove hooks (--purge: also delete ~/.ai-obs: tokens, assignments, queue)
+                                     remove hooks (--purge: also delete ~/.ai-obs: tokens and queue)
   hook <harness> <hook>              (internal) called by harness hooks; always exits 0
 
 Global options:
   --home <dir>                       collector home (default ~/.ai-obs, or $AI_OBS_HOME)
 
 Environment:
-  AI_OBS_HOME, AI_OBS_ENDPOINT (default --endpoint for init / token add), AI_OBS_SUMMARIZING (internal guard)`;
+  AI_OBS_HOME, AI_OBS_ENDPOINT (default --server for login / init --token), AI_OBS_SUMMARIZING (internal guard)`;
 
 const isCommand = (s: string | undefined): s is Command => COMMANDS.includes(s as Command);
 
@@ -92,10 +87,13 @@ export async function main(argv: string[], io: Io = defaultIo, deps: Partial<Cli
     return 2;
   }
   const full: CliDeps = { ...deps, paths };
-  const { UsageError, upgradeBanner } = await import('./commands/common.js');
+  const { UsageError, upgradeBanner, migrateNow } = await import('./commands/common.js');
   try {
-    // C6: while nothing can be recorded, say so first (init / token add say it only when they register nothing).
-    if (command !== 'init' && !(command === 'token' && args[0] === 'add')) {
+    // A 0.2 – 0.4 home is migrated by the first command that finds the worker lock free (else by the worker),
+    // together with the copied hook runtime (an older one would drop every hook job on the new config).
+    if (command !== 'live' && command !== 'uninstall') migrateNow(full, io);
+    // C6: while nothing can be recorded, say so first (init and login say it themselves).
+    if (command !== 'init' && command !== 'login' && command !== 'live') {
       const { loadConfig } = await import('./config.js');
       const banner = upgradeBanner(loadConfig(paths));
       if (banner) io.err(banner);
@@ -103,10 +101,12 @@ export async function main(argv: string[], io: Io = defaultIo, deps: Partial<Cli
     switch (command) {
       case 'init':
         return await (await import('./commands/init.js')).initCommand(args, io, full);
+      case 'login':
+        return await (await import('./commands/login.js')).loginCommand(args, io, full);
+      case 'link':
+        return await (await import('./commands/link.js')).linkCommand(args, io, full);
       case 'token':
         return await (await import('./commands/token.js')).tokenCommand(args, io, full);
-      case 'use':
-        return await (await import('./commands/use.js')).useCommand(args, io, full);
       case 'doctor':
         return await (await import('./commands/doctor.js')).doctorCommand(args, io, full);
       case 'status':

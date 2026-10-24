@@ -7,9 +7,8 @@ import { COMMANDS, extractHome, main } from '../src/cli.js';
 import { loadConfig } from '../src/config.js';
 import { sessionEndEvent } from '../src/events.js';
 import { aiObsPaths, type AiObsPaths } from '../src/paths.js';
-import { LEGACY_TEAM_TOKEN_PREFIX } from '../src/protocol-types.js';
 import { cleanupHomes, fakeAdapter, okResponder, startServer, tmpHome, writeTestConfig } from './helpers.js';
-import { bound, enqueueFor, queueStore } from './queue-helpers.js';
+import { enqueueFor, queueStore } from './queue-helpers.js';
 
 const bin = fileURLToPath(new URL('../bin/ai-obs.js', import.meta.url));
 const closers: Array<() => Promise<void>> = [];
@@ -26,9 +25,9 @@ function capture() {
 const fakeRuntime = (paths: AiObsPaths) => ({ entry: `${paths.app}/bin/ai-obs.js`, node: '/usr/bin/node', copied: false });
 const resolveProjectKey = async () => 'github.com/acme/billing';
 
-/** One event in the stream of github.com/acme/billing bound to the test token `acme` (writeTestConfig). */
+/** One event in the stream of github.com/acme/billing for the test server (writeTestConfig). */
 function enqueueOne(paths: AiObsPaths, endpoint = 'http://127.0.0.1:9') {
-  enqueueFor(queueStore(paths), 'github.com/acme/billing', bound('acme', endpoint, 'acme', 'aiobs_u_testtoken'), [
+  enqueueFor(queueStore(paths), 'github.com/acme/billing', endpoint, [
     sessionEndEvent({ harness: 'codex', sessionId: 's', reason: 'exit', at: 0 }),
   ]);
 }
@@ -61,8 +60,9 @@ describe('ai-obs cli', () => {
     expect(await main(['status', '--nope'], capture().io, { paths })).toBe(2);
     expect(COMMANDS).toContain('hook');
     expect(COMMANDS).toContain('token');
-    expect(COMMANDS).toContain('use');
-    expect(COMMANDS).toContain('live');
+    expect(COMMANDS).toEqual(expect.arrayContaining(['login', 'link', 'live']));
+    expect(COMMANDS).not.toContain('use');
+    expect(help.text()).not.toMatch(/\buse <name>|token confirm|token add/);
   });
 
   it('extracts --home from anywhere in argv', () => {
@@ -72,25 +72,39 @@ describe('ai-obs cli', () => {
   });
 
   describe('init', () => {
-    it('requires a valid token and an endpoint', async () => {
+    it('validates the token and the flags; nothing is written for a bad token', async () => {
       const paths = tmpHome();
       const env = {};
       const c = capture();
       expect(await main(['init', '--endpoint', 'https://x.io'], c.io, { paths, env })).toBe(2);
-      expect(c.text()).toContain('--token is required');
-      expect(await main(['init', '--token', 'aiobs_u_x'], capture().io, { paths, env })).toBe(2);
+      expect(c.text()).toContain('--endpoint and --label need --token');
+      expect(await main(['init', '--token', 'aiobs_u_x'], capture().io, { paths, env })).toBe(2); // no server known
       const bad = capture();
       expect(await main(['init', '--token', 'sk-123', '--endpoint', 'https://x.io'], bad.io, { paths, env })).toBe(2);
       expect(bad.text()).toContain('aiobs_u_');
-      const legacy = capture();
-      expect(await main(['init', '--token', `${LEGACY_TEAM_TOKEN_PREFIX}old`, '--endpoint', 'https://x.io'], legacy.io, { paths, env })).toBe(2);
-      expect(legacy.text()).toContain('no longer exist');
+      for (const old of ['aiobs_t_old', 'aiobs_c_old']) {
+        const legacy = capture();
+        expect(await main(['init', '--token', old, '--endpoint', 'https://x.io'], legacy.io, { paths, env })).toBe(2);
+        expect(legacy.text()).toContain('no longer exist');
+      }
       expect(existsSync(paths.config)).toBe(false);
       expect(await main(['init', '--token', 'aiobs_u_x', '--endpoint', 'ftp://x'], capture().io, { paths, env })).toBe(2);
     });
 
-    it('writes a 0600 config, installs hooks for detected harnesses and fetches collector-config', async () => {
-      const srv = await server('hashed');
+    it('without a server it installs the hooks and says to log in', async () => {
+      const paths = tmpHome();
+      const cc = fakeAdapter();
+      const c = capture();
+      expect(await main(['init'], c.io, { paths, adapters: [cc], installRuntime: fakeRuntime, env: {} })).toBe(0);
+      expect(cc.installs).toHaveLength(1);
+      expect(c.text()).toContain('not logged in to any ai-obs server yet');
+      expect(c.text()).toContain('ai-obs login --server <url>');
+    });
+
+    it('--token --endpoint logs in (config v3, 0600), installs hooks for detected harnesses and fetches collector-config', async () => {
+      const exp = '2027-01-22T10:00:00.000Z';
+      const srv = await startServer(okResponder('hashed', { expiresAt: exp }));
+      closers.push(srv.close);
       const paths = tmpHome();
       const cc = fakeAdapter();
       const codex = fakeAdapter({
@@ -101,17 +115,12 @@ describe('ai-obs cli', () => {
         },
       });
       const c = capture();
-      const code = await main(['init', '--token', 'aiobs_u_abc', '--endpoint', `${srv.url}/`, '--git-email', 'dev@acme.com'], c.io, {
-        paths,
-        adapters: [cc, codex],
-        installRuntime: fakeRuntime,
-        env: {},
-      });
+      const code = await main(['init', '--token', 'aiobs_u_abc', '--endpoint', `${srv.url}/`], c.io, { paths, adapters: [cc, codex], installRuntime: fakeRuntime, env: {} });
       expect(code).toBe(0);
       const config = loadConfig(paths)!;
-      expect(config).toMatchObject({ endpoint: srv.url, git_email: 'dev@acme.com' });
-      expect(config.tokens).toHaveLength(1);
-      expect(config.tokens[0]).toMatchObject({ name: 'acme', endpoint: srv.url, token: 'aiobs_u_abc', company: { name: 'Acme', slug: 'acme' } });
+      expect(config.servers).toEqual([
+        { endpoint: srv.url, token: 'aiobs_u_abc', email: 'dev@acme.com', deployment: { name: 'SPECTADO', slug: 'spectado' }, label: 'test-mac', expires_at: exp, source: 'device', added_at: expect.any(String) },
+      ]);
       expect(statSync(paths.config).mode & 0o777).toBe(0o600);
       expect(cc.installs).toHaveLength(1);
       expect(codex.installs).toHaveLength(0);
@@ -120,24 +129,20 @@ describe('ai-obs cli', () => {
       expect(opts.hookCommand('Stop').argv).toEqual(['/usr/bin/node', `${paths.app}/bin/ai-obs.js`, 'hook', 'claude-code', 'Stop', '--home', paths.root]);
       expect(c.text()).toContain('project naming: hashed');
       expect(c.text()).toContain('Fake Codex: not found');
+      expect(c.text()).not.toContain('→ run `ai-obs init`');
 
-      // re-running init keeps the machine id
+      // re-running init with another token keeps the machine id and replaces the token of that server
       await main(['init', '--token', 'aiobs_u_new', '--endpoint', srv.url], capture().io, { paths, adapters: [cc], installRuntime: fakeRuntime, env: {} });
       const again = loadConfig(paths)!;
       expect(again.machine_id).toBe(config.machine_id);
-      expect(again.tokens.map((t) => [t.name, t.token])).toEqual([['acme', 'aiobs_u_new']]); // same company: rotated
+      expect(again.servers.map((s) => s.token)).toEqual(['aiobs_u_new']);
     });
 
     it('--project installs project-scope hooks', async () => {
       const srv = await server();
       const paths = tmpHome();
       const cc = fakeAdapter();
-      await main(['init', '--token', 'aiobs_u_abc', '--endpoint', srv.url, '--project', '--project-dir', '/work/repo'], capture().io, {
-        paths,
-        adapters: [cc],
-        installRuntime: fakeRuntime,
-        env: {},
-      });
+      await main(['init', '--token', 'aiobs_u_abc', '--endpoint', srv.url, '--project', '--project-dir', '/work/repo'], capture().io, { paths, adapters: [cc], installRuntime: fakeRuntime, env: {} });
       expect(cc.installs[0]).toMatchObject({ scope: 'project', projectDir: '/work/repo' });
     });
 
@@ -147,17 +152,20 @@ describe('ai-obs cli', () => {
       const cc = fakeAdapter();
       const c = capture();
       expect(await main(['init', '--token', 'aiobs_u_bad', '--endpoint', srv.url], c.io, { paths, adapters: [cc], installRuntime: fakeRuntime, env: {} })).toBe(1);
+      expect(c.text()).toContain('rejected token');
       expect(existsSync(paths.config)).toBe(false);
       expect(cc.installs).toHaveLength(0);
     });
 
-    it('works offline (events queue until the server is reachable)', async () => {
+    it('works offline: the token is stored unchecked and nothing is sent until the server answers', async () => {
       const paths = tmpHome();
       const c = capture();
       expect(await main(['init', '--token', 'aiobs_u_abc', '--endpoint', 'http://127.0.0.1:9'], c.io, { paths, adapters: [fakeAdapter()], installRuntime: fakeRuntime, env: {} })).toBe(0);
-      expect(c.text()).toContain('not reachable');
-      expect(c.text()).toContain('hashed project keys');
-      expect(loadConfig(paths)!.tokens[0]).toMatchObject({ name: 'default', provisional_name: true, token: 'aiobs_u_abc' });
+      expect(c.text()).toContain('could not check the token now');
+      // unchecked: no source yet, so it reads "not checked yet", never "service user" (source comes with collector-config)
+      expect(loadConfig(paths)!.servers[0]).toMatchObject({ endpoint: 'http://127.0.0.1:9', token: 'aiobs_u_abc', deployment: null, email: null, source: null });
+      expect(c.text()).toContain('✓ logged in to http://127.0.0.1:9: (not checked yet)');
+      expect(c.text()).not.toContain('service user');
     });
   });
 
@@ -169,14 +177,14 @@ describe('ai-obs cli', () => {
     cc.installs.push({});
     const c = capture();
     expect(await main(['doctor'], c.io, { paths, adapters: [cc], env: {}, resolveProjectKey })).toBe(0);
-    expect(c.text()).toContain('✓ token valid');
+    expect(c.text()).toContain('reachable, token valid (SPECTADO, dev@acme.com)');
     expect(c.text()).toContain('hooks installed (user)');
 
     const offline = tmpHome();
     writeTestConfig(offline);
     const d = capture();
     expect(await main(['doctor'], d.io, { paths: offline, adapters: [fakeAdapter()], env: {}, resolveProjectKey })).toBe(1);
-    expect(d.text()).toContain('✗ endpoint unreachable');
+    expect(d.text()).toContain('✗ 127.0.0.1:9: unreachable');
     expect(d.text()).toContain('hooks NOT installed');
     expect(await main(['doctor'], capture().io, { paths: tmpHome(), env: {} })).toBe(1);
   });
@@ -229,6 +237,11 @@ describe('ai-obs cli', () => {
   it('keeps local files under ~/.ai-obs', () => {
     const p = aiObsPaths('/h/.ai-obs');
     expect([p.config, p.state, p.queue]).toEqual(['/h/.ai-obs/config.json', '/h/.ai-obs/state', '/h/.ai-obs/queue']);
-    expect([p.projects, p.collectorConfigDir, p.queueProjects]).toEqual(['/h/.ai-obs/projects.json', '/h/.ai-obs/state/collector-config', '/h/.ai-obs/queue/p']);
+    expect([p.collectorConfigDir, p.dotFileCache, p.warnings, p.queueProjects]).toEqual([
+      '/h/.ai-obs/state/collector-config',
+      '/h/.ai-obs/state/dot-files.json',
+      '/h/.ai-obs/state/warnings.json',
+      '/h/.ai-obs/queue/p',
+    ]);
   });
 });

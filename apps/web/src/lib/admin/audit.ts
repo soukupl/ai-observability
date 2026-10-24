@@ -3,8 +3,8 @@ import { auditLog, type Tx } from '@ai-obs/db';
 import type { Actor } from './types';
 
 /** Appends one audit_log row in the actor's name (RLS: anyone may append their own entries). */
-export async function audit(tx: Tx, actor: Actor, action: string, target: string | null, meta: Record<string, unknown> = {}): Promise<void> {
-  await tx.insert(auditLog).values({ companyId: actor.companyId, actorUserId: actor.id, action, target, meta });
+export async function audit(tx: Tx, actor: Pick<Actor, 'id'>, action: string, target: string | null, meta: Record<string, unknown> = {}): Promise<void> {
+  await tx.insert(auditLog).values({ actorUserId: actor.id, action, target, meta });
 }
 
 export interface AuditRow {
@@ -16,18 +16,17 @@ export interface AuditRow {
   meta: Record<string, unknown>;
 }
 
-/** Newest first. RLS: only admins can read the company log. */
-export async function listAuditLog(tx: Tx, companyId: string, opts: { page: number; pageSize: number; limit?: number }): Promise<{ rows: AuditRow[]; total: number }> {
+/** Newest first. RLS: only admins can read the log. */
+export async function listAuditLog(tx: Tx, opts: { page: number; pageSize: number; limit?: number }): Promise<{ rows: AuditRow[]; total: number }> {
   const size = opts.limit ?? opts.pageSize;
   const offset = opts.limit ? 0 : Math.max(0, opts.page - 1) * opts.pageSize;
   const list = (await tx.execute(sql`
     select a.id, a.at, a.action, a.target, a.meta, u.name as actor_name, u.email as actor_email
     from audit_log a left join users u on u.id = a.actor_user_id
-    where a.company_id = ${companyId}::uuid
     order by a.at desc, a.id desc limit ${size} offset ${offset}`)) as unknown as {
     id: string; at: Date | string; action: string; target: string | null; meta: Record<string, unknown> | null; actor_name: string | null; actor_email: string | null;
   }[];
-  const [count] = (await tx.execute(sql`select count(*)::int as n from audit_log where company_id = ${companyId}::uuid`)) as unknown as { n: number }[];
+  const [count] = (await tx.execute(sql`select count(*)::int as n from audit_log`)) as unknown as { n: number }[];
   return {
     total: Number(count?.n ?? 0),
     rows: Array.from(list).map((r) => ({

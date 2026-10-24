@@ -36,8 +36,8 @@ export function OutcomeBadge({ outcome }: { outcome: string }) {
 
 const ATTRIBUTION: Record<string, { tone: Tone; title: string }> = {
   verified: { tone: 'good', title: 'Sent with the person\'s own token' },
-  matched: { tone: 'info', title: 'Company token, matched to a member by git e-mail' },
-  unverified: { tone: 'warn', title: 'Company token, no matching member' },
+  matched: { tone: 'info', title: 'Recorded before per-user tokens (ADR-0029): a company token matched to a member by git e-mail' },
+  unverified: { tone: 'warn', title: 'Recorded before per-user tokens (ADR-0029): a company token with no matching member' },
 };
 
 /** How a turn was tied to a user (ADR-0007). Only shown where individuals are visible. */

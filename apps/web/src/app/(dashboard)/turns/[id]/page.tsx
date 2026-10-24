@@ -253,7 +253,7 @@ export default async function TurnDetailPage({ params, searchParams }: Props) {
         </Card>
 
         {flows.map((f, i) => (
-          <FlowSection key={f.key} flow={f} flag={flags.get(f.key) ?? null} companyId={user.companyId} index={i} count={flows.length} />
+          <FlowSection key={f.key} flow={f} flag={flags.get(f.key) ?? null} index={i} count={flows.length} />
         ))}
 
         <Card title="Runs" description="Every sub-agent run of the turn, parent to child.">

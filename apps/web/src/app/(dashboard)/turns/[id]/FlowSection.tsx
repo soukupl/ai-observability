@@ -55,7 +55,7 @@ function FlowFact({ f }: { f: ReturnType<typeof flowSectionFacts>[number] }) {
   );
 }
 
-export function FlowSection({ flow, flag, companyId, index, count }: { flow: Flow; flag: FlowFlag | null; companyId: string; index: number; count: number }) {
+export function FlowSection({ flow, flag, index, count }: { flow: Flow; flag: FlowFlag | null; index: number; count: number }) {
   const facts = flowSectionFacts(flow);
   const chart = flowChart(flow);
   const steps = toStepRows(flow);
@@ -84,7 +84,7 @@ export function FlowSection({ flow, flag, companyId, index, count }: { flow: Flo
             >
               Download PDF
             </a>
-            <FlagButton companyId={companyId} turnId={flow.turnId} flowKey={flow.key} startedMs={flow.turn.startedMs} flag={flag} />
+            <FlagButton turnId={flow.turnId} flowKey={flow.key} startedMs={flow.turn.startedMs} flag={flag} />
           </>
         }
       >

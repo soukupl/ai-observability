@@ -35,13 +35,12 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ provider: s
   try {
     const identity = await finishOAuth(provider, code, saved.verifier);
     if (!identity) return respond(loginError('email_unverified'));
-    const result = await resolveIdentity(defaultAuthDeps(), {
-      email: identity.email,
-      name: identity.name,
-      method: provider,
-      account: { provider, id: identity.accountId },
-    });
-    return respond(respondToLogin(result, saved.next));
+    const result = await resolveIdentity(
+      defaultAuthDeps(),
+      { email: identity.email, name: identity.name, method: provider, account: { provider, id: identity.accountId } },
+      saved.next,
+    );
+    return respond(respondToLogin(result));
   } catch (err) {
     return respond(authFailure(err, `${provider} login`, 'oauth_failed'));
   }

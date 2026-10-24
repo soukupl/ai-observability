@@ -13,16 +13,16 @@ import type { UsageRow } from './usage';
  */
 export async function replaceUsage(
   tx: Tx,
-  owner: { companyId: string; turnId: string | null; runId: string | null; teamId: string | null; userId: string | null; startedAt: string },
+  owner: { turnId: string | null; runId: string | null; teamId: string | null; userId: string; startedAt: string },
   entries: readonly UsageRow[],
 ): Promise<void> {
   const ownerFilter = owner.runId ? sql`run_id = ${owner.runId}::uuid` : sql`turn_id = ${owner.turnId}::uuid and run_id is null`;
   await tx.execute(sql`update usage set input_tokens = 0, output_tokens = 0, cache_read_tokens = 0,
-      cache_write_tokens = 0, reasoning_tokens = 0, requests = 0 where ${ownerFilter}`);
+      cache_write_tokens = 0, reasoning_tokens = 0, requests = 0, user_id = ${owner.userId}::uuid where ${ownerFilter}`);
   for (const u of entries) {
-    await tx.execute(sql`insert into usage (company_id, team_id, user_id, turn_id, run_id, started_at, model, effort,
+    await tx.execute(sql`insert into usage (team_id, user_id, turn_id, run_id, started_at, model, effort,
         input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, requests)
-      values (${owner.companyId}::uuid, ${owner.teamId}::uuid, ${owner.userId}::uuid, ${owner.turnId}::uuid,
+      values (${owner.teamId}::uuid, ${owner.userId}::uuid, ${owner.turnId}::uuid,
         ${owner.runId}::uuid, ${owner.startedAt}::timestamptz, ${u.model}, ${u.effort},
         ${u.input}, ${u.output}, ${u.cacheRead}, ${u.cacheWrite}, ${u.reasoning}, ${u.requests})
       on conflict on constraint usage_owner_model_uq do update set

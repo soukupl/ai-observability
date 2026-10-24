@@ -15,7 +15,7 @@ export function parse<T extends z.ZodType>(schema: T, input: unknown): z.infer<T
 /** FormData → plain object (last value wins; files ignored). */
 export function formObject(fd: FormData): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const [k, v] of fd.entries()) if (typeof v === 'string' && !k.startsWith('$ACTION') && k !== '_companyId') out[k] = v;
+  for (const [k, v] of fd.entries()) if (typeof v === 'string' && !k.startsWith('$ACTION')) out[k] = v;
   return out;
 }
 
@@ -24,4 +24,6 @@ export const id = z.uuid({ message: 'invalid id' });
 export const optionalId = z.preprocess((v) => (v === '' || v === undefined ? null : v), z.uuid({ message: 'invalid id' }).nullable());
 export const name = (max = 80) => z.string().trim().min(1, 'required').max(max, `at most ${max} characters`);
 export const teamRole = z.enum(['member', 'lead']);
-export const companyRole = z.enum(['admin', 'member']);
+export const memberRole = z.enum(['admin', 'member']);
+/** Team slug (ADR-0030): 1–63 of a-z, 0-9 and '-'. */
+export const teamSlug = z.string().trim().toLowerCase().regex(/^[a-z0-9-]{1,63}$/, 'use 1–63 lower-case letters, digits or -');

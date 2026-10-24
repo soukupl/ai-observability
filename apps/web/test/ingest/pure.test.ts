@@ -33,12 +33,13 @@ describe('readBatchBody', () => {
 });
 
 describe('resolution rules', () => {
-  it("attributes a team: project mapping, then the user's primary team in this company, else none", () => {
-    expect(resolveTeam({ projectTeamId: 'p', primaryTeamId: 'u' })).toBe('p');
-    expect(resolveTeam({ projectTeamId: null, primaryTeamId: 'u' })).toBe('u');
-    expect(resolveTeam({ projectTeamId: 'p', primaryTeamId: null })).toBe('p');
-    expect(resolveTeam({ projectTeamId: null, primaryTeamId: null })).toBeNull();
-    expect(resolveTeam({ projectTeamId: undefined, primaryTeamId: undefined })).toBeNull();
+  it('attributes a team: admin mapping, then the dot-file team (members only), then the primary team, else none', () => {
+    expect(resolveTeam({ mappedTeamId: 'm', dotFileTeamId: 'd', primaryTeamId: 'u' })).toBe('m');
+    expect(resolveTeam({ mappedTeamId: null, dotFileTeamId: 'd', primaryTeamId: 'u' })).toBe('d');
+    expect(resolveTeam({ mappedTeamId: null, dotFileTeamId: null, primaryTeamId: 'u' })).toBe('u');
+    expect(resolveTeam({ mappedTeamId: 'm', dotFileTeamId: null, primaryTeamId: null })).toBe('m');
+    expect(resolveTeam({ mappedTeamId: null, dotFileTeamId: null, primaryTeamId: null })).toBeNull();
+    expect(resolveTeam({ mappedTeamId: undefined, dotFileTeamId: undefined, primaryTeamId: undefined })).toBeNull();
   });
 
   it('respects hashed project keys and hashed naming mode', () => {

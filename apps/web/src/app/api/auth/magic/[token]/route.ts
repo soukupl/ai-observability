@@ -8,7 +8,7 @@ export async function GET(req: NextRequest, ctx: Ctx): Promise<Response> {
   return magicLinkGet(req, (await ctx.params).token);
 }
 
-// POST /api/auth/magic/<token> — "Continue to sign in" (same-origin only): verifies (single use), then logs in or signs up.
+// POST /api/auth/magic/<token> — "Continue to sign in" (same-origin only): verifies (single use), then logs in.
 export async function POST(req: NextRequest, ctx: Ctx): Promise<Response> {
   return magicLinkPost(req, (await ctx.params).token);
 }

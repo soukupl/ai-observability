@@ -9,7 +9,7 @@ import { detectRunaways, sendRunawayDigests } from '../src/jobs/runaways.js';
 import { loadConfig } from '../src/lib/config.js';
 import type { MailMessage } from '../src/lib/mailer.js';
 import { memoryStateStore } from '../src/lib/state.js';
-import { addBudget, addMembership, addNoise, addTurn, openWorkerTestDb, removeMembership, ownerTx, seedCompany, type Seeded } from './db-fixture.js';
+import { addBudget, addNoise, addServiceUser, addTurn, openWorkerTestDb, ownerTx, removeMembership, seedDeployment, updateSettings, type Seeded } from './db-fixture.js';
 
 type Harness = Awaited<ReturnType<typeof openWorkerTestDb>>['h'];
 
@@ -24,10 +24,10 @@ let co: Seeded;
 
 const rows = async <T = Record<string, unknown>>(q: ReturnType<typeof sql>) => (await owner.execute(q)) as unknown as T[];
 
-const alerts = (companyId: string) =>
+const alerts = () =>
   rows<{ external_id: string; reasons: string[]; notified: boolean }>(sql`
     select t.external_id, a.reasons, a.notified_at is not null as notified from runaway_alerts a join turns t on t.id = a.turn_id
-    where a.company_id = ${companyId} order by t.external_id`);
+    order by t.external_id`);
 
 function makeCtx(over: { now?: Date; mails?: MailMessage[]; failMail?: boolean } = {}): WorkerContext & { state: ReturnType<typeof memoryStateStore> } {
   const mails = over.mails ?? [];
@@ -73,12 +73,12 @@ describe('worker jobs against Postgres', () => {
   describe('rollups', () => {
     beforeAll(async () => {
       if (skip) return;
-      co = await seedCompany(owner, { slug: 'rollups', retentionDays: 90 });
+      co = await seedDeployment(owner, { slug: 'rollups', retentionDays: 90 });
       const a = co.teamA;
-      await addTurn(owner, co.companyId, { key: 'r1', at: '2026-10-05T09:00:00Z', user: co.carol, team: a, usage: [[OPUS, 'high', 1000, 200, 5000, 300], [HAIKU, null, 50, 10, 0, 0]] });
-      await addTurn(owner, co.companyId, { key: 'r2', at: '2026-10-05T10:00:00Z', user: co.carol, team: a, outcome: 'failed', usage: [[OPUS, 'high', 400, 100, 0, 0]] });
-      await addTurn(owner, co.companyId, { key: 'r3', at: '2026-10-05T11:00:00Z', user: null, team: a, outcome: 'unknown', usage: [[OPUS, 'low', 10, 1, 0, 0]] });
-      await addTurn(owner, co.companyId, { key: 'r4', at: '2026-09-20T09:00:00Z', user: co.dave, team: co.teamB, usage: [[HAIKU, null, 700, 70, 0, 0]] });
+      await addTurn(owner, { key: 'r1', at: '2026-10-05T09:00:00Z', user: co.carol, team: a, usage: [[OPUS, 'high', 1000, 200, 5000, 300], [HAIKU, null, 50, 10, 0, 0]] });
+      await addTurn(owner, { key: 'r2', at: '2026-10-05T10:00:00Z', user: co.carol, team: a, outcome: 'failed', usage: [[OPUS, 'high', 400, 100, 0, 0]] });
+      await addTurn(owner, { key: 'r3', at: '2026-10-05T11:00:00Z', user: null, team: a, outcome: 'unknown', usage: [[OPUS, 'low', 10, 1, 0, 0]] });
+      await addTurn(owner, { key: 'r4', at: '2026-09-20T09:00:00Z', user: co.dave, team: co.teamB, usage: [[HAIKU, null, 700, 70, 0, 0]] });
     });
 
     const rollupSums = (day: string) =>
@@ -86,15 +86,15 @@ describe('worker jobs against Postgres', () => {
         select coalesce(sum(turns),0) turns, coalesce(sum(runs),0) runs, coalesce(sum(input_tokens),0) i, coalesce(sum(output_tokens),0) o,
           coalesce(sum(cache_read_tokens),0) cr, coalesce(sum(cache_write_tokens),0) cw, coalesce(sum(requests),0) rq,
           coalesce(sum(duration_ms),0) dur, coalesce(sum(success),0) ok, coalesce(sum(failed),0) failed, coalesce(sum(unknown),0) unknown, count(*) n
-        from daily_rollups where company_id = ${co.companyId} and day = ${day}::date`).then((r) => r[0]!);
+        from daily_rollups where day = ${day}::date`).then((r) => r[0]!);
     const rawSums = (day: string) =>
       rows<{ turns: string; runs: string; i: string; o: string; cr: string; cw: string; rq: string; dur: string }>(sql`
-        select (select count(*) from turns where company_id = ${co.companyId} and (started_at at time zone 'UTC')::date = ${day}::date) turns,
-          (select count(*) from runs r join turns t on t.id = r.turn_id where t.company_id = ${co.companyId} and (t.started_at at time zone 'UTC')::date = ${day}::date) runs,
+        select (select count(*) from turns where (started_at at time zone 'UTC')::date = ${day}::date) turns,
+          (select count(*) from runs r join turns t on t.id = r.turn_id where (t.started_at at time zone 'UTC')::date = ${day}::date) runs,
           coalesce(sum(u.input_tokens),0) i, coalesce(sum(u.output_tokens),0) o, coalesce(sum(u.cache_read_tokens),0) cr,
           coalesce(sum(u.cache_write_tokens),0) cw, coalesce(sum(u.requests),0) rq,
-          (select coalesce(sum(duration_ms),0) from turns where company_id = ${co.companyId} and (started_at at time zone 'UTC')::date = ${day}::date) dur
-        from usage u join turns t on t.id = u.turn_id where t.company_id = ${co.companyId} and (t.started_at at time zone 'UTC')::date = ${day}::date`).then((r) => r[0]!);
+          (select coalesce(sum(duration_ms),0) from turns where (started_at at time zone 'UTC')::date = ${day}::date) dur
+        from usage u join turns t on t.id = u.turn_id where (t.started_at at time zone 'UTC')::date = ${day}::date`).then((r) => r[0]!);
 
     it('cold start folds every day and the rollups equal the raw sums', async (ctx) => {
       if (skip) return ctx.skip();
@@ -115,9 +115,9 @@ describe('worker jobs against Postgres', () => {
       expect(Number(day.unknown)).toBe(1);
       // mixed-model turn r1: haiku tokens land in a usage-only row (turns = 0) and opus/high carries both opus turns
       const haiku = await rows<{ turns: number; input_tokens: string; user_id: string | null }>(sql`
-        select turns, input_tokens, user_id from daily_rollups where company_id = ${co.companyId} and day = '2026-10-05' and model = ${HAIKU}`);
+        select turns, input_tokens, user_id from daily_rollups where day = '2026-10-05' and model = ${HAIKU}`);
       expect(haiku).toEqual([{ turns: 0, input_tokens: '50', user_id: co.carol }]);
-      const unverified = await rows(sql`select 1 from daily_rollups where company_id = ${co.companyId} and day = '2026-10-05' and user_id is null`);
+      const unverified = await rows(sql`select 1 from daily_rollups where day = '2026-10-05' and user_id is null`);
       expect(unverified).toHaveLength(1);
       expect(c.state.get('rollups.watermark')).toBe(NOW.toISOString());
     });
@@ -127,7 +127,7 @@ describe('worker jobs against Postgres', () => {
       await runRollups(makeCtx());
       const [r] = await rows<{ w: string; u: string; split: boolean }>(sql`
         select coalesce(sum(wasted_input_tokens), 0) w, coalesce(sum(unknown_input_tokens), 0) u, bool_and(outcome_split) split
-        from daily_rollups where company_id = ${co.companyId} and day = '2026-10-05'`);
+        from daily_rollups where day = '2026-10-05'`);
       expect(r).toEqual({ w: '400', u: '10', split: true }); // r2 failed (400 input), r3 unknown (10 input)
     });
 
@@ -136,7 +136,7 @@ describe('worker jobs against Postgres', () => {
       const snapshot = () =>
         rows(sql`select day::text, team_id, user_id, project_id, harness, model, effort, turns, runs, input_tokens, output_tokens,
           cache_read_tokens, cache_write_tokens, reasoning_tokens, requests, duration_ms, phases_ms, success, failed, abandoned, unknown
-          from daily_rollups where company_id = ${co.companyId} order by 1, 2, 3, 4, 5, 6, 7, 8, 9`);
+          from daily_rollups order by 1, 2, 3, 4, 5, 6, 7, 8, 9`);
       const c = makeCtx();
       await runRollups(c);
       const first = await snapshot();
@@ -150,7 +150,7 @@ describe('worker jobs against Postgres', () => {
       if (skip) return ctx.skip();
       const c = makeCtx();
       await runRollups(c);
-      await addTurn(owner, co.companyId, { key: 'late', at: '2026-09-20T15:00:00Z', stamp: AFTER_NOW, user: co.dave, team: co.teamB, usage: [[HAIKU, null, 5, 5, 0, 0]] });
+      await addTurn(owner, { key: 'late', at: '2026-09-20T15:00:00Z', stamp: AFTER_NOW, user: co.dave, team: co.teamB, usage: [[HAIKU, null, 5, 5, 0, 0]] });
       const s = await runRollups(c);
       expect(s.full).toBe(false);
       expect(s.days).toBe(2); // today (always) and 2026-09-20 (changed); yesterday has no raw turns
@@ -167,7 +167,7 @@ describe('worker jobs against Postgres', () => {
       expect(Number((await rollupSums('2026-09-20')).failed)).toBe(0);
       // created_at stays old: only updated_at moves, as when ingest applies a patch to an existing turn.
       await rows(sql`update turns set outcome = 'failed', updated_at = ${AFTER_NOW}::timestamptz
-        where company_id = ${co.companyId} and external_id = 't-r4'`);
+        where external_id = 't-r4'`);
       const s = await runRollups(c);
       expect(s.full).toBe(false);
       expect(Number((await rollupSums('2026-09-20')).failed)).toBe(1);
@@ -178,63 +178,63 @@ describe('worker jobs against Postgres', () => {
       // a rollup for a day whose raw rows are gone must survive a pass
       await owner.transaction(async (tx) => {
         await tx.execute(sql`set local role app_definer`);
-        await tx.execute(sql`insert into daily_rollups (company_id, day, harness, model, turns, input_tokens) values (${co.companyId}, '2024-01-01', 'claude-code', ${OPUS}, 7, 1234)`);
+        await tx.execute(sql`insert into daily_rollups (day, harness, model, turns, input_tokens) values ('2024-01-01', 'claude-code', ${OPUS}, 7, 1234)`);
       });
       await runRollups(makeCtx());
-      const kept = await rows<{ turns: number }>(sql`select turns from daily_rollups where company_id = ${co.companyId} and day = '2024-01-01'`);
+      const kept = await rows<{ turns: number }>(sql`select turns from daily_rollups where day = '2024-01-01'`);
       expect(kept).toEqual([{ turns: 7 }]);
     });
 
     it('keeps the anonymised rollup rows of a deleted user when the day is recomputed (ADR-0012)', async (ctx) => {
       if (skip) return ctx.skip();
-      const x = await seedCompany(owner, { slug: 'anon', retentionDays: 90 });
+      const x = await seedDeployment(owner, { slug: 'anon', retentionDays: 90 });
       const day = '2026-10-05';
-      await addTurn(owner, x.companyId, { key: 'an-c', at: `${day}T08:00:00Z`, user: x.carol, team: x.teamA, usage: [[OPUS, 'high', 1000, 0, 0, 0]] });
-      await addTurn(owner, x.companyId, { key: 'an-b', at: `${day}T09:00:00Z`, user: x.bob, team: x.teamA, usage: [[OPUS, 'high', 500, 0, 0, 0]] });
-      await addTurn(owner, x.companyId, { key: 'an-u', at: `${day}T09:30:00Z`, user: null, team: x.teamA, usage: [[OPUS, 'high', 20, 0, 0, 0]] });
+      await addTurn(owner, { key: 'an-c', at: `${day}T08:00:00Z`, user: x.carol, team: x.teamA, usage: [[OPUS, 'high', 1000, 0, 0, 0]] });
+      await addTurn(owner, { key: 'an-b', at: `${day}T09:00:00Z`, user: x.bob, team: x.teamA, usage: [[OPUS, 'high', 500, 0, 0, 0]] });
+      await addTurn(owner, { key: 'an-u', at: `${day}T09:30:00Z`, user: null, team: x.teamA, usage: [[OPUS, 'high', 20, 0, 0, 0]] });
       const sums = () =>
         rows<{ turns: number; i: number; ok: number; failed: number; anon: number }>(sql`
           select sum(turns)::int turns, sum(input_tokens)::int i, sum(success)::int ok, sum(failed)::int failed,
             coalesce(sum(input_tokens) filter (where user_id is null), 0)::int anon
-          from daily_rollups where company_id = ${x.companyId} and day = ${day}::date`).then((r) => r[0]!);
+          from daily_rollups where day = ${day}::date`).then((r) => r[0]!);
       const c = makeCtx();
       await runRollups(c);
       expect(await sums()).toEqual({ turns: 3, i: 1520, ok: 3, failed: 0, anon: 20 });
 
       // Delete carol: her raw rows go (cascade), her rollup rows stay with user_id = null.
       await ownerTx(owner, (tx) => tx.execute(sql`delete from users where id = ${x.carol}`));
-      expect(await rows(sql`select 1 from turns where company_id = ${x.companyId} and user_id = ${x.carol}`)).toHaveLength(0);
+      expect(await rows(sql`select 1 from turns where user_id = ${x.carol}`)).toHaveLength(0);
       // The unverified turn changes afterwards, so the slice is rebuilt (and must still be rebuilt correctly).
-      await rows(sql`update turns set outcome = 'failed', updated_at = ${AFTER_NOW}::timestamptz where company_id = ${x.companyId} and external_id = 't-an-u'`);
+      await rows(sql`update turns set outcome = 'failed', updated_at = ${AFTER_NOW}::timestamptz where external_id = 't-an-u'`);
       await runRollups(c); // incremental: today is always recomputed
       await runRollups(makeCtx()); // cold start
       expect(await sums()).toEqual({ turns: 3, i: 1520, ok: 2, failed: 1, anon: 1020 });
 
       // New turns of the day are still folded in, next to the kept anonymised rows.
-      await addTurn(owner, x.companyId, { key: 'an-b2', at: `${day}T10:00:00Z`, stamp: AFTER_NOW, user: x.bob, team: x.teamA, usage: [[OPUS, 'high', 7, 0, 0, 0]] });
+      await addTurn(owner, { key: 'an-b2', at: `${day}T10:00:00Z`, stamp: AFTER_NOW, user: x.bob, team: x.teamA, usage: [[OPUS, 'high', 7, 0, 0, 0]] });
       await runRollups(c);
       expect(await sums()).toEqual({ turns: 4, i: 1527, ok: 3, failed: 1, anon: 1020 });
       // A team budget reading these rollups still sees carol's usage (raw and rollups agree on the team total).
-      const team = await monthToDate(makeCtx({ now: new Date('2026-10-07T12:00:00Z') }), { companyId: x.companyId, teamId: x.teamA, userId: null }, '2026-10-01', '2026-10-06');
+      const team = await monthToDate(makeCtx({ now: new Date('2026-10-07T12:00:00Z') }), { teamId: x.teamA, userId: null }, '2026-10-01', '2026-10-06');
       expect(team.reduce((a, r) => a + r.input, 0)).toBe(1527);
     });
 
     it('folds skill and MCP use (turn + runs) into daily_skill_mcp_rollups and keeps a deleted user\'s rows', async (ctx) => {
       if (skip) return ctx.skip();
-      const x = await seedCompany(owner, { slug: 'skills', retentionDays: 90 });
+      const x = await seedDeployment(owner, { slug: 'skills', retentionDays: 90 });
       const day = '2026-10-05';
-      await addTurn(owner, x.companyId, {
+      await addTurn(owner, {
         key: 'sk-c', at: `${day}T08:00:00Z`, user: x.carol, team: x.teamA, usage: [[OPUS, 'high', 10, 0, 0, 0], [HAIKU, null, 1, 0, 0, 0]],
         skills: { 'code-review': { model: 1, user: 1 } }, mcp: { github: { search_code: 2 } }, runMcp: { github: { search_code: 1, get_file: 1 } },
         mcpStats: { github: { search_code: { errors: 1, denied: 0, ms: 6000, buckets: [1, 0, 1, 0, 0] } } },
       });
-      await addTurn(owner, x.companyId, { key: 'sk-b', at: `${day}T09:00:00Z`, user: x.bob, team: x.teamA, usage: [[OPUS, 'high', 10, 0, 0, 0]], skills: { 'code-review': { model: 0, user: 1 } } });
-      await addTurn(owner, x.companyId, { key: 'sk-none', at: `${day}T10:00:00Z`, user: x.bob, team: x.teamA, usage: [[OPUS, 'high', 10, 0, 0, 0]] });
+      await addTurn(owner, { key: 'sk-b', at: `${day}T09:00:00Z`, user: x.bob, team: x.teamA, usage: [[OPUS, 'high', 10, 0, 0, 0]], skills: { 'code-review': { model: 0, user: 1 } } });
+      await addTurn(owner, { key: 'sk-none', at: `${day}T10:00:00Z`, user: x.bob, team: x.teamA, usage: [[OPUS, 'high', 10, 0, 0, 0]] });
       const totals = () =>
         rows<{ kind: string; name: string; tool: string; calls: number; model_calls: number; user_calls: number; turns: number; users: number }>(sql`
           select kind, name, tool, sum(calls)::int calls, sum(model_calls)::int model_calls, sum(user_calls)::int user_calls,
             sum(turns)::int turns, count(distinct user_id)::int users
-          from daily_skill_mcp_rollups where company_id = ${x.companyId} and day = ${day}::date group by 1, 2, 3 order by 1, 2, 3`);
+          from daily_skill_mcp_rollups where day = ${day}::date group by 1, 2, 3 order by 1, 2, 3`);
       const c = makeCtx();
       await runRollups(c);
       const expected = [
@@ -246,10 +246,10 @@ describe('worker jobs against Postgres', () => {
       expect(await totals()).toEqual(expected);
       const [oc] = await rows<{ success: number; failed: number; split: boolean }>(sql`
         select sum(success)::int success, sum(failed)::int failed, bool_and(outcome_split) split from daily_skill_mcp_rollups
-        where company_id = ${x.companyId} and kind = 'skill' and name = 'code-review'`);
+        where kind = 'skill' and name = 'code-review'`);
       expect(oc).toEqual({ success: 2, failed: 0, split: true }); // both code-review turns succeeded (fixture default)
       const rel = await rows(sql`select tool, errors::int, latency_ms::int, lat0::int, lat2::int from daily_skill_mcp_rollups
-        where company_id = ${x.companyId} and kind = 'mcp' and name = 'github' order by tool`);
+        where kind = 'mcp' and name = 'github' order by tool`);
       expect(rel).toEqual([
         { tool: '', errors: 1, latency_ms: 6000, lat0: 1, lat2: 1 },
         { tool: 'get_file', errors: 0, latency_ms: 0, lat0: 0, lat2: 0 },
@@ -260,7 +260,7 @@ describe('worker jobs against Postgres', () => {
 
       // Deleting carol keeps her (now anonymised) rows through a rebuild of the slice.
       await ownerTx(owner, (tx) => tx.execute(sql`delete from users where id = ${x.carol}`));
-      await rows(sql`update turns set outcome = 'failed', updated_at = ${AFTER_NOW}::timestamptz where company_id = ${x.companyId} and external_id = 't-sk-b'`);
+      await rows(sql`update turns set outcome = 'failed', updated_at = ${AFTER_NOW}::timestamptz where external_id = 't-sk-b'`);
       await runRollups(c);
       expect((await totals()).map(({ users: _u, ...r }) => r)).toEqual(expected.map(({ users: _u, ...r }) => r));
     });
@@ -278,54 +278,61 @@ describe('worker jobs against Postgres', () => {
     let sessionKeepId: string;
     beforeAll(async () => {
       if (skip) return;
-      co = await seedCompany(owner, { slug: 'retention', retentionDays: 30 });
+      co = await seedDeployment(owner, { slug: 'retention', retentionDays: 30 });
       const a = co.teamA;
       // cutoff for 30 days at NOW = 2026-09-05T00:00Z
-      await addTurn(owner, co.companyId, { key: 'old1', at: '2026-09-04T23:00:00Z', user: co.carol, team: a, usage: [[OPUS, 'high', 100, 10, 0, 0], [HAIKU, null, 5, 5, 0, 0]] });
-      await addTurn(owner, co.companyId, { key: 'old2', at: '2026-07-01T10:00:00Z', user: co.carol, team: a, usage: [[OPUS, 'high', 200, 20, 0, 0]] });
-      await addTurn(owner, co.companyId, { key: 'keep1', at: '2026-09-05T01:00:00Z', user: co.carol, team: a, usage: [[OPUS, 'high', 300, 30, 0, 0]] });
+      await addTurn(owner, { key: 'old1', at: '2026-09-04T23:00:00Z', user: co.carol, team: a, usage: [[OPUS, 'high', 100, 10, 0, 0], [HAIKU, null, 5, 5, 0, 0]] });
+      await addTurn(owner, { key: 'old2', at: '2026-07-01T10:00:00Z', user: co.carol, team: a, usage: [[OPUS, 'high', 200, 20, 0, 0]] });
+      await addTurn(owner, { key: 'keep1', at: '2026-09-05T01:00:00Z', user: co.carol, team: a, usage: [[OPUS, 'high', 300, 30, 0, 0]] });
       // long-running session: its first turn is expired but it still holds a newer turn -> the session must survive
-      await addTurn(owner, co.companyId, { key: 'long-old', at: '2026-08-01T10:00:00Z', user: co.bob, team: a, session: 'long', usage: [[OPUS, 'high', 1, 1, 0, 0]] });
-      await addTurn(owner, co.companyId, { key: 'long-new', at: '2026-10-01T10:00:00Z', user: co.bob, team: a, session: 'long', usage: [[OPUS, 'high', 2, 2, 0, 0]] });
-      await addNoise(owner, co.companyId, co.carol, NOW.toISOString());
-      sessionKeepId = (await rows<{ id: string }>(sql`select id from agent_sessions where company_id = ${co.companyId} and external_id = 'long'`))[0]!.id;
+      await addTurn(owner, { key: 'long-old', at: '2026-08-01T10:00:00Z', user: co.bob, team: a, session: 'long', usage: [[OPUS, 'high', 1, 1, 0, 0]] });
+      await addTurn(owner, { key: 'long-new', at: '2026-10-01T10:00:00Z', user: co.bob, team: a, session: 'long', usage: [[OPUS, 'high', 2, 2, 0, 0]] });
+      await addNoise(owner, co.carol, NOW.toISOString());
+      sessionKeepId = (await rows<{ id: string }>(sql`select id from agent_sessions where external_id = 'long'`))[0]!.id;
     });
 
     const counts = () =>
       rows<{ turns: string; runs: string; usage: string; sessions: string }>(sql`
-        select (select count(*) from turns where company_id = ${co.companyId}) turns, (select count(*) from runs where company_id = ${co.companyId}) runs,
-          (select count(*) from usage where company_id = ${co.companyId}) usage, (select count(*) from agent_sessions where company_id = ${co.companyId}) sessions`).then((r) => r[0]!);
+        select (select count(*) from turns) turns, (select count(*) from runs) runs,
+          (select count(*) from usage) usage, (select count(*) from agent_sessions) sessions`).then((r) => r[0]!);
 
     it('deletes expired turns/runs/usage/sessions, folds them into rollups first, and keeps the rest', async (ctx) => {
       if (skip) return ctx.skip();
       expect(await counts()).toEqual({ turns: '5', runs: '1', usage: '6', sessions: '4' });
       const c = makeCtx();
       const s = await runRetention(c, { force: true });
-      expect(s).toMatchObject({ turns: 3, runs: 1, usage: 4, sessions: 2, ingestEvents: 1, pendingPatches: 2, magicLinks: 1, authSessions: 1 });
+      expect(s).toMatchObject({
+        retentionDays: 30, turns: 3, runs: 1, usage: 4, sessions: 2, ingestEvents: 1, pendingPatches: 2, magicLinks: 1, authSessions: 1, deviceCodes: 1,
+      });
       expect(await counts()).toEqual({ turns: '2', runs: '0', usage: '2', sessions: '2' });
-      const left = await rows<{ external_id: string }>(sql`select external_id from turns where company_id = ${co.companyId} order by 1`);
+      const left = await rows<{ external_id: string }>(sql`select external_id from turns order by 1`);
       expect(left.map((r) => r.external_id)).toEqual(['t-keep1', 't-long-new']);
       // the session that still holds newer turns survived
       expect(await rows(sql`select 1 from agent_sessions where id = ${sessionKeepId}`)).toHaveLength(1);
       // expired days were folded into the permanent rollups before the raw rows went away
       const rolled = await rows<{ day: string; turns: string; i: string }>(sql`
-        select day::text, sum(turns)::text turns, sum(input_tokens)::text i from daily_rollups where company_id = ${co.companyId} and day in ('2026-09-04','2026-07-01') group by 1 order by 1`);
+        select day::text, sum(turns)::text turns, sum(input_tokens)::text i from daily_rollups where day in ('2026-09-04','2026-07-01') group by 1 order by 1`);
       expect(rolled).toEqual([{ day: '2026-07-01', turns: '1', i: '200' }, { day: '2026-09-04', turns: '1', i: '105' }]);
       // global pruning kept the fresh rows
-      expect(await rows(sql`select event_id from ingest_events where company_id = ${co.companyId}`)).toEqual([{ event_id: 'new' }]);
-      // parked patches whose turn never came are dropped after 30 days (ADR-0015), even if the company stopped ingesting
-      expect(await rows(sql`select turn_external_id from pending_turn_patches where company_id = ${co.companyId}`)).toEqual([{ turn_external_id: 'claude-code:soon' }]);
-      expect(await rows(sql`select session_external_id from pending_session_patches where company_id = ${co.companyId}`)).toEqual([{ session_external_id: 'claude-code:soon-s' }]);
+      expect(await rows(sql`select event_id from ingest_events`)).toEqual([{ event_id: 'new' }]);
+      // parked patches whose turn never came are dropped after 30 days (ADR-0015)
+      expect(await rows(sql`select turn_external_id from pending_turn_patches`)).toEqual([{ turn_external_id: 'claude-code:soon' }]);
+      expect(await rows(sql`select session_external_id from pending_session_patches`)).toEqual([{ session_external_id: 'claude-code:soon-s' }]);
       expect(await rows(sql`select token_hash from magic_links`)).toEqual([{ token_hash: 'h2' }]);
       expect(await rows(sql`select token_hash from auth_sessions`)).toEqual([{ token_hash: 's2' }]);
+      // device codes (ADR-0029): long expired ones deleted, a just-expired open one marked expired, an open one untouched
+      expect(await rows(sql`select user_code, status::text from device_codes order by 1`)).toEqual([
+        { user_code: 'BBBBBBBB', status: 'expired' },
+        { user_code: 'CCCCCCCC', status: 'pending' },
+      ]);
       expect(c.state.get('retention.lastDay')).toBe('2026-10-05');
     });
 
     it('is idempotent and does not shrink rollups when run again', async (ctx) => {
       if (skip) return ctx.skip();
       const s = await runRetention(makeCtx(), { force: true });
-      expect(s).toMatchObject({ turns: 0, runs: 0, usage: 0, sessions: 0, ingestEvents: 0, pendingPatches: 0 });
-      const rolled = await rows(sql`select sum(turns)::text t from daily_rollups where company_id = ${co.companyId} and day = '2026-09-04'`);
+      expect(s).toMatchObject({ turns: 0, runs: 0, usage: 0, sessions: 0, ingestEvents: 0, pendingPatches: 0, deviceCodes: 0 });
+      const rolled = await rows(sql`select sum(turns)::text t from daily_rollups where day = '2026-09-04'`);
       expect(rolled).toEqual([{ t: '1' }]);
     });
 
@@ -342,30 +349,30 @@ describe('worker jobs against Postgres', () => {
 
     it('adds turns that arrive after their day expired to the rollup instead of losing or overwriting it', async (ctx) => {
       if (skip) return ctx.skip();
-      const x = await seedCompany(owner, { slug: 'late-turns', retentionDays: 30 });
+      const x = await seedDeployment(owner, { slug: 'late-turns', retentionDays: 30 });
       // 08-10: 1 turn / 1000 input (a late turn would overwrite it); 08-11: 2 turns / 3000 (a late turn would be lost)
-      await addTurn(owner, x.companyId, { key: 'o1', at: '2026-08-10T10:00:00Z', user: x.carol, team: x.teamA, usage: [[OPUS, 'high', 1000, 0, 0, 0]] });
-      await addTurn(owner, x.companyId, { key: 'o2', at: '2026-08-11T10:00:00Z', user: x.carol, team: x.teamA, usage: [[OPUS, 'high', 1000, 0, 0, 0]] });
-      await addTurn(owner, x.companyId, { key: 'o3', at: '2026-08-11T11:00:00Z', user: x.dave, team: x.teamB, usage: [[OPUS, 'high', 2000, 0, 0, 0]] });
+      await addTurn(owner, { key: 'o1', at: '2026-08-10T10:00:00Z', user: x.carol, team: x.teamA, usage: [[OPUS, 'high', 1000, 0, 0, 0]] });
+      await addTurn(owner, { key: 'o2', at: '2026-08-11T10:00:00Z', user: x.carol, team: x.teamA, usage: [[OPUS, 'high', 1000, 0, 0, 0]] });
+      await addTurn(owner, { key: 'o3', at: '2026-08-11T11:00:00Z', user: x.dave, team: x.teamB, usage: [[OPUS, 'high', 2000, 0, 0, 0]] });
       // rolled up while the days were inside the window, then expired
-      await recomputeDay(worker, x.companyId, '2026-08-10');
-      await recomputeDay(worker, x.companyId, '2026-08-11');
+      await recomputeDay(worker, '2026-08-10');
+      await recomputeDay(worker, '2026-08-11');
       await runRetention(makeCtx(), { force: true });
-      expect(await rows(sql`select 1 from turns where company_id = ${x.companyId}`)).toHaveLength(0);
+      expect(await rows(sql`select 1 from turns`)).toHaveLength(0);
       const rolled = () =>
         rows<{ day: string; turns: number; i: number }>(sql`select day::text, sum(turns)::int turns, sum(input_tokens)::int i
-          from daily_rollups where company_id = ${x.companyId} group by 1 order by 1`);
+          from daily_rollups group by 1 order by 1`);
       expect(await rolled()).toEqual([{ day: '2026-08-10', turns: 1, i: 1000 }, { day: '2026-08-11', turns: 2, i: 3000 }]);
 
       // An offline queue delivers turns for those expired days later (created after the rollups were written).
       const later = new Date(Date.now() + 60_000).toISOString();
-      await addTurn(owner, x.companyId, { key: 'l1', at: '2026-08-10T12:00:00Z', stamp: later, user: x.carol, team: x.teamA, usage: [[OPUS, 'high', 77, 0, 0, 0]] });
-      await addTurn(owner, x.companyId, { key: 'l2', at: '2026-08-11T12:00:00Z', stamp: later, user: x.carol, team: x.teamA, usage: [[OPUS, 'high', 77, 0, 0, 0]] });
+      await addTurn(owner, { key: 'l1', at: '2026-08-10T12:00:00Z', stamp: later, user: x.carol, team: x.teamA, usage: [[OPUS, 'high', 77, 0, 0, 0]] });
+      await addTurn(owner, { key: 'l2', at: '2026-08-11T12:00:00Z', stamp: later, user: x.carol, team: x.teamA, usage: [[OPUS, 'high', 77, 0, 0, 0]] });
       await runRollups(makeCtx()); // outside the window: the rollups job leaves them alone
       expect(await rolled()).toEqual([{ day: '2026-08-10', turns: 1, i: 1000 }, { day: '2026-08-11', turns: 2, i: 3000 }]);
       const s = await runRetention(makeCtx(), { force: true });
       expect(s.turns).toBeGreaterThanOrEqual(2);
-      expect(await rows(sql`select 1 from turns where company_id = ${x.companyId}`)).toHaveLength(0);
+      expect(await rows(sql`select 1 from turns`)).toHaveLength(0);
       expect(await rolled()).toEqual([{ day: '2026-08-10', turns: 2, i: 1077 }, { day: '2026-08-11', turns: 3, i: 3077 }]);
       // and nothing is added twice
       await runRetention(makeCtx(), { force: true });
@@ -374,87 +381,95 @@ describe('worker jobs against Postgres', () => {
 
     it('never rebuilds a rollup from partly deleted raw rows, even when the day is recomputed directly', async (ctx) => {
       if (skip) return ctx.skip();
-      const x = await seedCompany(owner, { slug: 'partial', retentionDays: 90 });
-      await addTurn(owner, x.companyId, { key: 'p1', at: '2026-09-01T10:00:00Z', user: x.carol, team: x.teamA, usage: [[OPUS, 'high', 100, 0, 0, 0]] });
-      await addTurn(owner, x.companyId, { key: 'p2', at: '2026-09-01T11:00:00Z', user: x.carol, team: x.teamA, usage: [[OPUS, 'high', 200, 0, 0, 0]] });
-      expect(await recomputeDay(worker, x.companyId, '2026-09-01')).toEqual({ turns: 2, rows: 1 });
+      const x = await seedDeployment(owner, { slug: 'partial', retentionDays: 90 });
+      await addTurn(owner, { key: 'p1', at: '2026-09-01T10:00:00Z', user: x.carol, team: x.teamA, usage: [[OPUS, 'high', 100, 0, 0, 0]] });
+      await addTurn(owner, { key: 'p2', at: '2026-09-01T11:00:00Z', user: x.carol, team: x.teamA, usage: [[OPUS, 'high', 200, 0, 0, 0]] });
+      expect(await recomputeDay(worker, '2026-09-01')).toEqual({ turns: 2, rows: 1 });
       // an interrupted retention pass (or a window that was widened again) left one of the two raw turns
-      await ownerTx(owner, (tx) => tx.execute(sql`delete from turns where company_id = ${x.companyId} and external_id = 't-p1'`));
-      expect(await recomputeDay(worker, x.companyId, '2026-09-01')).toBeNull();
-      const [r] = await rows<{ turns: number; i: number }>(sql`select sum(turns)::int turns, sum(input_tokens)::int i from daily_rollups where company_id = ${x.companyId}`);
+      await ownerTx(owner, (tx) => tx.execute(sql`delete from turns where external_id = 't-p1'`));
+      expect(await recomputeDay(worker, '2026-09-01')).toBeNull();
+      const [r] = await rows<{ turns: number; i: number }>(sql`select sum(turns)::int turns, sum(input_tokens)::int i from daily_rollups`);
       expect(r).toEqual({ turns: 2, i: 300 });
     });
 
-    it('honours each company\'s own window and the plan maximum (free plan = 30 days max)', async (ctx) => {
+    it('honours the deployment\'s own window from deployment.settings (no plan caps)', async (ctx) => {
       if (skip) return ctx.skip();
-      const free = await seedCompany(owner, { slug: 'free-co', plan: 'free', retentionDays: 90 });
-      await addTurn(owner, free.companyId, { key: 'f-old', at: '2026-08-20T10:00:00Z', user: free.carol, team: free.teamA, usage: [[OPUS, 'high', 1, 1, 0, 0]] });
-      const pro = await seedCompany(owner, { slug: 'pro-co', plan: 'team', retentionDays: 90 });
-      await addTurn(owner, pro.companyId, { key: 'p-old', at: '2026-08-20T10:00:00Z', user: pro.carol, team: pro.teamA, usage: [[OPUS, 'high', 1, 1, 0, 0]] });
-      await runRetention(makeCtx(), { force: true });
-      expect(await rows(sql`select 1 from turns where company_id = ${free.companyId}`)).toHaveLength(0);
-      expect(await rows(sql`select 1 from turns where company_id = ${pro.companyId}`)).toHaveLength(1);
+      const x = await seedDeployment(owner, { slug: 'window', retentionDays: 90 });
+      // 46 days old: inside a 90-day window, outside a 30-day one
+      await addTurn(owner, { key: 'w-old', at: '2026-08-20T10:00:00Z', user: x.carol, team: x.teamA, usage: [[OPUS, 'high', 1, 1, 0, 0]] });
+      expect(await runRetention(makeCtx(), { force: true })).toMatchObject({ retentionDays: 90, turns: 0 });
+      expect(await rows(sql`select 1 from turns`)).toHaveLength(1);
+      await updateSettings(owner, { retentionDays: 730 }); // any value in 30-730 is allowed, with no plan maximum
+      expect(await runRetention(makeCtx(), { force: true })).toMatchObject({ retentionDays: 730, turns: 0 });
+      await updateSettings(owner, { retentionDays: 30 });
+      expect(await runRetention(makeCtx(), { force: true })).toMatchObject({ retentionDays: 30, turns: 1 });
+      expect(await rows(sql`select 1 from turns`)).toHaveLength(0);
     });
   });
 
   describe('runaways', () => {
     /** 50 ordinary turns of `user` over the 25 days before NOW (1000 tokens each), stamped long ago (not candidates). */
-    async function history(x: Seeded, user: string, team: string) {
+    async function history(user: string, team: string) {
       for (let i = 0; i < 50; i++) {
         const at = new Date(NOW.getTime() - (2 + i * 0.5) * 86_400_000).toISOString();
-        await addTurn(owner, x.companyId, { key: `h-${user}-${i}`, at, stamp: '2026-09-01T00:00:00Z', user, team, usage: [[OPUS, 'high', 1000, 0, 0, 0]] });
+        await addTurn(owner, { key: `h-${user}-${i}`, at, stamp: '2026-09-01T00:00:00Z', user, team, usage: [[OPUS, 'high', 1000, 0, 0, 0]] });
       }
     }
-    const alerts = (companyId: string) =>
-      rows<{ external_id: string; reasons: string[]; notified: boolean }>(sql`
-        select t.external_id, a.reasons, a.notified_at is not null as notified from runaway_alerts a join turns t on t.id = a.turn_id
-        where a.company_id = ${companyId} order by t.external_id`);
+
+    it('the tokens rule ignores cache reads: a turn of mostly cache reads is not a runaway by tokens', async (ctx) => {
+      if (skip) return ctx.skip();
+      const x = await seedDeployment(owner, { slug: 'run-cache', retentionDays: 90 });
+      await history(x.carol, x.teamA);
+      // 30 M cache reads (≈ $6 at $0.20 / Mtok, under $20) but only 1000 fresh input tokens: normal for carol
+      await addTurn(owner, { key: 'carol-cached', at: '2026-10-05T10:00:00Z', user: x.carol, team: x.teamA, usage: [[OPUS, 'high', 1000, 0, 30_000_000, 0]] });
+      // 5000 cache-write tokens are counted: 5 × her p99
+      await addTurn(owner, { key: 'carol-writes', at: '2026-10-05T10:30:00Z', user: x.carol, team: x.teamA, usage: [[OPUS, 'high', 1000, 0, 0, 5000]] });
+      expect(await detectRunaways(makeCtx())).toBe(1);
+      expect((await alerts()).map((a) => a.external_id)).toEqual(['t-carol-writes']);
+    });
+
+    it('takes the cost threshold from deployment.settings', async (ctx) => {
+      if (skip) return ctx.skip();
+      const x = await seedDeployment(owner, { slug: 'run-th', retentionDays: 90, runawayCostUsd: 200 });
+      // 30 M input ≈ $120: a runaway by tokens (floor) but under the deployment's $200 cost threshold
+      await addTurn(owner, { key: 'dave-huge', at: '2026-10-05T11:00:00Z', user: x.dave, team: x.teamB, usage: [[OPUS, 'high', 30_000_000, 0, 0, 0]] });
+      expect(await detectRunaways(makeCtx())).toBe(1);
+      expect(await alerts()).toEqual([{ external_id: 't-dave-huge', reasons: ['tokens'], notified: false }]);
+    });
 
     it('flags tokens far above the user\'s normal and turns over the cost threshold, once per turn', async (ctx) => {
       if (skip) return ctx.skip();
-      const x = await seedCompany(owner, { slug: 'run-agg', retentionDays: 90 });
-      await history(x, x.carol, x.teamA);
-      await addTurn(owner, x.companyId, { key: 'carol-big', at: '2026-10-05T10:00:00Z', user: x.carol, team: x.teamA, usage: [[OPUS, 'high', 10_000, 0, 0, 0]] });
-      await addTurn(owner, x.companyId, { key: 'carol-ok', at: '2026-10-05T10:30:00Z', user: x.carol, team: x.teamA, usage: [[OPUS, 'high', 1200, 0, 0, 0]] });
-      await addTurn(owner, x.companyId, { key: 'dave-huge', at: '2026-10-05T11:00:00Z', user: x.dave, team: x.teamB, usage: [[OPUS, 'high', 30_000_000, 0, 0, 0]] });
+      co = await seedDeployment(owner, { slug: 'run-agg', retentionDays: 90 });
+      await history(co.carol, co.teamA);
+      await addTurn(owner, { key: 'carol-big', at: '2026-10-05T10:00:00Z', user: co.carol, team: co.teamA, usage: [[OPUS, 'high', 10_000, 0, 0, 0]] });
+      await addTurn(owner, { key: 'carol-ok', at: '2026-10-05T10:30:00Z', user: co.carol, team: co.teamA, usage: [[OPUS, 'high', 1200, 0, 0, 0]] });
+      await addTurn(owner, { key: 'dave-huge', at: '2026-10-05T11:00:00Z', user: co.dave, team: co.teamB, usage: [[OPUS, 'high', 30_000_000, 0, 0, 0]] });
       expect(await detectRunaways(makeCtx())).toBe(2);
-      expect(await alerts(x.companyId)).toEqual([
+      expect(await alerts()).toEqual([
         { external_id: 't-carol-big', reasons: ['tokens'], notified: false },
         { external_id: 't-dave-huge', reasons: ['tokens', 'cost'], notified: false }, // 30 M input × $4 / Mtok = $120
       ]);
       expect(await detectRunaways(makeCtx())).toBe(0); // one alert per turn
     });
 
-    it('the tokens rule ignores cache reads: a turn of mostly cache reads is not a runaway by tokens', async (ctx) => {
-      if (skip) return ctx.skip();
-      const x = await seedCompany(owner, { slug: 'run-cache', retentionDays: 90 });
-      await history(x, x.carol, x.teamA);
-      // 30 M cache reads (≈ $6 at $0.20 / Mtok, under $20) but only 1000 fresh input tokens: normal for carol
-      await addTurn(owner, x.companyId, { key: 'carol-cached', at: '2026-10-05T10:00:00Z', user: x.carol, team: x.teamA, usage: [[OPUS, 'high', 1000, 0, 30_000_000, 0]] });
-      // 5000 cache-write tokens are counted: 5 × her p99
-      await addTurn(owner, x.companyId, { key: 'carol-writes', at: '2026-10-05T10:30:00Z', user: x.carol, team: x.teamA, usage: [[OPUS, 'high', 1000, 0, 0, 5000]] });
-      expect(await detectRunaways(makeCtx())).toBe(1);
-      expect((await alerts(x.companyId)).map((a) => a.external_id)).toEqual(['t-carol-writes']);
-      await rows(sql`update runaway_alerts set notified_at = now() where company_id = ${x.companyId}`); // keep other tests' digests apart
-    });
-
     it('aggregates-only: each user gets their own turns, admins an anonymous digest; at most one digest per hour', async (ctx) => {
       if (skip) return ctx.skip();
-      const [co] = await rows<{ id: string }>(sql`select id from companies where slug = 'run-agg'`);
+      // continues the deployment seeded by the previous test (run-agg)
       const mails: MailMessage[] = [];
       expect(await sendRunawayDigests(makeCtx({ mails }))).toEqual({ sent: 3, failed: 0 });
       const to = (who: string) => mails.filter((m) => m.to === `${who}@run-agg.test`);
       expect(to('carol')).toHaveLength(1);
       expect(to('carol')[0]!.text).toContain('/turns/');
+      expect(to('carol')[0]!.subject).toContain('(Co run-agg)'); // mails name the deployment
       expect(to('dave')).toHaveLength(1);
       expect(to('bob')).toHaveLength(0); // leads are not mailed in aggregates-only mode
       const admin = to('alice')[0]!;
       expect(admin.subject).toContain('2 runaway turns');
       expect(admin.text).not.toMatch(/carol|dave|\/turns\//);
-      expect((await alerts(co!.id)).every((a) => a.notified)).toBe(true);
+      expect((await alerts()).every((a) => a.notified)).toBe(true);
 
       // a new runaway within the hour waits for the next digest
-      await addTurn(owner, co!.id, { key: 'dave-huge-2', at: '2026-10-05T11:30:00Z', stamp: AFTER_NOW, user: (await rows<{ id: string }>(sql`select id from users where email = 'dave@run-agg.test'`))[0]!.id, team: (await rows<{ id: string }>(sql`select id from teams where company_id = ${co!.id} and name = 'B'`))[0]!.id, usage: [[OPUS, 'high', 25_000_000, 0, 0, 0]] });
+      await addTurn(owner, { key: 'dave-huge-2', at: '2026-10-05T11:30:00Z', stamp: AFTER_NOW, user: co.dave, team: co.teamB, usage: [[OPUS, 'high', 25_000_000, 0, 0, 0]] });
       expect(await detectRunaways(makeCtx())).toBe(1);
       const later: MailMessage[] = [];
       expect(await sendRunawayDigests(makeCtx({ mails: later }))).toEqual({ sent: 0, failed: 0 });
@@ -464,38 +479,50 @@ describe('worker jobs against Postgres', () => {
 
     it('full mode: the user and the leads of the turn\'s team (named); a failed send is retried', async (ctx) => {
       if (skip) return ctx.skip();
-      const x = await seedCompany(owner, { slug: 'run-full', retentionDays: 90, visibility: 'full' });
-      await addTurn(owner, x.companyId, { key: 'carol-huge', at: '2026-10-05T10:00:00Z', user: x.carol, team: x.teamA, usage: [[OPUS, 'high', 30_000_000, 0, 0, 0]] });
+      const x = await seedDeployment(owner, { slug: 'run-full', retentionDays: 90, visibility: 'full' });
+      await addTurn(owner, { key: 'carol-huge', at: '2026-10-05T10:00:00Z', user: x.carol, team: x.teamA, usage: [[OPUS, 'high', 30_000_000, 0, 0, 0]] });
       expect(await detectRunaways(makeCtx())).toBe(1);
       expect(await sendRunawayDigests(makeCtx({ failMail: true }))).toEqual({ sent: 0, failed: 1 });
-      expect((await alerts(x.companyId))[0]!.notified).toBe(false); // released
+      expect((await alerts())[0]!.notified).toBe(false); // released
       const mails: MailMessage[] = [];
       expect(await sendRunawayDigests(makeCtx({ mails }))).toEqual({ sent: 2, failed: 0 });
       expect(mails.map((m) => m.to).sort()).toEqual(['bob@run-full.test', 'carol@run-full.test']);
       expect(mails.find((m) => m.to === 'bob@run-full.test')!.text).toContain('carol');
+    });
+
+    it('a service user\'s runaway turn (no e-mail) still reaches the admins', async (ctx) => {
+      if (skip) return ctx.skip();
+      const x = await seedDeployment(owner, { slug: 'run-svc', retentionDays: 90 });
+      const ci = await addServiceUser(owner, 'ci-bot', x.teamB);
+      await addTurn(owner, { key: 'ci-huge', at: '2026-10-05T10:00:00Z', user: ci, team: x.teamB, usage: [[OPUS, 'high', 30_000_000, 0, 0, 0]] });
+      expect(await detectRunaways(makeCtx())).toBe(1);
+      const mails: MailMessage[] = [];
+      expect(await sendRunawayDigests(makeCtx({ mails }))).toEqual({ sent: 1, failed: 0 });
+      expect(mails.map((m) => m.to)).toEqual(['alice@run-svc.test']);
     });
   });
 
   describe('budgets', () => {
     it('mails once at 80 % and once at 100 %, resets next month, and retries after a failed send', async (ctx) => {
       if (skip) return ctx.skip();
-      co = await seedCompany(owner, { slug: 'budgets', retentionDays: 90 });
-      const budgetId = await addBudget(owner, co.companyId, { teamId: co.teamA, kind: 'cost', limit: 100 });
-      await addBudget(owner, co.companyId, { teamId: co.teamB, kind: 'tokens', limit: 1_000_000 });
+      co = await seedDeployment(owner, { slug: 'budgets', retentionDays: 90 });
+      const budgetId = await addBudget(owner, { teamId: co.teamA, kind: 'cost', limit: 100 });
+      await addBudget(owner, { teamId: co.teamB, kind: 'tokens', limit: 1_000_000 });
       // team A: Oct 2 (via rollups) 10M input @ $4 = $40 ; Oct 5 (raw, today) 10M input = $40  => $80 = 80 %
-      await addTurn(owner, co.companyId, { key: 'b1', at: '2026-10-02T09:00:00Z', user: co.carol, team: co.teamA, usage: [[OPUS, 'high', 10_000_000, 0, 0, 0]] });
-      await addTurn(owner, co.companyId, { key: 'b2', at: '2026-10-05T09:00:00Z', stamp: AFTER_NOW, user: co.carol, team: co.teamA, usage: [[OPUS, 'high', 10_000_000, 0, 0, 0]] });
+      await addTurn(owner, { key: 'b1', at: '2026-10-02T09:00:00Z', user: co.carol, team: co.teamA, usage: [[OPUS, 'high', 10_000_000, 0, 0, 0]] });
+      await addTurn(owner, { key: 'b2', at: '2026-10-05T09:00:00Z', stamp: AFTER_NOW, user: co.carol, team: co.teamA, usage: [[OPUS, 'high', 10_000_000, 0, 0, 0]] });
       // team B: 500k tokens = 50 %, and a September turn that must not count
-      await addTurn(owner, co.companyId, { key: 'b3', at: '2026-10-05T08:00:00Z', stamp: AFTER_NOW, user: co.dave, team: co.teamB, usage: [[OPUS, 'high', 300_000, 200_000, 0, 0]] });
-      await addTurn(owner, co.companyId, { key: 'b4', at: '2026-09-30T08:00:00Z', user: co.dave, team: co.teamB, usage: [[OPUS, 'high', 900_000, 0, 0, 0]] });
+      await addTurn(owner, { key: 'b3', at: '2026-10-05T08:00:00Z', stamp: AFTER_NOW, user: co.dave, team: co.teamB, usage: [[OPUS, 'high', 300_000, 200_000, 0, 0]] });
+      await addTurn(owner, { key: 'b4', at: '2026-09-30T08:00:00Z', user: co.dave, team: co.teamB, usage: [[OPUS, 'high', 900_000, 0, 0, 0]] });
       await runRollups(makeCtx());
 
       const mails: MailMessage[] = [];
       const c = makeCtx({ mails });
       expect(await runBudgets(c)).toEqual({ budgets: 2, sent: 1, failed: 0 });
-      // recipients: company admin alice + team A lead bob, individually, de-duplicated
+      // recipients: admin alice + team A lead bob, individually, de-duplicated
       expect(mails.map((m) => m.to).sort()).toEqual(['alice@budgets.test', 'bob@budgets.test']);
       expect(mails[0]!.subject).toContain('Budget at 80 %');
+      expect(mails[0]!.subject).toContain('(Co budgets)'); // mails name the deployment
       expect(mails[0]!.text).toContain('$80.00 of $100.00');
       expect(mails[0]!.text).toContain('https://obs.test/overview');
       const marks = () => rows<{ p: string; n80: boolean; n100: boolean }>(sql`select notified_period::text p, notified_80_at is not null n80, notified_100_at is not null n100 from budgets where id = ${budgetId}`).then((r) => r[0]!);
@@ -506,7 +533,7 @@ describe('worker jobs against Postgres', () => {
       expect(mails).toHaveLength(2);
 
       // cross 100 %
-      await addTurn(owner, co.companyId, { key: 'b5', at: '2026-10-05T10:00:00Z', stamp: AFTER_NOW, user: co.carol, team: co.teamA, usage: [[OPUS, 'high', 5_000_000, 0, 0, 0]] });
+      await addTurn(owner, { key: 'b5', at: '2026-10-05T10:00:00Z', stamp: AFTER_NOW, user: co.carol, team: co.teamA, usage: [[OPUS, 'high', 5_000_000, 0, 0, 0]] });
       mails.length = 0;
       expect(await runBudgets(c)).toMatchObject({ sent: 1 });
       expect(mails[0]!.subject).toContain('Budget reached');
@@ -520,7 +547,7 @@ describe('worker jobs against Postgres', () => {
       expect(await marks()).toEqual({ p: '2026-11-01', n80: false, n100: false });
 
       // SMTP failure: the claim is released so the next pass retries
-      await addTurn(owner, co.companyId, { key: 'b6', at: '2026-11-02T09:00:00Z', stamp: '2026-11-02T12:01:00Z', user: co.carol, team: co.teamA, usage: [[OPUS, 'high', 30_000_000, 0, 0, 0]] });
+      await addTurn(owner, { key: 'b6', at: '2026-11-02T09:00:00Z', stamp: '2026-11-02T12:01:00Z', user: co.carol, team: co.teamA, usage: [[OPUS, 'high', 30_000_000, 0, 0, 0]] });
       const failing = makeCtx({ now: new Date('2026-11-02T12:00:00Z'), failMail: true });
       expect(await runBudgets(failing)).toMatchObject({ sent: 0, failed: 1 });
       expect(await marks()).toEqual({ p: '2026-11-01', n80: false, n100: false });
@@ -529,47 +556,43 @@ describe('worker jobs against Postgres', () => {
       expect(await marks()).toEqual({ p: '2026-11-01', n80: true, n100: true });
     });
 
-    it('skips plans without budgets and suspended companies, and mails the user for a user budget', async (ctx) => {
+    it('evaluates every budget (no plan caps) and mails only the user for a user budget in aggregates-only mode', async (ctx) => {
       if (skip) return ctx.skip();
-      const free = await seedCompany(owner, { slug: 'free-budgets', plan: 'free' });
-      await addBudget(owner, free.companyId, { teamId: free.teamA, kind: 'tokens', limit: 10 });
-      await addTurn(owner, free.companyId, { key: 'fb', at: '2026-10-05T09:00:00Z', stamp: AFTER_NOW, user: free.carol, team: free.teamA, usage: [[OPUS, 'high', 100, 0, 0, 0]] });
-      const solo = await seedCompany(owner, { slug: 'user-budget', plan: 'business' });
-      await addBudget(owner, solo.companyId, { userId: solo.carol, kind: 'tokens', limit: 1000 });
-      await addTurn(owner, solo.companyId, { key: 'ub', at: '2026-10-05T09:00:00Z', stamp: AFTER_NOW, user: solo.carol, team: solo.teamA, usage: [[OPUS, 'high', 900, 0, 0, 0]] });
+      const x = await seedDeployment(owner, { slug: 'user-budget' });
+      await addBudget(owner, { userId: x.carol, kind: 'tokens', limit: 1000 });
+      await addTurn(owner, { key: 'ub', at: '2026-10-05T09:00:00Z', stamp: AFTER_NOW, user: x.carol, team: x.teamA, usage: [[OPUS, 'high', 900, 0, 0, 0]] });
       // another user's usage in the same team must not count for carol
-      await addTurn(owner, solo.companyId, { key: 'ub2', at: '2026-10-05T09:30:00Z', stamp: AFTER_NOW, user: solo.bob, team: solo.teamA, usage: [[OPUS, 'high', 5000, 0, 0, 0]] });
+      await addTurn(owner, { key: 'ub2', at: '2026-10-05T09:30:00Z', stamp: AFTER_NOW, user: x.bob, team: x.teamA, usage: [[OPUS, 'high', 5000, 0, 0, 0]] });
       const mails: MailMessage[] = [];
-      await runBudgets(makeCtx({ mails }));
-      expect(mails.map((m) => m.to).filter((t) => t.endsWith('@free-budgets.test'))).toEqual([]);
+      expect(await runBudgets(makeCtx({ mails }))).toEqual({ budgets: 1, sent: 1, failed: 0 });
       // user budget in aggregates-only mode (default): only carol herself, never the admins (ADR-0008)
-      expect(mails.map((m) => m.to).filter((t) => t.endsWith('@user-budget.test')).sort()).toEqual(['carol@user-budget.test']);
+      expect(mails.map((m) => m.to)).toEqual(['carol@user-budget.test']);
     });
 
     it('sends user-budget mails with a person\'s usage to admins and leads only in full visibility mode', async (ctx) => {
       if (skip) return ctx.skip();
-      const mk = async (slug: string, visibility: 'aggregates-only' | 'full') => {
-        const x = await seedCompany(owner, { slug, plan: 'team', visibility });
+      const run = async (slug: string, visibility: 'aggregates-only' | 'full') => {
+        const x = await seedDeployment(owner, { slug, visibility });
         // a tiny user budget for dave, scoped to his team as well, and his usage
-        await addBudget(owner, x.companyId, { userId: x.dave, teamId: x.teamB, kind: 'cost', limit: 0.01 });
-        await ownerTx(owner, (tx) => tx.execute(sql`insert into team_memberships (company_id, team_id, user_id, role) values (${x.companyId}, ${x.teamB}, ${x.bob}, 'lead')`));
-        await addTurn(owner, x.companyId, { key: `${slug}-d`, at: '2026-10-05T09:00:00Z', stamp: AFTER_NOW, user: x.dave, team: x.teamB, usage: [[OPUS, 'high', 1_000_000, 0, 0, 0]] });
+        await addBudget(owner, { userId: x.dave, teamId: x.teamB, kind: 'cost', limit: 0.01 });
+        await ownerTx(owner, (tx) => tx.execute(sql`insert into team_memberships (team_id, user_id, role) values (${x.teamB}, ${x.bob}, 'lead')`));
+        await addTurn(owner, { key: `${slug}-d`, at: '2026-10-05T09:00:00Z', stamp: AFTER_NOW, user: x.dave, team: x.teamB, usage: [[OPUS, 'high', 1_000_000, 0, 0, 0]] });
+        const mails: MailMessage[] = [];
+        await runBudgets(makeCtx({ mails }));
+        return mails;
       };
-      await mk('vis-agg', 'aggregates-only');
-      await mk('vis-full', 'full');
-      const mails: MailMessage[] = [];
-      await runBudgets(makeCtx({ mails }));
-      const to = (domain: string) => mails.filter((m) => m.to.endsWith(domain));
-      expect(to('@vis-agg.test').map((m) => m.to)).toEqual(['dave@vis-agg.test']);
-      expect(to('@vis-agg.test')[0]!.text).toContain('$4.00');
-      expect(to('@vis-full.test').map((m) => m.to).sort()).toEqual(['alice@vis-full.test', 'bob@vis-full.test', 'dave@vis-full.test']);
+      const agg = await run('vis-agg', 'aggregates-only');
+      expect(agg.map((m) => m.to)).toEqual(['dave@vis-agg.test']);
+      expect(agg[0]!.text).toContain('$4.00');
+      const full = await run('vis-full', 'full');
+      expect(full.map((m) => m.to).sort()).toEqual(['alice@vis-full.test', 'bob@vis-full.test', 'dave@vis-full.test']);
     });
 
     it('counts only this month up to now + 1 day: future-dated turns (clock skew, bad clients) do not count', async (ctx) => {
       if (skip) return ctx.skip();
-      const x = await seedCompany(owner, { slug: 'future', plan: 'team' });
+      const x = await seedDeployment(owner, { slug: 'future' });
       const at = (key: string, iso: string, input: number) =>
-        addTurn(owner, x.companyId, { key, at: iso, user: x.carol, team: x.teamA, usage: [[OPUS, 'high', input, 0, 0, 0]] });
+        addTurn(owner, { key, at: iso, user: x.carol, team: x.teamA, usage: [[OPUS, 'high', input, 0, 0, 0]] });
       await at('f1', '2026-10-05T09:00:00Z', 100);
       await at('f2', '2026-10-06T06:00:00Z', 10); // 18 h ahead of NOW: tolerated skew
       await at('f3', '2026-10-09T09:00:00Z', 1000); // days ahead
@@ -577,69 +600,46 @@ describe('worker jobs against Postgres', () => {
       await at('f5', '2099-01-01T00:00:00Z', 123_456);
       await at('f6', '2026-10-31T23:30:00Z', 1);
       await at('f7', '2026-11-01T00:10:00Z', 100_000); // next month, though within the skew allowance at month end
-      const scope = { companyId: x.companyId, teamId: x.teamA, userId: null };
+      const scope = { teamId: x.teamA, userId: null };
       const sum = (u: Array<{ input: number }>) => u.reduce((a, r) => a + r.input, 0);
       expect(sum(await monthToDate(makeCtx(), scope, '2026-10-01', '2026-10-04'))).toBe(110);
       expect(sum(await monthToDate(makeCtx({ now: new Date('2026-10-31T23:00:00Z') }), scope, '2026-10-01', '2026-10-30'))).toBe(1);
     });
   });
 
-  describe('company memberships (ADR-0022)', () => {
+  describe('memberships (ADR-0028)', () => {
     const emailsOf = (mails: MailMessage[]) => mails.map((m) => m.to).sort();
-    const setRole = (companyId: string, userId: string, role: 'admin' | 'member') =>
-      ownerTx(owner, (tx) => tx.execute(sql`update company_memberships set company_role = ${role}::company_role where company_id = ${companyId}::uuid and user_id = ${userId}::uuid`));
+    const setRole = (userId: string, role: 'admin' | 'member') =>
+      ownerTx(owner, (tx) => tx.execute(sql`update memberships set role = ${role}::member_role where user_id = ${userId}::uuid`));
 
-    it('mails a budget only to the admins of its own company, never to an admin of another company who is a member here', async (ctx) => {
+    it('resolves budget recipients through memberships.role and team leads; service users are never recipients', async (ctx) => {
       if (skip) return ctx.skip();
-      const a = await seedCompany(owner, { slug: 'mm-a', plan: 'business' });
-      const b = await seedCompany(owner, { slug: 'mm-b', plan: 'business' });
-      // the identity alice@mm-a.test is an admin of A and an ordinary member of B
-      await addMembership(owner, a.alice, b.companyId, 'member', b.teamA);
-      expect(await recipients(makeCtx(), { companyId: b.companyId, teamId: null, userId: null, visibility: 'aggregates-only' })).toEqual(['alice@mm-b.test']);
-      expect(await recipients(makeCtx(), { companyId: a.companyId, teamId: null, userId: null, visibility: 'aggregates-only' })).toEqual(['alice@mm-a.test']);
-      // a user budget on the shared identity in B, full visibility: the identity is still a member of B, so it gets it, as does B's admin
-      expect(await recipients(makeCtx(), { companyId: b.companyId, teamId: null, userId: a.alice, visibility: 'full' })).toEqual(['alice@mm-a.test', 'alice@mm-b.test']);
-      // a user who is not a member of the company is not a recipient of that company's user budget
-      expect(await recipients(makeCtx(), { companyId: b.companyId, teamId: null, userId: a.bob, visibility: 'aggregates-only' })).toEqual([]);
-
-      await addBudget(owner, b.companyId, { teamId: b.teamA, kind: 'tokens', limit: 1000 });
-      await addTurn(owner, b.companyId, { key: 'mm-b1', at: '2026-10-05T09:00:00Z', stamp: AFTER_NOW, user: b.carol, team: b.teamA, usage: [[OPUS, 'high', 850, 0, 0, 0]] });
-      const mails: MailMessage[] = [];
-      await runBudgets(makeCtx({ mails }));
-      const mine = mails.filter((m) => m.to.endsWith('@mm-b.test') || m.to === 'alice@mm-a.test');
-      expect(emailsOf(mine)).toEqual(['alice@mm-b.test', 'bob@mm-b.test']); // B's admin and the lead of team A; never alice@mm-a.test
-    });
-
-    it('the runaway digest of an aggregates-only company reaches its own admins only, resolved through memberships', async (ctx) => {
-      if (skip) return ctx.skip();
-      const a = await seedCompany(owner, { slug: 'mm-run-a' });
-      const b = await seedCompany(owner, { slug: 'mm-run-b' });
-      await addMembership(owner, a.alice, b.companyId, 'member', b.teamA);
-      await addTurn(owner, b.companyId, { key: 'mm-huge', at: '2026-10-05T10:00:00Z', user: b.dave, team: b.teamB, usage: [[OPUS, 'high', 30_000_000, 0, 0, 0]] });
-      expect(await detectRunaways(makeCtx())).toBeGreaterThanOrEqual(1);
-      const mails: MailMessage[] = [];
-      await sendRunawayDigests(makeCtx({ mails }));
-      const ours = mails.filter((m) => /@mm-run-[ab]\.test$/.test(m.to) || m.to === 'alice@mm-run-a.test');
-      expect(emailsOf(ours)).toEqual(['alice@mm-run-b.test', 'dave@mm-run-b.test']);
+      const x = await seedDeployment(owner, { slug: 'mm-roles' });
+      await addServiceUser(owner, 'ci-bot', x.teamA);
+      expect(await recipients(makeCtx(), { teamId: null, userId: null }, 'aggregates-only')).toEqual(['alice@mm-roles.test']);
+      expect(await recipients(makeCtx(), { teamId: x.teamA, userId: null }, 'aggregates-only')).toEqual(['alice@mm-roles.test', 'bob@mm-roles.test']);
+      await setRole(x.dave, 'admin');
+      expect(await recipients(makeCtx(), { teamId: x.teamA, userId: null }, 'aggregates-only')).toEqual(['alice@mm-roles.test', 'bob@mm-roles.test', 'dave@mm-roles.test']);
+      expect(await recipients(makeCtx(), { teamId: null, userId: x.carol }, 'full')).toEqual(['alice@mm-roles.test', 'carol@mm-roles.test', 'dave@mm-roles.test']);
     });
 
     it('a removed member is not mailed: not for a team budget, not in the runaway digest', async (ctx) => {
       if (skip) return ctx.skip();
-      const x = await seedCompany(owner, { slug: 'mm-removed', plan: 'business' });
-      await setRole(x.companyId, x.bob, 'admin'); // bob: admin of the company and lead of team A
-      await addBudget(owner, x.companyId, { teamId: x.teamA, kind: 'tokens', limit: 1000 });
-      const budgetScope = { companyId: x.companyId, teamId: x.teamA, userId: null, visibility: 'aggregates-only' as const };
-      expect(await recipients(makeCtx(), budgetScope)).toEqual(['alice@mm-removed.test', 'bob@mm-removed.test']);
-      await addTurn(owner, x.companyId, { key: 'rm-huge', at: '2026-10-05T10:00:00Z', user: x.dave, team: x.teamB, usage: [[OPUS, 'high', 30_000_000, 0, 0, 0]] });
-      await removeMembership(owner, x.bob, x.companyId);
+      const x = await seedDeployment(owner, { slug: 'mm-removed' });
+      await setRole(x.bob, 'admin'); // bob: admin and lead of team A
+      await addBudget(owner, { teamId: x.teamA, kind: 'tokens', limit: 1000 });
+      const budgetScope = { teamId: x.teamA, userId: null };
+      expect(await recipients(makeCtx(), budgetScope, 'aggregates-only')).toEqual(['alice@mm-removed.test', 'bob@mm-removed.test']);
+      await addTurn(owner, { key: 'rm-huge', at: '2026-10-05T10:00:00Z', user: x.dave, team: x.teamB, usage: [[OPUS, 'high', 30_000_000, 0, 0, 0]] });
+      await removeMembership(owner, x.bob);
 
-      expect(await recipients(makeCtx(), budgetScope)).toEqual(['alice@mm-removed.test']);
-      await addTurn(owner, x.companyId, { key: 'rm-b1', at: '2026-10-05T09:00:00Z', stamp: AFTER_NOW, user: x.carol, team: x.teamA, usage: [[OPUS, 'high', 850, 0, 0, 0]] });
+      expect(await recipients(makeCtx(), budgetScope, 'aggregates-only')).toEqual(['alice@mm-removed.test']);
+      await addTurn(owner, { key: 'rm-b1', at: '2026-10-05T09:00:00Z', stamp: AFTER_NOW, user: x.carol, team: x.teamA, usage: [[OPUS, 'high', 850, 0, 0, 0]] });
       await detectRunaways(makeCtx());
       const mails: MailMessage[] = [];
       await runBudgets(makeCtx({ mails }));
       await sendRunawayDigests(makeCtx({ mails }));
-      const ours = emailsOf(mails.filter((m) => m.to.endsWith('@mm-removed.test')));
+      const ours = emailsOf(mails);
       expect(ours).toContain('alice@mm-removed.test');
       expect(ours).not.toContain('bob@mm-removed.test');
       // the identity and his raw telemetry are still there (ADR-0022): only the mail routing changed
@@ -648,35 +648,15 @@ describe('worker jobs against Postgres', () => {
 
     it('the user of a runaway turn who was removed before the digest is neither mailed nor named', async (ctx) => {
       if (skip) return ctx.skip();
-      const x = await seedCompany(owner, { slug: 'mm-gone', plan: 'business' });
-      await addTurn(owner, x.companyId, { key: 'gone-huge', at: '2026-10-05T10:00:00Z', user: x.dave, team: x.teamB, usage: [[OPUS, 'high', 30_000_000, 0, 0, 0]] });
+      const x = await seedDeployment(owner, { slug: 'mm-gone' });
+      await addTurn(owner, { key: 'gone-huge', at: '2026-10-05T10:00:00Z', user: x.dave, team: x.teamB, usage: [[OPUS, 'high', 30_000_000, 0, 0, 0]] });
       await detectRunaways(makeCtx());
-      await removeMembership(owner, x.dave, x.companyId);
+      await removeMembership(owner, x.dave);
       const mails: MailMessage[] = [];
       await sendRunawayDigests(makeCtx({ mails }));
-      const ours = mails.filter((m) => m.to.endsWith('@mm-gone.test'));
-      expect(ours.length).toBeGreaterThan(0); // the admins' digest still goes out
-      expect(emailsOf(ours)).not.toContain('dave@mm-gone.test');
-      expect(ours.map((m) => m.text).join('\n')).not.toMatch(/dave/i);
-    });
-
-    it('runaway baselines never mix companies: the same person is judged against their history in the turn\'s own company', async (ctx) => {
-      if (skip) return ctx.skip();
-      const a = await seedCompany(owner, { slug: 'mm-base-a' });
-      const b = await seedCompany(owner, { slug: 'mm-base-b' });
-      await addMembership(owner, a.dave, b.companyId, 'member', b.teamB); // dave@mm-base-a.test is also a member of B
-      // a high normal in A (100k tokens per turn), a low one in B (1k per turn)
-      for (let i = 0; i < 50; i++) {
-        const at = new Date(NOW.getTime() - (2 + i * 0.5) * 86_400_000).toISOString();
-        await addTurn(owner, a.companyId, { key: `base-a-${i}`, at, stamp: '2026-09-01T00:00:00Z', user: a.dave, team: a.teamB, usage: [[OPUS, 'high', 100_000, 0, 0, 0]] });
-        await addTurn(owner, b.companyId, { key: `base-b-${i}`, at, stamp: '2026-09-01T00:00:00Z', user: a.dave, team: b.teamB, usage: [[OPUS, 'high', 1000, 0, 0, 0]] });
-      }
-      // 10k tokens: 10x his B normal (a runaway there), a tenth of his A normal (would not be one if the baselines were mixed)
-      await addTurn(owner, b.companyId, { key: 'base-b-big', at: '2026-10-05T10:00:00Z', user: a.dave, team: b.teamB, usage: [[OPUS, 'high', 10_000, 0, 0, 0]] });
-      await addTurn(owner, b.companyId, { key: 'base-b-ok', at: '2026-10-05T10:30:00Z', user: a.dave, team: b.teamB, usage: [[OPUS, 'high', 1200, 0, 0, 0]] });
-      await detectRunaways(makeCtx());
-      expect((await alerts(b.companyId)).map((r) => r.external_id)).toEqual(['t-base-b-big']);
-      expect(await alerts(a.companyId)).toEqual([]);
+      expect(mails.length).toBeGreaterThan(0); // the admins' digest still goes out
+      expect(emailsOf(mails)).not.toContain('dave@mm-gone.test');
+      expect(mails.map((m) => m.text).join('\n')).not.toMatch(/dave/i);
     });
   });
 });

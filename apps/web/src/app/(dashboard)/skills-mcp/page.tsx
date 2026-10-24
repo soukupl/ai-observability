@@ -45,7 +45,7 @@ const IMPACT_COLUMNS: Column[] = [
   { key: 'durationDelta', header: 'Time Δ', kind: 'percent', align: 'right' },
   { key: 'note', header: '', kind: 'text', align: 'left' },
 ];
-const USERS_COLUMN: Column = { key: 'users', header: 'Users', kind: 'int', align: 'right', hint: 'Distinct users (unverified company-token turns have none).' };
+const USERS_COLUMN: Column = { key: 'users', header: 'Users', kind: 'int', align: 'right', hint: 'Distinct users (turns sent with the retired company tokens have none).' };
 
 const th = 'px-2 py-1.5 font-medium';
 /** `1 call`, `3 calls` */
@@ -61,7 +61,7 @@ export default async function SkillsMcpPage({ searchParams }: { searchParams: Se
     impact: await getSkillImpact(ctx, filters),
   }));
   // A user count only means something to someone who sees more than their own turns.
-  const showUsers = user.companyRole === 'admin' || isLead(user);
+  const showUsers = user.role === 'admin' || isLead(user);
   const t = totals(data);
   const skillSeries = daySeries(data, 'skill');
   const mcpSeries = daySeries(data, 'mcp');
@@ -82,7 +82,7 @@ export default async function SkillsMcpPage({ searchParams }: { searchParams: Se
       )}
       {anyHashed(data) && (
         <p className="text-xs text-zinc-500 dark:text-zinc-400" role="note">
-          Your company hashes project names, so skill, MCP server and tool names are hashed on the developer&apos;s machine too.
+          This deployment hashes project names, so skill, MCP server and tool names are hashed on the developer&apos;s machine too.
         </p>
       )}
       {empty ? (

@@ -25,7 +25,7 @@ export const tokenColumns = () => ({
 
 export type PhasesMs = Partial<Record<string, number>>;
 export type ToolCounts = Partial<Record<string, number>>;
-/** Skill name → uses by source (plain or `sha256:` names, company project-naming mode). */
+/** Skill name → uses by source (plain or `sha256:` names, the deployment's project-naming mode). */
 export type SkillCounts = Record<string, { model: number; user: number }>;
 /** MCP server → tool → calls (plain or `sha256:` names). */
 export type McpCounts = Record<string, Record<string, number>>;

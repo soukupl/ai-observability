@@ -11,6 +11,13 @@ export async function rows<T>(tx: Tx, q: SQL): Promise<T[]> {
 export const num = (v: unknown): number => (v === null || v === undefined ? 0 : Number(v));
 export const numOrNull = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
 
+/**
+ * The display name of a user row aliased `alias`: the name, else the e-mail; a service user (users.kind = 'service',
+ * ADR-0029: CI, bots, shared machines) reads "<name> (service)". Null when the row is not readable (a former member).
+ */
+export const userLabel = (alias: string): SQL =>
+  sql.raw(`case when ${alias}.kind = 'service' then coalesce(${alias}.name, 'service user') || ' (service)' else coalesce(${alias}.name, ${alias}.email) end`);
+
 export function where(conds: SQL[]): SQL {
   return conds.length ? sql`where ${sql.join(conds, sql` and `)}` : sql``;
 }

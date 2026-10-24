@@ -17,14 +17,14 @@ export interface SkillImpactResult {
 /** The body of agg_skill_impact (migration 0008) over a turn scope: the direct raw path. */
 function rawSql(scope: SQL): SQL {
   return sql`with scope as (
-      select t.id, t.company_id, t.project_id, coalesce(t.model, 'unknown') as model, t.outcome, t.duration_ms, t.skills,
+      select t.id, t.project_id, coalesce(t.model, 'unknown') as model, t.outcome, t.duration_ms, t.skills,
         t.input_tokens + t.output_tokens + t.cache_read_tokens + t.cache_write_tokens as tokens,
         (t.started_at at time zone 'UTC')::date as day
       from (${scope}) t
     ), used as (
       select distinct x.id as turn_id, s.key as skill
       from scope x
-      cross join lateral (select x.skills union all select r.skills from runs r where r.turn_id = x.id and r.company_id = x.company_id) u
+      cross join lateral (select x.skills union all select r.skills from runs r where r.turn_id = x.id) u
       cross join lateral jsonb_each(u.skills) s
     ), cells as (
       select distinct u.skill, x.project_id, x.model from used u join scope x on x.id = u.turn_id
@@ -35,8 +35,8 @@ function rawSql(scope: SQL): SQL {
       select x.id,
         case when bool_or(c.usd is null and u.input_tokens + u.output_tokens + u.cache_read_tokens + u.cache_write_tokens > 0)
              then null else coalesce(sum(c.usd), 0) end as usd
-      from (select distinct id, company_id, day from pairs) x
-      join usage u on u.turn_id = x.id and u.company_id = x.company_id
+      from (select distinct id, day from pairs) x
+      join usage u on u.turn_id = x.id
       cross join lateral (select estimate_cost_usd(u.model, x.day, u.input_tokens, u.output_tokens,
         u.cache_read_tokens, u.cache_write_tokens) as usd) c
       group by x.id
@@ -54,7 +54,7 @@ function rawSql(scope: SQL): SQL {
 function rollupSql(ctx: QueryCtx, d: Dims): SQL {
   const conds = (alias: string): SQL[] => {
     const a = sql.raw(alias);
-    const c: SQL[] = [sql`${a}.company_id = ${ctx.viewer.companyId}::uuid`, sql`${a}.outcome_split`, sql`${a}.day >= ${d.fromDay}::date`, sql`${a}.day < ${d.toDay}::date`];
+    const c: SQL[] = [sql`${a}.outcome_split`, sql`${a}.day >= ${d.fromDay}::date`, sql`${a}.day < ${d.toDay}::date`];
     if (d.teamId) c.push(sql`${a}.team_id = ${d.teamId}::uuid`);
     if (d.projectId) c.push(sql`${a}.project_id = ${d.projectId}::uuid`);
     if (d.userId) c.push(sql`${a}.user_id = ${d.userId}::uuid`);

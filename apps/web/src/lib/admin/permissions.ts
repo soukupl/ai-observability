@@ -1,36 +1,27 @@
 import type { Actor } from './types';
 
 /**
- * Pure permission rules of the admin console (BRIEF §4). They decide what the UI offers and guard
- * every server action; RLS enforces the same rules again in the database (ADR-0006).
+ * Pure permission rules of the admin console (BRIEF §4, ADR-0029 T8). They decide what the UI offers and guard
+ * every server action; RLS enforces the same rules again in the database (ADR-0006, ADR-0028).
  */
-export const isAdmin = (a: Actor): boolean => a.companyRole === 'admin';
+export const isAdmin = (a: Actor): boolean => a.role === 'admin';
 export const ledTeamIds = (a: Actor): string[] => a.teams.filter((t) => t.role === 'lead').map((t) => t.id);
 export const isLead = (a: Actor): boolean => ledTeamIds(a).length > 0;
 export const leadsTeam = (a: Actor, teamId: string): boolean => ledTeamIds(a).includes(teamId);
 export const memberOf = (a: Actor, teamId: string): boolean => a.teams.some((t) => t.id === teamId);
 
-/** /admin is for admins; leads reach the token and budget pages only. */
+/** /admin is for admins; leads reach only the budgets page (read-only, their teams). */
 export const canEnterAdmin = (a: Actor): boolean => isAdmin(a) || isLead(a);
 
-/**
- * Token kinds (ADR-0022, brief Q2/Q9). User tokens: anyone, for themselves, in the active company.
- * Company tokens (CI, bots, MDM rollout): company admins and leads of any team.
- */
-export function canCreateToken(a: Actor, kind: 'user' | 'company'): boolean {
-  return kind === 'user' || isAdmin(a) || isLead(a);
+/** Users revoke their own tokens; admins revoke every token, person and service (ADR-0029 T8, ADR-0022 D6). */
+export function canRevokeToken(a: Actor, t: { userId: string }): boolean {
+  return isAdmin(a) || t.userId === a.id;
 }
 
-export interface TokenOwner {
-  kind: 'user' | 'company';
-  userId: string | null;
-}
-
-/** Admins: every token of the company (D6). Own user tokens. Company tokens: leads. */
-export function canRevokeToken(a: Actor, t: TokenOwner): boolean {
-  if (isAdmin(a)) return true;
-  if (t.kind === 'user') return t.userId === a.id;
-  return isLead(a);
+/** Admins create tokens only for service users; a person's token is created by that person (ADR-0029 T8). */
+export function canCreateTokenFor(a: Actor, target: { id: string; kind: 'person' | 'service' }): boolean {
+  if (target.id === a.id) return true;
+  return isAdmin(a) && target.kind === 'service';
 }
 
 export const canManageBudgets = isAdmin;

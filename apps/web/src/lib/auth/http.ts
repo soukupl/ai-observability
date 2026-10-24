@@ -1,9 +1,8 @@
 import { NextResponse, type NextRequest } from 'next/server';
-import { appUrl, AuthConfigError, reportAuthConfigError, SESSION_COOKIE, sessionSecret, SIGNUP_COOKIE, SIGNUP_TTL_MS, trustedProxyHops } from './config';
-import { expiredCookieOptions, sessionCookieOptions, signupCookieOptions } from './cookies';
+import { appUrl, AuthConfigError, reportAuthConfigError, SESSION_COOKIE, trustedProxyHops } from './config';
+import { sessionCookieOptions } from './cookies';
 import type { LoginResult } from './login';
 import { isSameOriginRequest } from './origin';
-import { safeNext, signPayload } from './tokens';
 
 /** Helpers shared by the /api/auth/* route handlers. */
 
@@ -56,16 +55,16 @@ export function authFailure(err: unknown, what: string, fallback = 'failed', nex
   return loginError(fallback, next);
 }
 
-/** Turns a login outcome into the redirect: session cookie, sign-up form, or /login?error=. */
-export function respondToLogin(result: LoginResult, next: string | null): NextResponse {
-  if (result.kind === 'error') return loginError(result.code);
-  if (result.kind === 'signup') {
-    const res = redirectTo('/signup');
-    res.cookies.set(SIGNUP_COOKIE, signPayload({ ...result.pending, next }, sessionSecret(), SIGNUP_TTL_MS), signupCookieOptions());
-    return res;
+/**
+ * Turns a login outcome into the redirect: the session cookie and the landing path (`next`, or the one-time welcome
+ * notice after joining), the refusal page for an e-mail no rule admits, or /login?error=.
+ */
+export function respondToLogin(result: LoginResult): NextResponse {
+  if (result.kind === 'error') {
+    if (result.code === 'not-invited' || result.code === 'removed') return redirectTo(`/login/refused?reason=${result.code}`);
+    return loginError(result.code);
   }
-  const res = redirectTo(safeNext(next) ?? result.landing);
+  const res = redirectTo(result.landing);
   res.cookies.set(SESSION_COOKIE, result.token, sessionCookieOptions());
-  res.cookies.set(SIGNUP_COOKIE, '', expiredCookieOptions());
   return res;
 }

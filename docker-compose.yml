@@ -1,4 +1,4 @@
-# Reference deployment (BRIEF §11, ADR-0010): dev, SaaS and self-hosting.
+# Reference deployment (BRIEF §11, ADR-0010): development and self-hosting, one deployment per company.
 #   Full stack:  docker compose up --build
 #   Dev deps:    docker compose --profile dev up postgres mailpit   (then `pnpm dev`)
 name: ai-obs

@@ -5,11 +5,10 @@ export const DB_ROLES = {
   web: 'app_web',
   ingest: 'app_ingest',
   worker: 'app_worker',
-  platform: 'app_platform',
 } as const;
 export type DbRoleKind = keyof typeof DB_ROLES;
 
-/** DATABASE_URL_WEB / _INGEST / _WORKER / _PLATFORM, falling back to DATABASE_URL (dev). */
+/** DATABASE_URL_WEB / _INGEST / _WORKER, falling back to DATABASE_URL (dev). */
 export function urlFor(kind: DbRoleKind, env: NodeJS.ProcessEnv = process.env): string {
   const url = env[`DATABASE_URL_${kind.toUpperCase()}`] || env.DATABASE_URL;
   if (!url) throw new Error(`DATABASE_URL_${kind.toUpperCase()} (or DATABASE_URL) is not set`);

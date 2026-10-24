@@ -119,7 +119,7 @@ export async function buildExportTable(ctx: QueryCtx, view: ExportView, f: Filte
     }
     case 'skills-mcp': {
       const r = await getSkillsMcp(ctx, f);
-      const withUsers = ctx.viewer.companyRole === 'admin' || isLead(ctx.viewer);
+      const withUsers = ctx.viewer.role === 'admin' || isLead(ctx.viewer);
       const users = (n: number): CsvCell[] => (withUsers ? [n] : []);
       const rel = (x: McpReliability): CsvCell[] => [x.errors, x.denied, x.latencyMs, ...x.buckets];
       const noRel: CsvCell[] = ['', '', '', '', '', '', '', ''];

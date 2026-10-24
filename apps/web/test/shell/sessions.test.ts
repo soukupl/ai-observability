@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { runs, turns, usage, type Database } from '@ai-obs/db';
+import { runs, turns, usage } from '@ai-obs/db';
 import { defaultFilters, type Filters } from '../../src/lib/filters';
 import {
   buildExportTable,
@@ -20,7 +20,7 @@ import {
 } from '../../src/lib/queries';
 import { outcomeMix, sessionGraph, sessionsListHref, toSessionTableRows } from '../../src/app/(dashboard)/sessions/_helpers';
 import { timelineGraph } from '../../src/app/(dashboard)/agents/timeline-view';
-import { asPerson, connect, dropShellDatabase, NOW, prepareShellDatabase, seedCompany, type Fixture, type Person } from './harness';
+import { asPerson, dropShellDatabase, NOW, prepareShellDatabase, seedDeployment, type Fixture, type Person } from './harness';
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -120,24 +120,23 @@ interface Seeded {
   s2Hid: string;
 }
 
-async function seedSessions(owner: Database, fx: Fixture): Promise<Seeded> {
-  return owner.transaction(async (tx) => {
+async function seedSessions(fx: Fixture): Promise<Seeded> {
+  return fx.owner.transaction(async (tx) => {
     await tx.execute(sql`set local role app_definer`);
-    const companyId = fx.id;
     const p = (k: string) => fx.people[k]!;
     const teamOf = (k: string) => (k === 'm2' ? fx.teams.t2! : fx.teams.t1!);
     const session = async (who: string, startedMs: number, opts: { endedMs?: number; reason?: string; project?: string | null; title?: string } = {}) => {
       const id = randomUUID();
       const hid = randomUUID();
       const projectId = opts.project === null ? null : fx.projects[opts.project ?? 'alpha']!;
-      await tx.execute(sql`insert into agent_sessions (id, company_id, team_id, user_id, project_id, external_id, harness, started_at, ended_at, end_reason, title, title_source)
-        values (${id}::uuid, ${companyId}::uuid, ${teamOf(who)}::uuid, ${p(who).id}::uuid, ${projectId}::uuid, ${`claude-code:${hid}`},
+      await tx.execute(sql`insert into agent_sessions (id, team_id, user_id, project_id, external_id, harness, started_at, ended_at, end_reason, title, title_source)
+        values (${id}::uuid, ${teamOf(who)}::uuid, ${p(who).id}::uuid, ${projectId}::uuid, ${`claude-code:${hid}`},
           'claude-code', ${new Date(startedMs).toISOString()}::timestamptz, ${opts.endedMs ? new Date(opts.endedMs).toISOString() : null}::timestamptz, ${opts.reason ?? null}, ${opts.title ?? null}, ${opts.title ? 'custom' : null})`);
       return { id, hid };
     };
     const turn = async (who: string, sessionId: string, startedMs: number, durationMs: number, outcome: 'success' | 'failed' | 'unknown', summary: string | null) => {
       const id = randomUUID();
-      const owner = { companyId, teamId: teamOf(who), userId: p(who).id };
+      const owner = { teamId: teamOf(who), userId: p(who).id };
       await tx.insert(turns).values({
         id, ...owner, attribution: 'verified', sessionId, projectId: fx.projects.alpha!, externalId: `sx-${id}`, harness: 'claude-code',
         model: 'claude-opus-5-5', effort: 'high', startedAt: new Date(startedMs), endedAt: new Date(startedMs + durationMs), durationMs,
@@ -151,7 +150,7 @@ async function seedSessions(owner: Database, fx: Fixture): Promise<Seeded> {
     };
     const run = async (who: string, turnId: string, startedMs: number, endedMs: number, over: Partial<typeof runs.$inferInsert> = {}) => {
       await tx.insert(runs).values({
-        id: randomUUID(), companyId, teamId: teamOf(who), userId: p(who).id, turnId, turnExternalId: `sx-${turnId}`, externalId: randomUUID(),
+        id: randomUUID(), teamId: teamOf(who), userId: p(who).id, turnId, turnExternalId: `sx-${turnId}`, externalId: randomUUID(),
         agentType: 'Explore', depth: 1, model: 'claude-opus-5-5', startedAt: new Date(startedMs), endedAt: new Date(endedMs),
         durationMs: endedMs - startedMs, inputTokens: 10, outputTokens: 1, outcome: 'success', mcp: { github: { search: 1 } }, ...over,
       });
@@ -181,25 +180,22 @@ async function seedSessions(owner: Database, fx: Fixture): Promise<Seeded> {
 }
 
 describe.skipIf(skipReason !== null)(skipReason ? `sessions view - SKIPPED: ${skipReason}` : 'sessions view (real Postgres)', () => {
-  let web: Database;
   let A: Fixture; // aggregates-only
   let B: Fixture; // full detail
   let SA: Seeded;
   let SB: Seeded;
 
   beforeAll(async () => {
-    const owner = connect();
-    A = await seedCompany(owner, 'sess-agg-co', 'aggregates-only');
-    B = await seedCompany(owner, 'sess-full-co', 'full');
-    SA = await seedSessions(owner, A);
-    SB = await seedSessions(owner, B);
-    web = connect('app_web');
+    A = await seedDeployment('sess-agg-co', 'aggregates-only');
+    B = await seedDeployment('sess-full-co', 'full');
+    SA = await seedSessions(A);
+    SB = await seedSessions(B);
   }, 120_000);
   afterAll(dropShellDatabase);
 
-  /** The fixture people carry no retention setting; give them the seeded company's 395 days. */
-  const withRetention = (p: Person): Person => ({ ...p, company: { settings: { ...p.company.settings, retentionDays: 395 } } });
-  const run = <T>(fx: Fixture, who: string, fn: (ctx: QueryCtx) => Promise<T>) => asPerson(web, withRetention(fx.people[who]!), (ctx) => fn(ctx));
+  /** The fixture people carry no retention setting; give them the seeded deployment's 395 days. */
+  const withRetention = (p: Person): Person => ({ ...p, deployment: { settings: { ...p.deployment.settings, retentionDays: 395 } } });
+  const run = <T>(fx: Fixture, who: string, fn: (ctx: QueryCtx) => Promise<T>) => asPerson(withRetention(fx.people[who]!), (ctx) => fn(ctx));
   const f = (over: Partial<Filters> = {}): Filters => ({ ...defaultFilters(), ...over });
   const ids = (rows: { id: string }[]) => rows.map((r) => r.id);
 

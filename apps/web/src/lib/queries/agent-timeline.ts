@@ -280,7 +280,7 @@ export async function getAgentTimeline(ctx: QueryCtx, f: Filters, sp: Record<str
               t.duration_ms, ${TOKEN_COLS('t.')}, t.outcome, t.summary, (t.user_id is not distinct from ${ctx.viewer.id}::uuid) as is_mine
             from turns t ${where([
               ...conds,
-              sql`(t.ended_at > ${fromIso}::timestamptz or exists (select 1 from runs r where r.turn_id = t.id and r.company_id = t.company_id
+              sql`(t.ended_at > ${fromIso}::timestamptz or exists (select 1 from runs r where r.turn_id = t.id
                 and r.started_at < ${toIso}::timestamptz and r.ended_at > ${fromIso}::timestamptz))`,
             ])}
             order by t.started_at, t.id limit ${TIMELINE_MAX_TURNS + 1}`,
@@ -289,7 +289,7 @@ export async function getAgentTimeline(ctx: QueryCtx, f: Filters, sp: Record<str
         ctx.tx,
         sql`select r.id, r.turn_id, r.parent_run_id, r.agent_type, r.agent_group, r.orchestration_id, r.stage_index, r.flow_key, r.depth, r.model,
               ${MS('r.started_at')} as started_ms, ${MS('r.ended_at')} as ended_ms, r.duration_ms, ${TOKEN_COLS('r.')}, r.outcome
-            from turns t join runs r on r.turn_id = t.id and r.company_id = t.company_id
+            from turns t join runs r on r.turn_id = t.id
             ${where([...conds, sql`r.started_at < ${toIso}::timestamptz`, sql`r.ended_at > ${fromIso}::timestamptz`])}
             order by r.started_at, r.id limit ${TIMELINE_MAX_RUNS + 1}`,
       ),
@@ -297,8 +297,8 @@ export async function getAgentTimeline(ctx: QueryCtx, f: Filters, sp: Record<str
       rows<Record<string, unknown>>(
         ctx.tx,
         sql`select l.from_run_id, l.to_run_id, l.kind
-            from turns t join runs r on r.turn_id = t.id and r.company_id = t.company_id
-              join run_links l on l.to_run_id = r.id and l.company_id = r.company_id
+            from turns t join runs r on r.turn_id = t.id
+              join run_links l on l.to_run_id = r.id
             ${where([...conds, sql`r.started_at < ${toIso}::timestamptz`, sql`r.ended_at > ${fromIso}::timestamptz`, sql`l.from_run_id is not null`])}
             order by r.started_at, r.id, l.from_run_id, l.kind limit ${TIMELINE_MAX_LINKS + 1}`,
       ),

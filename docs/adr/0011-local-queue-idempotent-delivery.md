@@ -1,6 +1,7 @@
 # ADR-0011: Local file queue with idempotent ingest
 
-- **Status:** Accepted; amended 2026-10-08 by [ADR-0022](0022-company-memberships-and-token-kinds.md) (see the amendment below)
+- **Status:** Accepted; amended 2026-10-08 by [ADR-0022](0022-company-memberships-and-token-kinds.md) and 2026-10-24 by
+  [ADR-0030](0030-project-dot-file-and-team-resolution.md) (see the amendments below)
 - **Date:** 2026-10-05
 - **Deciders:** Ladislav Soukup (owner); options proposed by Claude
 - **Tags:** collector, api, reliability
@@ -59,3 +60,12 @@ seen IDs and ignores duplicates. The queue is capped (~50 MB / 30 days, oldest d
   drops are counted. Delivery state and backoff are
   per token. The files written by the 0.1.x collector are a frozen stream: they are moved to `queue/dead/pre-upgrade/` by the first
   registration and never sent.
+
+## Amendment 2026-10-24 — streams keyed by server and team (ADR-0030)
+
+- **Decided by:** Ladislav Soukup (owner, grilling Q1-Q9 of 2026-10-24 and "go" on
+  `docs/briefs/single-deployment-per-user-tokens.md`); design by Claude Fable 5.1. The body and earlier amendments are kept as history.
+
+- A stream is keyed by `(project key, server endpoint, team slug | "")` (`queue/p/s-<id>/`); a session is pinned to its
+  stream at its first hook. Open and token-bound streams, `ai-obs use` and routing epochs are gone. Delivery state and
+  backoff are per server. Time a server spends blocked by 401 does not count against the 30-day age cap.

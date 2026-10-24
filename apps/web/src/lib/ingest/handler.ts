@@ -23,10 +23,15 @@ function error(status: number, message: string, headers: Record<string, string> 
   return Response.json({ error: message }, { status, headers: { ...NO_STORE, ...headers } });
 }
 
+/** 401 wording for a token that does not resolve (ADR-0029): the collector tells the user to log in again. */
+export const TOKEN_REJECTED = 'ingest token expired or revoked, run `ai-obs login`';
+/** 401 wording for the retired company (`aiobs_c_`) and team (`aiobs_t_`) tokens. */
+export const TOKEN_RETIRED = 'company and team tokens are no longer accepted, run `ai-obs login`';
+
 /**
  * Bearer token → pre-lookup guard → lookup_ingest_token → per-token rate limit.
- * 401 unknown, revoked or wrong-prefix token, or a user token whose membership was removed;
- * 429 limited; 403 suspended company.
+ * 401 for a missing, malformed, unknown, revoked or expired token, for a token whose user no longer holds a
+ * membership, and (explicitly, without a lookup) for the retired `aiobs_c_` / `aiobs_t_` prefixes; 429 limited.
  *
  * The per-token bucket is keyed by token_id and only taken after a successful lookup, so random
  * bearers can neither get a fresh bucket each nor evict real tokens' buckets. Invalid bearers are
@@ -37,8 +42,9 @@ export async function authenticate(
   deps: IngestDeps,
 ): Promise<{ ok: true; token: TokenContext } | { ok: false; response: Response }> {
   const bearer = parseBearer(request.headers.get('authorization'));
-  const unauthorized = () => error(401, 'invalid or revoked ingest token', { 'www-authenticate': 'Bearer' });
+  const unauthorized = (message = TOKEN_REJECTED) => error(401, message, { 'www-authenticate': 'Bearer' });
   if (!bearer) return { ok: false, response: unauthorized() };
+  if ('retired' in bearer) return { ok: false, response: unauthorized(TOKEN_RETIRED) };
 
   const hash = hashToken(bearer.token);
   const guard = deps.authGuard;
@@ -50,7 +56,7 @@ export async function authenticate(
   }
 
   const token = await lookupToken(deps.db, hash);
-  if (!token || token.kind !== bearer.kind) {
+  if (!token) {
     guard?.failed(ip, hash);
     return { ok: false, response: unauthorized() };
   }
@@ -59,7 +65,6 @@ export async function authenticate(
   if (!limit.ok) {
     return { ok: false, response: error(429, 'rate limit exceeded', { 'retry-after': String(limit.retryAfterSec) }) };
   }
-  if (token.companyStatus !== 'active') return { ok: false, response: error(403, 'company is suspended') };
   return { ok: true, token };
 }
 
@@ -74,8 +79,8 @@ export async function handleIngest(request: Request, deps: IngestDeps): Promise<
   const batch = validateBatch(body.json);
   if (!batch.ok) return error(400, `invalid batch: ${batch.error}`);
 
-  const result = batch.events.length
-    ? await withIngestContext(deps.db, auth.token.companyId, (tx) =>
+  const result: IngestResponse = batch.events.length
+    ? await withIngestContext(deps.db, auth.token.userId, (tx) =>
         processBatch(tx, auth.token, batch.header, batch.events),
       )
     : { accepted: 0, duplicates: 0, rejected: [] };
@@ -85,30 +90,33 @@ export async function handleIngest(request: Request, deps: IngestDeps): Promise<
 }
 
 /**
- * GET /api/v1/collector-config (BRIEF §5.1, §6, ADR-0022). Besides naming and version, it names the
- * token's company (the collector stores the token under `company.slug`) and, for a user token, the
- * user's e-mail (`user` is null for a company token). Cached privately for 5 minutes per token.
+ * GET /api/v1/collector-config (brief Appendix A, ADR-0029). Naming mode, project salt and minimum collector version
+ * as before, plus the deployment, the token's user, the teams they belong to (`ai-obs link` validates against them),
+ * their primary team and the token's expiry, label and source. Cached privately for 5 minutes per token.
  */
 export async function handleCollectorConfig(request: Request, deps: IngestDeps): Promise<Response> {
   const auth = await authenticate(request, deps);
   if (!auth.ok) return auth.response;
   const env = deps.env ?? process.env;
   const { token } = auth;
+  const teams = await rows<{ team_id: string; slug: string; name: string }>(
+    deps.db,
+    sql`select team_id, slug, name from ingest_user_teams(${token.userId}::uuid)`,
+  );
   const config: CollectorConfigResponse = {
     project_naming: token.projectNaming,
     min_collector_version: env.MIN_COLLECTOR_VERSION?.trim() || '0.0.0',
-    company: { name: token.company.name, slug: token.company.slug },
-    user: token.kind === 'user' && token.userEmail ? { email: token.userEmail } : null,
+    deployment: { name: token.deployment.name, slug: token.deployment.slug },
+    user: { email: token.userEmail, name: token.userName ?? token.userEmail ?? '', kind: token.userKind },
+    teams: teams.map((t) => ({ slug: t.slug, name: t.name })),
+    primary_team: teams.find((t) => t.team_id === token.primaryTeamId)?.slug ?? null,
+    token: {
+      expires_at: token.token.expiresAt ? token.token.expiresAt.toISOString() : null,
+      label: token.token.label,
+      source: token.token.source,
+    },
   };
-  // The company's project salt (SEC-11): the collector HMACs hashed project keys with it. Best effort:
-  // without it the collector falls back to plain SHA-256, so a read failure must not break the config.
-  try {
-    const salt = await withIngestContext(deps.db, token.companyId, async (tx) =>
-      (await rows<{ salt: string | null }>(tx, sql`select ingest_project_salt() as salt`))[0]?.salt,
-    );
-    if (salt) config.project_salt = salt;
-  } catch (err) {
-    console.error('collector-config: project salt unavailable', (err as Error).message);
-  }
+  // The deployment's project salt (SEC-11): the collector HMACs hashed project keys with it.
+  if (token.projectSalt) config.project_salt = token.projectSalt;
   return Response.json(config, { headers: { 'cache-control': 'private, max-age=300' } });
 }

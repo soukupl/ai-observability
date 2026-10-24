@@ -17,10 +17,12 @@ export const MCP_LATENCY_BUCKETS_MS = [1_000, 5_000, 30_000, 120_000] as const;
 export const MAX_RUN_LINKS = 32;
 /** Upper bound of `stage_index`. */
 export const MAX_STAGE_INDEX = 10_000;
+/** The one ingest token prefix: person and service users (ADR-0029). */
 export const USER_TOKEN_PREFIX = 'aiobs_u_' as const;
-export const COMPANY_TOKEN_PREFIX = 'aiobs_c_' as const;
-/** Removed prefix (ADR-0022), never accepted: kept only to recognise it in the "no longer exist" message and maskToken. */
-export const LEGACY_TEAM_TOKEN_PREFIX = 'aiobs_t_' as const;
+/** Retired prefixes (company `aiobs_c_`, team `aiobs_t_`): never accepted, kept to name them in messages and maskToken. */
+export const RETIRED_TOKEN_PREFIXES = ['aiobs_c_', 'aiobs_t_'] as const;
+/** Team slug (dot file `team`, `session_start.project.team`): 1–63 of a-z0-9-. */
+export const TEAM_SLUG_RE = /^[a-z0-9-]{1,63}$/;
 /** Recursion guard for the collector's own summarizer child process (BRIEF §5.6). */
 export const SUMMARIZING_ENV = 'AI_OBS_SUMMARIZING' as const;
 
@@ -70,13 +72,15 @@ export interface ProjectRef {
   /** normalized git remote (`github.com/acme/billing`) or `sha256:<64 hex>` — never a local path */
   key: string;
   name?: string;
+  /** team slug of the repository's dot file in force when the session started (absent = no dot file) */
+  team?: string;
 }
 
 /** How a skill was started: by the model (Skill tool / reading its SKILL.md) or typed by the user (`/name`). */
 export type SkillSource = 'model' | 'user';
-/** Skill name → uses by source. Names are plain or `sha256:<64 hex>` (company project-naming mode). */
+/** Skill name → uses by source. Names are plain or `sha256:<64 hex>` (deployment project-naming mode). */
 export type SkillCounts = Record<string, { model: number; user: number }>;
-/** MCP server → tool → calls. Names are plain or `sha256:<64 hex>` (company project-naming mode). */
+/** MCP server → tool → calls. Names are plain or `sha256:<64 hex>` (deployment project-naming mode). */
 export type McpCounts = Record<string, Record<string, number>>;
 /** MCP errors / denials / latency per server × tool (`buckets`: 5 counts over MCP_LATENCY_BUCKETS_MS). */
 export interface McpToolStats {
@@ -217,22 +221,40 @@ export interface IngestBatch {
   events: IngestEvent[];
 }
 
+export type IngestWarningCode = 'team_not_member' | 'team_unknown';
+/** The server could not use the session's dot-file team (at most one per session per batch). */
+export interface IngestWarning {
+  code: IngestWarningCode;
+  team: string;
+  session_id: string;
+}
+
 export interface IngestResponse {
   accepted: number;
   duplicates: number;
   rejected: Array<{ event_id: string | null; reason: string }>;
+  /** optional; older servers omit it */
+  warnings?: IngestWarning[];
 }
 
+export type TokenSource = 'device' | 'manual';
+export type UserKind = 'person' | 'service';
+
+/**
+ * GET /api/v1/collector-config (brief appendix A). Everything after the naming fields is optional here so
+ * the collector tolerates an older server; the current server always sends them.
+ */
 export interface CollectorConfigResponse {
   project_naming: ProjectNamingMode;
   min_collector_version: string;
-  /**
-   * Per-company secret for hashed project keys (HMAC-SHA256 key). Optional: servers that do not send
-   * it get plain sha256 keys.
-   */
+  /** per-deployment secret for hashed project keys (HMAC-SHA256 key); absent → plain sha256 keys */
   project_salt?: string;
-  /** The company the token reports to (ADR-0022); `slug` is the default token name. Optional: older servers omit it. */
-  company?: { name: string; slug: string };
-  /** The member a user token identifies; null for a company token. Optional like `company`. */
-  user?: { email: string } | null;
+  deployment?: { name: string; slug: string };
+  /** `email` is null for a service user */
+  user?: { email: string | null; name: string; kind: UserKind };
+  /** teams the user is a member of, in slug order */
+  teams?: Array<{ slug: string; name: string }>;
+  primary_team?: string | null;
+  /** `expires_at` null = no expiry */
+  token?: { expires_at: string | null; label: string | null; source: TokenSource };
 }

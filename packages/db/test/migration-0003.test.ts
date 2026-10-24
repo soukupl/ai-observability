@@ -1,10 +1,11 @@
 import { sql } from 'drizzle-orm';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { adminDbUrl, testDbName, testDbUrl } from './test-db.js';
 import { createDb, type Database } from '../src/client.js';
 import { DB_ROLES } from '../src/connections.js';
 import { priceInEffect } from '../src/prices.js';
-import { withRlsContext } from '../src/rls.js';
+import { legacyRlsContext } from './legacy-context.js';
 import { migrateTo } from './migrate-to.js';
 
 /**
@@ -12,18 +13,16 @@ import { migrateTo } from './migrate-to.js';
  * (review DP-03), and agg_turn_list pages deterministically when turns share started_at (DP-12).
  * Own database (ai_obs_m0003_test), migrated up to 0003 only (migrateTo), so the old-shape rows below stay valid.
  */
-const base = new URL(process.env.TEST_DATABASE_URL || 'postgres://ai_obs:ai_obs@localhost:5432/ai_obs_test');
-base.pathname = '/ai_obs_m0003_test';
-const URL_ = base.toString();
-const adminUrl = new URL(URL_);
-adminUrl.pathname = '/postgres';
+const DB = testDbName('m0003');
+const URL_ = testDbUrl('m0003');
+const adminUrl = new URL(adminDbUrl());
 
 async function prepare(): Promise<string | null> {
   const admin = postgres(adminUrl.toString(), { max: 1, connect_timeout: 3, onnotice: () => {} });
   try {
     await admin`select 1`;
-    await admin.unsafe('drop database if exists "ai_obs_m0003_test" with (force)');
-    await admin.unsafe('create database "ai_obs_m0003_test"');
+    await admin.unsafe(`drop database if exists "${DB}" with (force)`);
+    await admin.unsafe(`create database "${DB}"`);
     return null;
   } catch (err) {
     return `Postgres not reachable (${(err as { code?: string }).code || (err as Error).message})`;
@@ -98,7 +97,7 @@ describe.skipIf(skip !== null)(skip ? `migration 0003 - SKIPPED: ${skip}` : 'mig
   afterAll(async () => {
     await Promise.all(closers.map((c) => c()));
     const admin = postgres(adminUrl.toString(), { max: 1, onnotice: () => {} });
-    await admin.unsafe('drop database if exists "ai_obs_m0003_test" with (force)').catch(() => {});
+    await admin.unsafe(`drop database if exists "${DB}" with (force)`).catch(() => {});
     await admin.end({ timeout: 1 }).catch(() => {});
   }, 30_000);
 
@@ -124,7 +123,7 @@ describe.skipIf(skip !== null)(skip ? `migration 0003 - SKIPPED: ${skip}` : 'mig
 
   it('agg_turn_list pages through tied started_at without duplicates or gaps', async () => {
     const page = (offset: number) =>
-      withRlsContext(web, { companyId: ids.company, userId: ids.user, role: 'admin' }, async (tx) =>
+      legacyRlsContext(web, { companyId: ids.company, userId: ids.user, role: 'admin' }, async (tx) =>
         [...(await tx.execute(sql`select id from agg_turn_list('2026-09-01'::timestamptz, '2026-10-01'::timestamptz,
           null, null, null, null, null, 7, ${offset})`))].map((r) => (r as { id: string }).id));
     const seen: string[] = [];

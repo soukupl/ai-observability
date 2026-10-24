@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { TOKEN_PREFIXES, tokenKind, type TokenKind } from '@ai-obs/protocol';
+import { REJECTED_TOKEN_PREFIXES, TOKEN_PREFIXES, tokenKind, type TokenKind } from '@ai-obs/protocol';
 
 /** Random secret bytes per token (256 bit), base64url-encoded after the kind prefix. */
 export const TOKEN_SECRET_BYTES = 32;
@@ -23,8 +23,11 @@ export interface GeneratedToken {
   hash: string;
 }
 
-/** Creates a new ingest token: `aiobs_u_…` (user) or `aiobs_c_…` (company). */
-export function generateToken(kind: TokenKind): GeneratedToken {
+/**
+ * Creates a new ingest token `aiobs_u_…` (person and service users alike, ADR-0029). Used by the admin console, the
+ * "My tokens" page and the device exchange, which passes only the hash and the prefix to the database.
+ */
+export function generateToken(kind: TokenKind = 'user'): GeneratedToken {
   const kindPrefix = TOKEN_PREFIXES[kind];
   const plaintext = kindPrefix + randomBytes(TOKEN_SECRET_BYTES).toString('base64url');
   return {
@@ -35,11 +38,18 @@ export function generateToken(kind: TokenKind): GeneratedToken {
   };
 }
 
-/** Extracts an ai-obs token from `Authorization: Bearer …`; null for anything else. */
-export function parseBearer(header: string | null): { token: string; kind: TokenKind } | null {
+export type ParsedBearer = { token: string; kind: TokenKind } | { retired: true };
+
+/**
+ * Extracts an ai-obs token from `Authorization: Bearer …`. A retired company (`aiobs_c_`) or team (`aiobs_t_`) token is
+ * reported as `{ retired: true }` so the caller can answer it with an explicit 401 without a lookup (ADR-0029); null
+ * for anything else.
+ */
+export function parseBearer(header: string | null): ParsedBearer | null {
   const m = /^Bearer[ ]+(\S+)\s*$/i.exec(header ?? '');
   const token = m?.[1];
   if (!token || token.length > MAX_TOKEN_LENGTH) return null;
+  if (REJECTED_TOKEN_PREFIXES.some((p) => token.startsWith(p))) return { retired: true };
   const kind = tokenKind(token);
   return kind ? { token, kind } : null;
 }

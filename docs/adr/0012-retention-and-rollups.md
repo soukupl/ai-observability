@@ -1,6 +1,6 @@
 # ADR-0012: Configurable raw retention with permanent daily rollups
 
-- **Status:** Accepted
+- **Status:** Accepted; amended 2026-10-24 by [ADR-0028](0028-one-deployment-one-company.md) (no plan caps)
 - **Date:** 2026-10-05
 - **Deciders:** Ladislav Soukup (owner); options proposed by Claude
 - **Tags:** database, compliance
@@ -60,3 +60,13 @@ rows; deleting a user removes their raw rows and nulls `user_id` in rollups.
   "former member".
 - The cascade above (raw rows deleted, rollups anonymised) now applies only when an operator deletes the identity itself;
   no screen does that.
+
+## Amendment 2026-10-24 — no plans, one deployment (ADR-0028)
+
+- **Decided by:** Ladislav Soukup (owner, grilling Q1-Q9 of 2026-10-24 and "go" on
+  `docs/briefs/single-deployment-per-user-tokens.md`); design by Claude Fable 5.1. The body and earlier amendments are kept as history.
+
+- Plans are gone: retention is admin-editable within **30-730 days, default 395** (`deployment.settings.retentionDays`),
+  with no plan cap; the ingest retention window uses that value directly. Budgets are always allowed.
+- Rollups are keyed per team / user / project / harness / model / effort / day, without a company. The dev merge added
+  up rollup rows that collided once `company_id` was removed.

@@ -5,8 +5,8 @@
 - [ADR-0003: Turn outcome is derived from signals only](0003-outcome-from-signals-only.md)
 - [ADR-0004: Turn summaries are always on and generated locally by a cheap model](0004-local-summaries-by-cheap-model.md)
 - [ADR-0005: Harness-neutral ingest format; Claude Code and Codex first](0005-harness-neutral-ingest-format.md)
-- [ADR-0006: Tenant isolation with company_id and Postgres Row-Level Security](0006-tenant-isolation-with-rls.md)
-- [ADR-0007: Per-user and team ingest tokens; turn-to-team attribution](0007-ingest-tokens.md)
+- [ADR-0006: Tenant isolation with company_id and Postgres Row-Level Security](0006-tenant-isolation-with-rls.md) — superseded in part by ADR-0028
+- [ADR-0007: Per-user and team ingest tokens; turn-to-team attribution](0007-ingest-tokens.md) — superseded by ADR-0029
 - [ADR-0008: Privacy modes — project naming and individual visibility](0008-privacy-modes.md)
 - [ADR-0009: Tech stack — TypeScript, Next.js, Postgres, Drizzle, Tailwind, Recharts](0009-tech-stack.md)
 - [ADR-0010: Portable, EU-hosted, self-hostable deployment](0010-portable-eu-hosting.md)
@@ -21,9 +21,12 @@
 - [ADR-0019: Agent groups and orchestration ids on runs; git-graph agent timeline](0019-agent-groups-and-timeline.md)
 - [ADR-0020: Agent flow — stage index, flow key and typed links between sub-agent runs](0020-agent-flow-links.md)
 - [ADR-0021: Friendly model names in the UI; raw ids on machine-facing surfaces](0021-friendly-model-names.md)
-- [ADR-0022: Company memberships, user and company tokens, per-project token choice](0022-company-memberships-and-token-kinds.md)
+- [ADR-0022: Company memberships, user and company tokens, per-project token choice](0022-company-memberships-and-token-kinds.md) — superseded by ADR-0028, ADR-0029, ADR-0030
 - [ADR-0023: Turn summaries are generated during the session, not only at its end](0023-mid-session-summaries.md)
 - [ADR-0024: Personal flow flags, print-to-PDF flow reports, ingest statistics and client-side chart zoom](0024-flow-flags-report-ingest-stats-zoom.md)
 - [ADR-0025: One detail page for a turn and its agent flows](0025-turn-page-holds-its-flows.md)
 - [ADR-0026: Sessions view over harness sessions; session titles as a patch event](0026-sessions-view-and-titles.md)
 - [ADR-0027: Live session status: turn_started, Active now, ai-obs live](0027-live-session-status.md)
+- [ADR-0028: One deployment = one company; the company leaves the schema](0028-one-deployment-one-company.md)
+- [ADR-0029: Per-user and service-user tokens, device login, fixed expiry](0029-per-user-tokens-device-login-expiry.md)
+- [ADR-0030: Project dot file and team resolution](0030-project-dot-file-and-team-resolution.md)

@@ -8,11 +8,12 @@ export const primaryButton =
 export const secondaryButton =
   'block w-full rounded-md border border-zinc-300 px-4 py-2 text-center text-sm font-medium hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-900';
 
-export function AuthCard({ title, children }: { title: string; children: ReactNode }) {
+/** `brand`: the deployment name shown above the title (deploymentName()). */
+export function AuthCard({ title, brand = 'ai-obs', children }: { title: string; brand?: string; children: ReactNode }) {
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-col gap-1">
-        <p className="text-sm font-semibold tracking-tight text-zinc-500 dark:text-zinc-400">ai-obs</p>
+        <p className="text-sm font-semibold tracking-tight text-zinc-500 dark:text-zinc-400">{brand}</p>
         <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
       </div>
       {children}

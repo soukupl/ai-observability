@@ -1,3 +1,6 @@
+---
+spoor_id: 1c72ebf4-3883-494a-9b20-31eb98effc5a
+---
 # ADR-0002: The turn is the primary unit of work
 
 - **Status:** Accepted

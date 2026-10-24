@@ -1,3 +1,6 @@
+---
+spoor_id: 0f7cbcf1-32d7-47ec-83f4-5bf39c400bdb
+---
 # ADR-0004: Turn summaries are always on and generated locally by a cheap model
 
 - **Status:** Accepted

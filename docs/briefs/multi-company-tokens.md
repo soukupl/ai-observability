@@ -1,6 +1,8 @@
 # Brief: one developer, many companies — company / user tokens and per-project token choice
 
-Status: **Accepted 2026-10-08** (owner: "yes, go!"). Owner: "I need to be able to be part of multiple companies as a
+Status: Superseded 2026-10-24 by docs/briefs/single-deployment-per-user-tokens.md (ADR-0028..0030).
+
+Was: **Accepted 2026-10-08** (owner: "yes, go!"). Owner: "I need to be able to be part of multiple companies as a
 developer and multiple teams… token will be always generated on company level and/or user level… per-project
 overwrite… allow user to register multiple tokens for multiple companies and select what token should be used for a
 specific project. AI harness can ask him, if there is no token selected for the project yet."

@@ -1,15 +1,15 @@
-import { PLAN_LIMITS, type Plan } from '@ai-obs/db';
+import type { IndividualVisibility } from '@ai-obs/db';
 import { sql, type SQL } from 'drizzle-orm';
 import type { WorkerContext } from '../context.js';
 import { buildBudgetEmail } from '../budgets/mail.js';
 import { decideBudget, measureUsage, type BudgetKind, type DayModelUsage, type Threshold } from '../budgets/evaluate.js';
 import { indexPrices, type PriceIndex, type PriceRow } from '../lib/cost.js';
 import { addDays, dayStart, monthStart, nextMonthStart, utcDay } from '../lib/dates.js';
+import { loadDeployment } from '../lib/deployment.js';
 import type { Job } from '../scheduler.js';
 
 interface BudgetRow {
   id: string;
-  companyId: string;
   teamId: string | null;
   userId: string | null;
   kind: BudgetKind;
@@ -17,12 +17,8 @@ interface BudgetRow {
   notifiedPeriod: string | null;
   notified80: boolean;
   notified100: boolean;
-  companyName: string;
-  plan: Plan;
   teamName: string | null;
   userLabel: string | null;
-  /** companies.settings.individualVisibility; anything but 'full' means aggregates-only (ADR-0008). */
-  visibility: string | null;
 }
 
 export interface BudgetsSummary {
@@ -39,16 +35,13 @@ const FUTURE_SKEW_MS = 24 * 60 * 60_000;
 async function loadBudgets(ctx: WorkerContext): Promise<BudgetRow[]> {
   return rows<BudgetRow>(
     await ctx.db.execute(sql`
-      select b.id, b.company_id as "companyId", b.team_id as "teamId", b.user_id as "userId", b.kind,
+      select b.id, b.team_id as "teamId", b.user_id as "userId", b.kind,
         b.limit_value::float8 as "limit", b.notified_period::text as "notifiedPeriod",
         (b.notified_80_at is not null) as notified80, (b.notified_100_at is not null) as notified100,
-        c.name as "companyName", c.plan, t.name as "teamName", coalesce(u.name, u.email) as "userLabel",
-        c.settings->>'individualVisibility' as visibility
+        t.name as "teamName", coalesce(u.name, u.email) as "userLabel"
       from budgets b
-      join companies c on c.id = b.company_id
       left join teams t on t.id = b.team_id
       left join users u on u.id = b.user_id
-      where c.status = 'active'
       order by b.created_at`),
   );
 }
@@ -70,7 +63,7 @@ async function loadPrices(ctx: WorkerContext): Promise<PriceIndex> {
  * above by the end of the month and by now + 1 day, so turns with a skewed-forward or bogus future
  * `started_at` never count as this month's usage.
  */
-export async function monthToDate(ctx: WorkerContext, b: Pick<BudgetRow, 'companyId' | 'teamId' | 'userId'>, period: string, rawFrom: string): Promise<DayModelUsage[]> {
+export async function monthToDate(ctx: WorkerContext, b: Pick<BudgetRow, 'teamId' | 'userId'>, period: string, rawFrom: string): Promise<DayModelUsage[]> {
   const rollupScope: SQL[] = [];
   const rawScope: SQL[] = [];
   if (b.teamId) {
@@ -91,7 +84,7 @@ export async function monthToDate(ctx: WorkerContext, b: Pick<BudgetRow, 'compan
             select d.day::text as day, d.model, sum(d.input_tokens)::float8 as input, sum(d.output_tokens)::float8 as output,
               sum(d.cache_read_tokens)::float8 as "cacheRead", sum(d.cache_write_tokens)::float8 as "cacheWrite"
             from daily_rollups d
-            where d.company_id = ${b.companyId} and d.day >= ${period}::date and d.day < ${rawFrom}::date
+            where d.day >= ${period}::date and d.day < ${rawFrom}::date
               ${sql.join(rollupScope, sql` `)}
             group by 1, 2`),
         )
@@ -101,8 +94,8 @@ export async function monthToDate(ctx: WorkerContext, b: Pick<BudgetRow, 'compan
       select (t.started_at at time zone 'UTC')::date::text as day, u.model, sum(u.input_tokens)::float8 as input,
         sum(u.output_tokens)::float8 as output, sum(u.cache_read_tokens)::float8 as "cacheRead",
         sum(u.cache_write_tokens)::float8 as "cacheWrite"
-      from usage u join turns t on t.id = u.turn_id and t.company_id = u.company_id
-      where t.company_id = ${b.companyId} and t.started_at >= ${`${rawFrom}T00:00:00Z`}::timestamptz
+      from usage u join turns t on t.id = u.turn_id
+      where t.started_at >= ${`${rawFrom}T00:00:00Z`}::timestamptz
         and t.started_at < ${rawTo}::timestamptz
         ${sql.join(rawScope, sql` `)}
       group by 1, 2`),
@@ -111,28 +104,28 @@ export async function monthToDate(ctx: WorkerContext, b: Pick<BudgetRow, 'compan
 }
 
 /**
- * Who gets a budget mail, de-duplicated by e-mail:
- * - team budget: company admins + leads of the team;
- * - user budget, company in `full` visibility: company admins + leads of the budget's team (if any) + the user;
- * - user budget, company in aggregates-only mode (the default, ADR-0008): **only the user**. Admins and
+ * Who gets a budget mail, de-duplicated by e-mail (current members only; service users have no e-mail):
+ * - team budget: admins (memberships.role = 'admin') + leads of the team;
+ * - user budget, `full` visibility: admins + leads of the budget's team (if any) + the user;
+ * - user budget, aggregates-only mode (the default, ADR-0008): **only the user**. Admins and
  *   leads see no per-person usage in that mode, and the mail names the person and their exact usage.
  */
-export async function recipients(ctx: WorkerContext, b: Pick<BudgetRow, 'companyId' | 'teamId' | 'userId' | 'visibility'>): Promise<string[]> {
-  const onlyTheUser = b.userId !== null && b.visibility !== 'full';
+export async function recipients(ctx: WorkerContext, b: Pick<BudgetRow, 'teamId' | 'userId'>, visibility: IndividualVisibility): Promise<string[]> {
+  const onlyTheUser = b.userId !== null && visibility !== 'full';
   const found = rows<{ email: string }>(
     await ctx.db.execute(
       onlyTheUser
-        ? sql`select u.email from company_memberships cm join users u on u.id = cm.user_id
-            where cm.company_id = ${b.companyId} and cm.user_id = ${b.userId}::uuid`
+        ? sql`select u.email from memberships m join users u on u.id = m.user_id
+            where m.user_id = ${b.userId}::uuid and u.email is not null`
         : sql`
-      select u.email from company_memberships cm join users u on u.id = cm.user_id
-        where cm.company_id = ${b.companyId} and cm.company_role = 'admin'
+      select u.email from memberships m join users u on u.id = m.user_id
+        where m.role = 'admin' and u.email is not null
       union
-      select u.email from team_memberships m join users u on u.id = m.user_id
-        where m.company_id = ${b.companyId} and m.role = 'lead' and ${b.teamId}::uuid is not null and m.team_id = ${b.teamId}::uuid
+      select u.email from team_memberships tm join users u on u.id = tm.user_id
+        where tm.role = 'lead' and ${b.teamId}::uuid is not null and tm.team_id = ${b.teamId}::uuid and u.email is not null
       union
-      select u.email from company_memberships cm join users u on u.id = cm.user_id
-        where ${b.userId}::uuid is not null and cm.user_id = ${b.userId}::uuid and cm.company_id = ${b.companyId}`,
+      select u.email from memberships m join users u on u.id = m.user_id
+        where ${b.userId}::uuid is not null and m.user_id = ${b.userId}::uuid and u.email is not null`,
     ),
   );
   return [...new Set(found.map((r) => r.email.toLowerCase()))].sort();
@@ -167,12 +160,12 @@ export async function runBudgets(ctx: WorkerContext, signal?: AbortSignal): Prom
   const period = monthStart(today);
   const rawFrom = [addDays(today, -1), period].sort().at(-1)!;
   const prices = await loadPrices(ctx);
+  const dep = await loadDeployment(ctx.db);
   const all = await loadBudgets(ctx);
   const summary: BudgetsSummary = { budgets: 0, sent: 0, failed: 0 };
 
   for (const b of all) {
     if (signal?.aborted) break;
-    if (!PLAN_LIMITS[b.plan]?.budgets) continue;
     summary.budgets += 1;
     try {
       const { value, unpriced } = measureUsage(await monthToDate(ctx, b, period, rawFrom), b.kind, prices);
@@ -193,7 +186,7 @@ export async function runBudgets(ctx: WorkerContext, signal?: AbortSignal): Prom
       if (!decision.send) continue;
       if (!(await claim(ctx, b.id, period, decision.send))) continue;
 
-      const to = await recipients(ctx, b);
+      const to = await recipients(ctx, b, dep.settings.individualVisibility);
       if (to.length === 0) {
         ctx.log.info(`budgets: ${b.id} crossed ${decision.send} % but has no recipients`);
         continue;
@@ -201,7 +194,7 @@ export async function runBudgets(ctx: WorkerContext, signal?: AbortSignal): Prom
       const scope = [b.teamName && `team ${b.teamName}`, b.userLabel].filter(Boolean).join(' / ');
       const mail = buildBudgetEmail({
         threshold: decision.send, kind: b.kind, used: value, limit: b.limit, period,
-        companyName: b.companyName, scope, appUrl: ctx.config.appUrl,
+        deploymentName: dep.name, scope, appUrl: ctx.config.appUrl,
       });
       const results = await Promise.allSettled(to.map((address) => ctx.mailer.send({ to: address, ...mail })));
       if (results.some((r) => r.status === 'fulfilled')) {

@@ -6,7 +6,7 @@ import { cleanSummaryText, turnSummaryEvent } from '../events.js';
 import { errorMessage, readJsonFile, withTimeout, writeJsonAtomic } from '../fsutil.js';
 import type { Logger } from '../log.js';
 import { SUMMARIZING_ENV, type TurnSummaryEvent } from '../protocol-types.js';
-import type { StreamKey } from '../queue.js';
+import type { StreamKey } from '../routing.js';
 import { ulid } from '../ulid.js';
 import type { TurnDigest } from './digest.js';
 

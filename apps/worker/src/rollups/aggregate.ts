@@ -1,5 +1,5 @@
 /**
- * Pure folding of one (company, day) slice of raw rows into daily_rollups rows (ADR-0012).
+ * Pure folding of one day slice of raw rows into daily_rollups rows (ADR-0012). The slice is deployment-wide (ADR-0028).
  *
  * - turn count, duration, phase ms, outcome counts and run count are attributed to the turn's own
  *   (team, user, project, harness, model, effort);
@@ -133,31 +133,31 @@ export function aggregateDay(turns: TurnRow[], usageRows: UsageRow[], runCounts:
   return [...groups.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([, g]) => g);
 }
 
-/** Which (company, day) slices to recompute. Pure so the selection rules are testable. */
+/** Which day slices to recompute. Pure so the selection rules are testable. */
 export interface DayPlanInput {
   /** 'YYYY-MM-DD' (UTC) of "now". */
   today: string;
   /** Days always recomputed, ending today (self-healing window). Default 2. */
   recentDays?: number;
-  companies: Array<{ id: string; /** First day still inside the retention window. */ cutoffDay: string }>;
-  /** Slices whose raw rows changed since the watermark, or every slice on a cold start. */
-  changed: Array<{ companyId: string; day: string }>;
+  /** First day still inside the deployment's retention window. */
+  cutoffDay: string;
+  /** Days whose raw rows changed since the watermark, or every day with raw turns on a cold start. */
+  changed: string[];
 }
 
-export function planDays(input: DayPlanInput, addDays: (day: string, n: number) => string): Array<{ companyId: string; day: string }> {
+/** The days to recompute, newest first, de-duplicated, never outside the retention window or in the future. */
+export function planDays(input: DayPlanInput, addDays: (day: string, n: number) => string): string[] {
   const recent = input.recentDays ?? 2;
-  const cutoff = new Map(input.companies.map((c) => [c.id, c.cutoffDay]));
-  const out = new Map<string, { companyId: string; day: string }>();
-  const add = (companyId: string, day: string) => {
-    const cut = cutoff.get(companyId);
+  const out = new Set<string>();
+  const add = (day: string) => {
     // Never fold a day outside the retention window: its raw rows may be partly deleted, and the slice
     // recompute would shrink the permanent rollup.
-    if (cut === undefined || day < cut || day > input.today) return;
-    out.set(`${companyId}|${day}`, { companyId, day });
+    if (day < input.cutoffDay || day > input.today) return;
+    out.add(day);
   };
-  for (const c of input.companies) for (let i = 0; i < recent; i++) add(c.id, addDays(input.today, -i));
-  for (const c of input.changed) add(c.companyId, c.day);
-  return [...out.values()].sort((a, b) => (a.day === b.day ? a.companyId.localeCompare(b.companyId) : a.day < b.day ? 1 : -1));
+  for (let i = 0; i < recent; i++) add(addDays(input.today, -i));
+  for (const day of input.changed) add(day);
+  return [...out].sort((a, b) => (a < b ? 1 : a > b ? -1 : 0));
 }
 
 /** Skill / MCP counts of one turn or run (turns.skills / turns.mcp, runs.skills / runs.mcp). */

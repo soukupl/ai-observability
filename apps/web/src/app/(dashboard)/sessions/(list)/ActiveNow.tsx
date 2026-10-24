@@ -10,8 +10,8 @@ import { toActiveNowRows } from '../_helpers';
  * "Active now" (ADR-0027): the viewer's running sessions at the top of /sessions, polled every 10 s while the tab is
  * visible, with the elapsed time ticking locally between polls. Not narrowed by the page filters.
  */
-export function ActiveNow({ initial, companyId, showUser }: { initial: ActiveSessionsPayload; companyId: string; showUser: boolean }) {
-  const { data, receivedAtMs, failing, halted } = useLivePoll(`/api/live/sessions?company=${encodeURIComponent(companyId)}`, initial);
+export function ActiveNow({ initial, showUser }: { initial: ActiveSessionsPayload; showUser: boolean }) {
+  const { data, receivedAtMs, failing, halted } = useLivePoll('/api/live/sessions', initial);
   const tick = useTick(data.rows.length > 0 && halted === null);
   const rows = toActiveNowRows(data.rows, (r) => (tick === null ? r.elapsedMs : liveElapsedMs(r.sinceMs, data.nowMs, receivedAtMs, tick)));
   const columns: Column[] = [

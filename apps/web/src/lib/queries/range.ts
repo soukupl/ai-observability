@@ -8,7 +8,7 @@ import type { Filters } from '../filters';
  * tokens on the usage row's model; packages/db README), so turn counts, outcomes, tokens and ≈ cost agree
  * exactly, mixed-model turns included.
  *
- * Raw rows expire (company retention, 30 days minimum; the nightly job deletes whole UTC days before
+ * Raw rows expire (deployment retention, 30 days minimum; the nightly job deletes whole UTC days before
  * today - retentionDays after folding them into rollups). A range that starts before that cut-off
  * would silently undercount from raw rows, so it reads rollups too, however short it is.
  */
@@ -25,7 +25,7 @@ export interface ResolvedRange {
   days: number;
   source: SourceKind;
   /**
-   * Raw rows still cover the whole range (it starts inside the company's retention window). Medians
+   * Raw rows still cover the whole range (it starts inside the deployment's retention window). Medians
    * need raw durations, so a long range on rollups can still show one while this holds.
    */
   rawCovers: boolean;
@@ -53,7 +53,7 @@ export function resolveRange(
   f: Pick<Filters, 'range' | 'from' | 'to'>,
   now: Date = new Date(),
   force?: SourceKind,
-  /** Effective raw retention of the company in days; undefined = unknown, assume raw rows are all there. */
+  /** Effective raw retention of the deployment in days; undefined = unknown, assume raw rows are all there. */
   retentionDays?: number,
 ): ResolvedRange {
   let fromDay: string;

@@ -1,50 +1,44 @@
+import Link from 'next/link';
 import { Card } from '@/components/Card';
 import { PageHeader } from '@/components/PageHeader';
-import { createTokenAction } from '@/lib/admin/actions/tokens';
-import { requireAdminOrLead } from '@/lib/admin/guard';
-import { isAdmin } from '@/lib/admin/permissions';
+import { requireAdminPage } from '@/lib/admin/guard';
 import { listTokens } from '@/lib/admin/tokens';
 import { withUserDb } from '@/lib/auth/rls';
-import { CompanyScopeProvider } from '../_components/CompanyScope';
-import { TokenCreateForm } from '../_components/TokenCreateForm';
-import { TokenFields } from '../_components/TokenFields';
 import { TokenTable } from '../_components/TokenTable';
 import { noteCls } from '../_components/ui';
 
 export const metadata = { title: 'Tokens' };
 
-/** Admins: every token of the active company. Leads: its company tokens (RLS decides the list). */
+/**
+ * Every ingest token of every user, people and service users (ADR-0029 T8, ADR-0022 D6), with source, label, expiry
+ * and revoke. People create their own tokens (My tokens or `ai-obs login`); service-user tokens are created on the
+ * Service users page.
+ */
 export default async function AdminTokensPage() {
-  const user = await requireAdminOrLead();
-  const tokens = await withUserDb(user, (tx) => listTokens(tx, user.companyId));
-  const name = user.company.name;
+  const user = await requireAdminPage();
+  const tokens = await withUserDb(user, (tx) => listTokens(tx));
+  const live = tokens.filter((t) => !t.revokedMs && (t.expiresMs === null || t.expiresMs > Date.now())).length;
 
   return (
-    <CompanyScopeProvider companyId={user.companyId}>
-      <div className="space-y-4">
-        <PageHeader
-          title="Company tokens"
-          description={
-            isAdmin(user)
-              ? `All ingest tokens of ${name}. Company tokens are for CI, bots and rollouts; user tokens tie turns to one person.`
-              : `Company tokens of ${name}.`
-          }
-        />
-        <Card
-          title="New company token"
-          description={`For CI, bots and MDM or dotfiles rollout in ${name}. Events are matched to people by git e-mail among the company's members; others are unverified.`}
-        >
-          <TokenCreateForm action={createTokenAction} submitLabel="Create company token">
-            <TokenFields kind="company" />
-          </TokenCreateForm>
-          <p className={`mt-2 ${noteCls}`}>
-            Personal tokens are created on <a href="/tokens" className="text-blue-700 hover:underline dark:text-blue-400">My tokens</a>.
-          </p>
-        </Card>
-        <Card title="Tokens">
-          <TokenTable tokens={tokens} viewer={user} />
-        </Card>
-      </div>
-    </CompanyScopeProvider>
+    <div className="space-y-4">
+      <PageHeader
+        title="Tokens"
+        description={`Every collector token in ${user.deployment.name}: ${live} live of ${tokens.length}. Device logins expire after 90 days; manual tokens after the lifetime chosen at creation.`}
+      />
+      <Card title="All tokens">
+        <TokenTable tokens={tokens} viewer={user} />
+        <p className={`mt-2 ${noteCls}`}>
+          Create tokens for CI and bots on{' '}
+          <Link href="/admin/service-users" className="text-blue-700 hover:underline dark:text-blue-400">
+            Service users
+          </Link>
+          . Your own tokens are on{' '}
+          <Link href="/tokens" className="text-blue-700 hover:underline dark:text-blue-400">
+            My tokens
+          </Link>
+          .
+        </p>
+      </Card>
+    </div>
   );
 }

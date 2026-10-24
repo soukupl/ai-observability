@@ -11,7 +11,7 @@ import { num, rows, where } from './sqlutil';
  *   name  per skill / per MCP server (distinct turns and users at that level)
  *   tool  per MCP server × tool
  *   day   per day × skill / server
- * Names are as stored: plain, or `sha256:…` when the company hashes names (project-naming mode).
+ * Names are as stored: plain, or `sha256:…` when the deployment hashes names (project-naming mode).
  */
 
 export interface SkillRow {
@@ -76,7 +76,7 @@ function rawFlat(scope: SQL): SQL {
       cross join lateral (
         select t.skills, t.mcp
         union all
-        select r.skills, r.mcp from runs r where r.turn_id = t.id and r.company_id = t.company_id
+        select r.skills, r.mcp from runs r where r.turn_id = t.id
       ) u
     ), flat as (
       select x.turn_id, x.user_id, x.day, 'skill'::text as kind, s.key as name, ''::text as tool,
@@ -105,8 +105,7 @@ function directRaw(ctx: QueryCtx, d: Dims): SQL {
 
 function directRollup(ctx: QueryCtx, d: Dims): SQL {
   const c: SQL[] = [
-    sql`d.company_id = ${ctx.viewer.companyId}::uuid`,
-    sql`d.day >= ${d.fromDay}::date`,
+        sql`d.day >= ${d.fromDay}::date`,
     sql`d.day < ${d.toDay}::date`,
   ];
   if (d.teamId) c.push(sql`d.team_id = ${d.teamId}::uuid`);
@@ -135,7 +134,7 @@ async function reliability(ctx: QueryCtx, d: Dims, rollup: boolean): Promise<Map
       ? sql`select ${cols} from agg_mcp_reliability_rollups(${aggArgs(d, 'date')})`
       : sql`select ${cols} from agg_mcp_reliability(${aggArgs(d, 'ts')})`;
   } else if (rollup) {
-    const c: SQL[] = [sql`d.company_id = ${ctx.viewer.companyId}::uuid`, sql`d.kind = 'mcp'`, sql`d.day >= ${d.fromDay}::date`, sql`d.day < ${d.toDay}::date`];
+    const c: SQL[] = [sql`d.kind = 'mcp'`, sql`d.day >= ${d.fromDay}::date`, sql`d.day < ${d.toDay}::date`];
     if (d.teamId) c.push(sql`d.team_id = ${d.teamId}::uuid`);
     if (d.projectId) c.push(sql`d.project_id = ${d.projectId}::uuid`);
     if (d.userId) c.push(sql`d.user_id = ${d.userId}::uuid`);
@@ -150,7 +149,7 @@ async function reliability(ctx: QueryCtx, d: Dims, rollup: boolean): Promise<Map
     const b = (i: number) => sql.raw(`(tl.value->'buckets'->>${i})::bigint`);
     q = sql`with uses as (
           select u.mcp_stats from turns t
-          cross join lateral (select t.mcp_stats union all select r.mcp_stats from runs r where r.turn_id = t.id and r.company_id = t.company_id) u
+          cross join lateral (select t.mcp_stats union all select r.mcp_stats from runs r where r.turn_id = t.id) u
           ${where(turnConds(ctx, d))}
         ), flat as (
           select m.key as name, tl.key as tool, ${flat('errors')} as errors, ${flat('denied')} as denied, ${flat('ms')} as ms,

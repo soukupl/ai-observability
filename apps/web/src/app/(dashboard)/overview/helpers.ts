@@ -132,7 +132,7 @@ export function allFlowsHref(sp: Record<string, string | string[] | undefined>):
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Ingest card: events received from collectors (company-wide, `agg_ingest_stats()`).
+// Ingest card: events received from collectors (deployment-wide, `agg_ingest_stats()`).
 // ---------------------------------------------------------------------------------------------------------------------
 
 /** Event type → card label; anything else is "other". */

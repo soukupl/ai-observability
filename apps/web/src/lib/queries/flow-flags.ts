@@ -5,7 +5,7 @@ import { rows } from './sqlutil';
 
 /**
  * Flow flags (ADR-0024, docs/briefs/dashboard-followups-2026-10-10.md): a user's private "for later" bookmarks of agent
- * flows. RLS limits every read and write to the viewer's own rows in the active company (`web_own` policy, migration
+ * flows. RLS limits every read and write to the viewer's own rows (`web_own` policy, migration
  * 0015), so nothing here filters by user explicitly. Flows are computed on read, so a flag stores the turn id, the
  * flow key and a snapshot of the flow's name.
  */
@@ -40,12 +40,12 @@ export async function getFlowFlags(ctx: QueryCtx, turnId: string): Promise<Map<s
   const r = await rows<{ id: string; flow_key: string; note: string | null; created_at: string }>(
     ctx.tx,
     sql`select id, flow_key, note, created_at from flow_flags
-        where company_id = ${ctx.viewer.companyId}::uuid and turn_id = ${turnId}::uuid`,
+        where turn_id = ${turnId}::uuid`,
   );
   return new Map(r.map((f) => [f.flow_key, { id: f.id, note: f.note, createdAtMs: ms(f.created_at) }]));
 }
 
-/** Every flag of the viewer in the active company, newest flag first, with the turn's start / project / summary when visible. */
+/** Every flag of the viewer, newest flag first, with the turn's start / project / summary when visible. */
 export async function listFlaggedFlows(ctx: QueryCtx): Promise<FlaggedFlowRow[]> {
   const [out, projects] = await Promise.all([
     rows<Record<string, unknown>>(
@@ -53,8 +53,7 @@ export async function listFlaggedFlows(ctx: QueryCtx): Promise<FlaggedFlowRow[]>
       sql`select f.id, f.turn_id, f.flow_key, f.flow_name, f.note, f.created_at,
             t.id as t_id, t.started_at as t_started_at, t.project_id as t_project_id, t.summary as t_summary
           from flow_flags f
-          left join turns t on t.id = f.turn_id and t.company_id = f.company_id
-          where f.company_id = ${ctx.viewer.companyId}::uuid
+          left join turns t on t.id = f.turn_id
           order by f.created_at desc, f.id limit ${FLAGGED_FLOWS_LIMIT}`,
     ),
     listProjects(ctx),

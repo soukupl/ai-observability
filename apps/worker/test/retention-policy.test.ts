@@ -3,18 +3,16 @@ import { retentionDue } from '../src/jobs/retention.js';
 import { effectiveRetentionDays, retentionCutoff, retentionCutoffDay } from '../src/lib/retention-policy.js';
 
 describe('effectiveRetentionDays', () => {
-  it('uses the company setting when the plan allows it', () => {
-    expect(effectiveRetentionDays('team', { retentionDays: 90 })).toBe(90);
-    expect(effectiveRetentionDays('business', { retentionDays: 730 })).toBe(730);
+  it('uses the deployment setting anywhere in 30-730 days, with no plan caps', () => {
+    expect(effectiveRetentionDays({ retentionDays: 90 })).toBe(90);
+    expect(effectiveRetentionDays({ retentionDays: 30 })).toBe(30);
+    expect(effectiveRetentionDays({ retentionDays: 730 })).toBe(730);
   });
-  it('is bounded by the plan maximum', () => {
-    expect(effectiveRetentionDays('free', { retentionDays: 395 })).toBe(30);
-    expect(effectiveRetentionDays('team', { retentionDays: 730 })).toBe(395);
-  });
-  it('never goes below 30 days and falls back to the default for junk', () => {
-    expect(effectiveRetentionDays('business', { retentionDays: 3 })).toBe(30);
-    expect(effectiveRetentionDays('business', {})).toBe(395);
-    expect(effectiveRetentionDays('business', null)).toBe(395);
+  it('is clamped to 30-730 days and falls back to the default (395) for junk', () => {
+    expect(effectiveRetentionDays({ retentionDays: 3 })).toBe(30);
+    expect(effectiveRetentionDays({ retentionDays: 5000 })).toBe(730);
+    expect(effectiveRetentionDays({})).toBe(395);
+    expect(effectiveRetentionDays(null)).toBe(395);
   });
 });
 

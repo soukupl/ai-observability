@@ -18,7 +18,7 @@ export function magicLinkGet(req: NextRequest, token: string): Response {
   return redirectTo(`/login/magic/${token}${query}`);
 }
 
-/** POST /api/auth/magic/<token> (confirm form) → verifies + consumes, then logs in or signs up. */
+/** POST /api/auth/magic/<token> (confirm form) → verifies + consumes, then logs in (provisioning a new member when a rule admits the e-mail). */
 export async function magicLinkPost(req: NextRequest, token: string, deps: () => AuthDeps = defaultAuthDeps): Promise<Response> {
   if (!isTrustedPost(req)) return new Response('forbidden', { status: 403 });
   const form = await req.formData().catch(() => null);
@@ -27,7 +27,7 @@ export async function magicLinkPost(req: NextRequest, token: string, deps: () =>
     const d = deps();
     const identity = await verifyMagicLink(d, token);
     if (!identity) return loginError('link_invalid');
-    return respondToLogin(await resolveIdentity(d, identity), next);
+    return respondToLogin(await resolveIdentity(d, identity, next));
   } catch (err) {
     return authFailure(err, 'magic link login');
   }

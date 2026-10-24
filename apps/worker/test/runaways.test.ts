@@ -13,7 +13,7 @@ describe('runawayReasons', () => {
     expect(runawayReasons({ ...base, history: 0, p95: null, p99: null, tokens: RUNAWAY_RULES.floorTokens + 1 }, th)).toEqual(['tokens']);
   });
 
-  it('cost: at or above the company threshold; unknown cost never fires', () => {
+  it('cost: at or above the deployment threshold; unknown cost never fires', () => {
     expect(runawayReasons({ ...base, costUsd: 20 }, th)).toEqual(['cost']);
     expect(runawayReasons({ ...base, costUsd: null }, { costUsd: 0.01, hours: 2 })).toEqual([]);
   });
@@ -31,13 +31,13 @@ describe('buildRunawayEmail', () => {
     projectName: 'billing', person: 'carol', tokens: 30_000_000, costUsd: 120.5, durationMs: 9_000_000, reasons: ['tokens', 'cost'] as const,
   };
   it('named digest links each turn; anonymous digest has no person and no links; HTML is escaped', () => {
-    const named = buildRunawayEmail({ companyName: 'Acme', appUrl: 'https://x.test', anonymous: false, items: [{ ...item, reasons: [...item.reasons] }] });
+    const named = buildRunawayEmail({ deploymentName: 'Acme', appUrl: 'https://x.test', anonymous: false, items: [{ ...item, reasons: [...item.reasons] }] });
     expect(named.subject).toBe('[ai-obs] A runaway turn (Acme)');
     expect(named.text).toContain('carol');
     expect(named.text).toContain('https://x.test/turns/t1?startedMs=');
     expect(named.text).toContain('30.00M tokens, ≈ $120.50, 2.5 h');
     expect(named.html).toContain('A &lt;b&gt;');
-    const anon = buildRunawayEmail({ companyName: 'Acme', appUrl: 'https://x.test', anonymous: true, items: [{ ...item, person: null, reasons: [...item.reasons] }, { ...item, person: null, reasons: ['duration'] }] });
+    const anon = buildRunawayEmail({ deploymentName: 'Acme', appUrl: 'https://x.test', anonymous: true, items: [{ ...item, person: null, reasons: [...item.reasons] }, { ...item, person: null, reasons: ['duration'] }] });
     expect(anon.subject).toBe('[ai-obs] 2 runaway turns (Acme)');
     expect(anon.text).not.toContain('carol');
     expect(anon.text).not.toContain('/turns/');

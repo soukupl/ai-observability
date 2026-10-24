@@ -2,9 +2,9 @@ import { randomUUID } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import {
   budgets,
-  companies,
-  companyMemberships,
   createDb,
+  deployment,
+  memberships,
   projects,
   runs,
   teamMemberships,
@@ -22,16 +22,33 @@ import { recomputeDay } from '../../../worker/src/jobs/rollups';
 import { createQueryContext, type QueryCtx, type Viewer } from '../../src/lib/queries/scope';
 
 /**
- * Real-Postgres harness for the dashboard read layer. Creates its OWN database (ai_obs_shell_<pid>_test),
- * migrates it, seeds two identical companies (one per visibility mode) and drops it afterwards.
- * Skips cleanly when Postgres is unreachable.
+ * Real-Postgres harness for the dashboard read layer. One database holds one deployment (ADR-0028), so every
+ * fixture gets its OWN database: prepareShellDatabase() creates and migrates a template database once per test
+ * process, and seedDeployment() clones it (CREATE DATABASE … TEMPLATE, fast) and seeds one deployment in one
+ * visibility mode. dropShellDatabase() drops them all. Skips cleanly when Postgres is unreachable.
+ *
+ * Names are per test process (test files run in parallel, and so do whole test runs started from different
+ * shells): ai_obs_shell_<pid>_test for the template, ai_obs_shell_<pid>_<fixture>_test for each fixture. With
+ * SHELL_TEST_DATABASE_URL (the name must end in _test) its name replaces `ai_obs_shell` and gets the same
+ * per-pid suffixes.
  */
-/**
- * One database per test process (ai_obs_shell_<pid>_test): test files run in parallel, and so do whole test
- * runs started from different shells, and each one drops and recreates its database. Override with
- * SHELL_TEST_DATABASE_URL (the name must end in _test).
- */
-export const SHELL_URL = process.env.SHELL_TEST_DATABASE_URL || `postgres://ai_obs:ai_obs@localhost:5432/ai_obs_shell_${process.pid}_test`;
+function templateUrl(): string {
+  const u = new URL(process.env.SHELL_TEST_DATABASE_URL || 'postgres://ai_obs:ai_obs@localhost:5432/ai_obs_shell_test');
+  u.pathname = `/${u.pathname.slice(1).replace(/_test$/, '')}_${process.pid}_test`;
+  return u.toString();
+}
+export const SHELL_URL = templateUrl();
+const shellBaseName = (): string => new URL(SHELL_URL).pathname.slice(1).replace(/_test$/, '');
+const fixtureNames: string[] = [];
+
+/** The URL of one fixture database: <template base>_<slug>_test. */
+function fixtureUrl(slug: string): { name: string; url: string } {
+  const name = `${shellBaseName()}_${slug.replace(/[^a-z0-9]+/g, '_')}_test`;
+  if (name.length > 63) throw new Error(`fixture database name too long: ${name}`);
+  const u = new URL(SHELL_URL);
+  u.pathname = `/${name}`;
+  return { name, url: u.toString() };
+}
 
 function adminUrl(url: string) {
   const u = new URL(url);
@@ -42,7 +59,7 @@ function adminUrl(url: string) {
 
 /** Runs admin statements (CREATE / DROP DATABASE) on the maintenance database. */
 async function adminExec(statements: string[]): Promise<void> {
-  const { name: _name, url } = adminUrl(SHELL_URL);
+  const { url } = adminUrl(SHELL_URL);
   const { db, close } = createDb({ url, max: 1 });
   try {
     for (const s of statements) await db.execute(sql.raw(s));
@@ -65,16 +82,16 @@ export async function prepareShellDatabase(): Promise<string | null> {
 }
 
 const closers: Array<() => Promise<void>> = [];
-export function connect(role?: string): Database {
-  const { db, close } = createDb({ url: SHELL_URL, role, max: 2 });
+function open(url: string, role?: string): Database {
+  const { db, close } = createDb({ url, role, max: 2 });
   closers.push(close);
   return db;
 }
 
 export async function dropShellDatabase() {
   await Promise.all(closers.splice(0).map((c) => c()));
-  const { name } = adminUrl(SHELL_URL);
-  await adminExec([`drop database if exists "${name}" with (force)`]).catch(() => {});
+  const names = [...fixtureNames.splice(0), adminUrl(SHELL_URL).name];
+  await adminExec(names.map((n) => `drop database if exists "${n}" with (force)`)).catch(() => {});
 }
 
 /** Fixed clock: fixture days are relative to it, so the tests never depend on the real date. */
@@ -85,14 +102,22 @@ const DAY = 86_400_000;
 export interface Person extends Viewer {
   key: string;
   email: string;
+  /** app_web connection to the person's deployment database (asPerson uses it). */
+  web: Database;
 }
+/** One seeded deployment in its own database. */
 export interface Fixture {
+  /** deployment.id */
   id: string;
   mode: 'aggregates-only' | 'full';
+  /** Connections to this fixture's database: owner (migrations role), app_web, app_worker. */
+  owner: Database;
+  web: Database;
+  worker: Database;
   teams: Record<string, string>;
   projects: Record<string, string>;
   people: Record<string, Person>;
-  /** every user id of the company (to prove none leaks in aggregates-only results) */
+  /** every user id of the deployment (to prove none leaks in aggregates-only results) */
   userIds: string[];
   turnIds: { id: string; userKey: string | null; startedMs: number }[];
 }
@@ -105,7 +130,7 @@ const USERS = [
 ];
 
 /**
- * Identical data in every company of one `mixed` kind. Per day and user one turn (alternating model /
+ * Identical data in every fixture of one `mixed` kind. Per day and user one turn (alternating model /
  * effort / outcome); each turn has one Explore run (depth 1) and, every third turn, a nested run
  * (depth 2). Turn totals = sum of its usage rows. With `mixed`, the runs use claude-haiku-4-5 (effort
  * null) instead of the turn's model, so turns are mixed-model. Three turns by m2 use a model with no
@@ -113,21 +138,26 @@ const USERS = [
  */
 export const SUB_AGENT_MODEL = 'claude-haiku-4-5';
 
-export async function seedCompany(owner: Database, slug: string, mode: Fixture['mode'], opts: { mixed?: boolean } = {}): Promise<Fixture> {
+export async function seedDeployment(slug: string, mode: Fixture['mode'], opts: { mixed?: boolean } = {}): Promise<Fixture> {
+  const target = fixtureUrl(slug);
+  await adminExec([`drop database if exists "${target.name}" with (force)`, `create database "${target.name}" template "${adminUrl(SHELL_URL).name}"`]);
+  fixtureNames.push(target.name);
+  const owner = open(target.url);
+  const web = open(target.url, 'app_web');
+  const worker = open(target.url, 'app_worker');
   const fx = await owner.transaction(async (tx) => {
     await tx.execute(sql`set local role app_definer`);
-    const [c] = await tx
-      .insert(companies)
-      .values({ name: slug, slug, settings: { individualVisibility: mode, projectNaming: 'plain', retentionDays: 395 } })
-      .returning({ id: companies.id });
-    const companyId = c!.id;
-    const fx: Fixture = { id: companyId, mode, teams: {}, projects: {}, people: {}, userIds: [], turnIds: [] };
+    const [d] = await tx
+      .update(deployment)
+      .set({ name: slug, slug, settings: { individualVisibility: mode, projectNaming: 'plain', retentionDays: 395 } })
+      .returning({ id: deployment.id });
+    const fx: Fixture = { id: d!.id, mode, owner, web, worker, teams: {}, projects: {}, people: {}, userIds: [], turnIds: [] };
     for (const t of ['t1', 't2']) {
-      const [r] = await tx.insert(teams).values({ companyId, name: `Team ${t}` }).returning({ id: teams.id });
+      const [r] = await tx.insert(teams).values({ name: `Team ${t}` }).returning({ id: teams.id });
       fx.teams[t] = r!.id;
     }
     for (const [key, team, name] of [['github.com/x/alpha', 't1', 'alpha'], ['github.com/x/beta', 't2', 'beta']] as const) {
-      const [r] = await tx.insert(projects).values({ companyId, key, displayName: name, teamId: fx.teams[team]! }).returning({ id: projects.id });
+      const [r] = await tx.insert(projects).values({ key, displayName: name, teamId: fx.teams[team]! }).returning({ id: projects.id });
       fx.projects[name] = r!.id;
     }
     for (const u of USERS) {
@@ -135,17 +165,17 @@ export async function seedCompany(owner: Database, slug: string, mode: Fixture['
         .insert(users)
         .values({ email: `${u.key}@${slug}.test`, name: u.key })
         .returning({ id: users.id });
-      await tx.insert(companyMemberships).values({ companyId, userId: r!.id, companyRole: u.role, primaryTeamId: fx.teams[u.team]! });
-      await tx.insert(teamMemberships).values({ companyId, teamId: fx.teams[u.team]!, userId: r!.id, role: u.teamRole });
+      await tx.insert(memberships).values({ userId: r!.id, role: u.role, primaryTeamId: fx.teams[u.team]! });
+      await tx.insert(teamMemberships).values({ teamId: fx.teams[u.team]!, userId: r!.id, role: u.teamRole });
       fx.userIds.push(r!.id);
       fx.people[u.key] = {
         key: u.key,
         email: `${u.key}@${slug}.test`,
         id: r!.id,
-        companyId,
-        companyRole: u.role,
+        role: u.role,
         teams: [{ id: fx.teams[u.team]!, role: u.teamRole }],
-        company: { settings: { individualVisibility: mode } },
+        deployment: { settings: { individualVisibility: mode } },
+        web,
       };
     }
 
@@ -177,9 +207,9 @@ export async function seedCompany(owner: Database, slug: string, mode: Fixture['
         const sum = (k: keyof typeof own) => own[k] + sub[k] + (deep ? deep[k] : 0);
         const started = new Date(startedMs);
         const ended = new Date(startedMs + durationMs);
-        const owner = { companyId, teamId: fx.teams[teamKey]!, userId: person.id };
+        const own_ = { teamId: fx.teams[teamKey]!, userId: person.id };
         turnRows.push({
-          id: turnId, ...owner, attribution: 'verified', projectId: fx.projects[project]!, externalId: `t-${n}`,
+          id: turnId, ...own_, attribution: 'verified', projectId: fx.projects[project]!, externalId: `t-${n}`,
           harness: n % 5 === 0 ? 'codex' : 'claude-code', model, effort, startedAt: started, endedAt: ended, durationMs,
           inputTokens: sum('input'), outputTokens: sum('output'), cacheReadTokens: sum('cacheRead'),
           cacheWriteTokens: sum('cacheWrite'), reasoningTokens: sum('reasoning'), phasesMs: { thinking: durationMs / 2, coding: durationMs / 4, testing: durationMs / 4 },
@@ -194,13 +224,13 @@ export async function seedCompany(owner: Database, slug: string, mode: Fixture['
         const runEffort = opts.mixed ? null : effort;
         const usageOf = (t: typeof own, ids: { turnId: string; runId: string | null }) =>
           usageRows.push({
-            ...owner, ...ids, startedAt: started, model: ids.runId ? runModel : model, effort: ids.runId ? runEffort : effort,
+            ...own_, ...ids, startedAt: started, model: ids.runId ? runModel : model, effort: ids.runId ? runEffort : effort,
             inputTokens: t.input, outputTokens: t.output, cacheReadTokens: t.cacheRead, cacheWriteTokens: t.cacheWrite,
             reasoningTokens: t.reasoning, requests: t.requests,
           });
         usageOf(own, { turnId, runId: null });
         runRows.push({
-          id: runId, ...owner, turnId, turnExternalId: `t-${n}`, externalId: 'r1', agentType: 'Explore', depth: 1, model: runModel, effort: runEffort,
+          id: runId, ...own_, turnId, turnExternalId: `t-${n}`, externalId: 'r1', agentType: 'Explore', depth: 1, model: runModel, effort: runEffort,
           startedAt: new Date(startedMs + 1000), endedAt: new Date(startedMs + 1000 + durationMs / 2), durationMs: durationMs / 2,
           inputTokens: sub.input, outputTokens: sub.output, cacheReadTokens: sub.cacheRead, reasoningTokens: sub.reasoning,
           phasesMs: { exploring: durationMs / 2 }, outcome: 'success',
@@ -210,7 +240,7 @@ export async function seedCompany(owner: Database, slug: string, mode: Fixture['
         usageOf(sub, { turnId, runId });
         if (deep) {
           runRows.push({
-            id: nestedId, ...owner, turnId, turnExternalId: `t-${n}`, externalId: 'r2', parentRunId: runId, parentExternalId: 'r1',
+            id: nestedId, ...own_, turnId, turnExternalId: `t-${n}`, externalId: 'r2', parentRunId: runId, parentExternalId: 'r1',
             agentType: 'general-purpose', depth: 2, model: runModel, effort: runEffort, startedAt: new Date(startedMs + 2000),
             endedAt: new Date(startedMs + 2000 + durationMs / 4), durationMs: durationMs / 4, inputTokens: deep.input,
             outputTokens: deep.output, cacheReadTokens: deep.cacheRead, outcome: 'failed',
@@ -227,26 +257,25 @@ export async function seedCompany(owner: Database, slug: string, mode: Fixture['
     }
     for (let i = 0; i < usageRows.length; i += 200) await tx.insert(usage).values(usageRows.slice(i, i + 200));
     // every 5th turn was flagged as a runaway (written by the worker in real life)
-    await tx.execute(sql`insert into runaway_alerts (company_id, turn_id, team_id, user_id, project_id, harness, model, started_at, reasons, tokens, cost_usd, duration_ms)
-      select t.company_id, t.id, t.team_id, t.user_id, t.project_id, t.harness, t.model, t.started_at, '["tokens"]'::jsonb,
+    await tx.execute(sql`insert into runaway_alerts (turn_id, team_id, user_id, project_id, harness, model, started_at, reasons, tokens, cost_usd, duration_ms)
+      select t.id, t.team_id, t.user_id, t.project_id, t.harness, t.model, t.started_at, '["tokens"]'::jsonb,
         t.input_tokens + t.output_tokens + t.cache_read_tokens + t.cache_write_tokens, 1.5, t.duration_ms
-      from turns t where t.company_id = ${companyId}::uuid and (substring(t.external_id from 3))::int % 5 = 0`);
+      from turns t where (substring(t.external_id from 3))::int % 5 = 0`);
     // Budgets: a team budget and a per-user budget for m1.
     await tx.insert(budgets).values([
-      { companyId, teamId: fx.teams.t1!, kind: 'tokens', limitValue: '500000' },
-      { companyId, teamId: fx.teams.t1!, kind: 'cost', limitValue: '5' },
-      { companyId, teamId: fx.teams.t1!, userId: fx.people.m1!.id, kind: 'tokens', limitValue: '100000' },
+      { teamId: fx.teams.t1!, kind: 'tokens', limitValue: '500000' },
+      { teamId: fx.teams.t1!, kind: 'cost', limitValue: '5' },
+      { teamId: fx.teams.t1!, userId: fx.people.m1!.id, kind: 'tokens', limitValue: '100000' },
     ]);
     return fx;
   });
-  const worker = connect('app_worker');
-  for (let d = 0; d < FIXTURE_DAYS; d++) await recomputeDay(worker, fx.id, new Date(Date.UTC(2026, 9, 5) - d * DAY).toISOString().slice(0, 10));
+  for (let d = 0; d < FIXTURE_DAYS; d++) await recomputeDay(worker, new Date(Date.UTC(2026, 9, 5) - d * DAY).toISOString().slice(0, 10));
   return fx;
 }
 
-/** Opens an RLS context as `person` and builds the query context (price book included). */
-export function asPerson<T>(db: Database, person: Person, fn: (ctx: QueryCtx, tx: Tx) => Promise<T>, now: Date = NOW): Promise<T> {
-  return withRlsContext(db, { companyId: person.companyId, userId: person.id, role: person.companyRole }, async (tx) =>
+/** Opens an RLS context as `person` (in the person's deployment database) and builds the query context (price book included). */
+export function asPerson<T>(person: Person, fn: (ctx: QueryCtx, tx: Tx) => Promise<T>, now: Date = NOW): Promise<T> {
+  return withRlsContext(person.web, { userId: person.id, role: person.role }, async (tx) =>
     fn(await createQueryContext(tx, person, now), tx),
   );
 }

@@ -1,4 +1,4 @@
-import { cpSync, existsSync, realpathSync, renameSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, readFileSync, realpathSync, renameSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -49,4 +49,15 @@ export function installRuntime(paths: AiObsPaths, sourceRoot = packageRoot()): R
 /** True when the collector home is the default ~/.ai-obs (hook commands then omit --home). */
 export function isDefaultHome(paths: AiObsPaths): boolean {
   return paths.root === join(homedir(), '.ai-obs');
+}
+
+/** Version of the copied hook runtime (`<home>/app`), '0.0.0' when unreadable; null when there is no copy. */
+export function installedRuntimeVersion(paths: Pick<AiObsPaths, 'app'>): string | null {
+  if (!existsSync(join(paths.app, 'bin', 'ai-obs.js'))) return null;
+  try {
+    const v = (JSON.parse(readFileSync(join(paths.app, 'package.json'), 'utf8')) as { version?: unknown }).version;
+    return typeof v === 'string' && v ? v : '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
 }

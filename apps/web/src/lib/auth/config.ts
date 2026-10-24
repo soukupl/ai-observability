@@ -2,7 +2,6 @@
 type Env = NodeJS.ProcessEnv;
 
 export const SESSION_COOKIE = 'ai_obs_session';
-export const SIGNUP_COOKIE = 'ai_obs_signup';
 export const OAUTH_COOKIE = 'ai_obs_oauth';
 
 const MINUTE = 60_000;
@@ -10,7 +9,6 @@ export const SESSION_TTL_MS = 30 * 24 * 60 * MINUTE;
 /** The DB expiry slides at most once per this interval (avoids a write per request). */
 export const SESSION_SLIDE_EVERY_MS = 60 * MINUTE;
 export const MAGIC_LINK_TTL_MS = 15 * MINUTE;
-export const SIGNUP_TTL_MS = 30 * MINUTE;
 export const OAUTH_TTL_MS = 10 * MINUTE;
 
 /** Public base URL. Redirects and e-mailed links are built from it, never from the Host header. */
@@ -23,13 +21,26 @@ export function isSecure(env: Env = process.env): boolean {
   return appUrl(env).protocol === 'https:';
 }
 
-export function superAdminEmails(env: Env = process.env): Set<string> {
+function emailList(raw: string | undefined): Set<string> {
   return new Set(
-    (env.SUPER_ADMIN_EMAILS ?? '')
+    (raw ?? '')
       .split(',')
       .map((e) => e.trim().toLowerCase())
       .filter(Boolean),
   );
+}
+
+/** ADMIN_EMAILS (comma-separated, case-insensitive): these e-mails become admin at their first login (ADR-0028 E6). */
+export function adminEmails(env: Env = process.env): Set<string> {
+  return emailList(env.ADMIN_EMAILS);
+}
+
+/**
+ * ALLOWED_EMAIL_DOMAINS (comma-separated, empty by default): an unknown, verified e-mail of one of these domains joins
+ * as a member with no team at its first login. A leading '@' is ignored.
+ */
+export function allowedEmailDomains(env: Env = process.env): Set<string> {
+  return new Set([...emailList(env.ALLOWED_EMAIL_DOMAINS)].map((d) => d.replace(/^@/, '')).filter(Boolean));
 }
 
 /**
@@ -50,7 +61,7 @@ export function reportAuthConfigError(err: AuthConfigError): void {
 }
 
 /**
- * HMAC key for the short-lived signed cookies (sign-up, OAuth state). Production requires a real
+ * HMAC key for the short-lived signed cookies (OAuth state). Production requires a real
  * SESSION_SECRET (throws AuthConfigError); dev falls back to a fixed value (it must be identical
  * across Next's server bundles).
  */

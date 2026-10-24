@@ -1,6 +1,6 @@
 import { redirect } from 'next/navigation';
 import { enabledOAuthProviders } from '@/lib/auth/config';
-import { landingPath } from '@/lib/auth/provisioning';
+import { deploymentName } from '@/lib/auth/deployment';
 import { getCurrentUser } from '@/lib/auth/session';
 import { safeNext } from '@/lib/auth/tokens';
 import { AuthCard, inputClass, Notice, primaryButton, secondaryButton } from '../ui';
@@ -12,9 +12,6 @@ const ERRORS: Record<string, string> = {
   rate_limited: 'Too many sign-in links requested. Try again in a few minutes.',
   send_failed: 'We could not send the e-mail. Try again later.',
   link_invalid: 'That sign-in link is invalid, already used or expired. Request a new one.',
-  signup_expired: 'Your sign-up session expired. Sign in again.',
-  suspended: 'Your company account is suspended. Contact your administrator.',
-  'no-company': 'This account is not part of any company. Ask your administrator for an invitation.',
   email_unverified: 'Your provider account has no verified e-mail address.',
   oauth_failed: 'Sign-in with the provider failed. Try again.',
   provider_disabled: 'That sign-in provider is not configured.',
@@ -28,12 +25,13 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
   const { next: rawNext, error } = await searchParams;
   const next = safeNext(rawNext);
   const user = await getCurrentUser();
-  if (user) redirect(next ?? landingPath(user));
+  if (user) redirect(next ?? '/overview');
+  const brand = await deploymentName();
   const providers = enabledOAuthProviders();
   const query = next ? `?${new URLSearchParams({ next })}` : '';
 
   return (
-    <AuthCard title="Sign in">
+    <AuthCard title="Sign in" brand={brand}>
       {error && <Notice tone="error">{ERRORS[error] ?? ERRORS.failed}</Notice>}
       <form method="post" action="/api/auth/magic" className="flex flex-col gap-3">
         <label htmlFor="email" className="text-sm font-medium">
@@ -62,7 +60,7 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
         </>
       )}
       <p className="text-xs text-zinc-500 dark:text-zinc-400">
-        New here? Signing in with a new e-mail creates a free workspace. Invited? Use the e-mail the invitation was sent to.
+        Invited? Use the e-mail address the invitation was sent to. Without an invitation, ask an admin of {brand} for one.
       </p>
     </AuthCard>
   );

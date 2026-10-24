@@ -1,6 +1,8 @@
 # ADR-0022: Company memberships, user and company tokens, per-project token choice
 
-- **Status:** Accepted. Supersedes in part [ADR-0007](0007-ingest-tokens.md); amends [ADR-0011](0011-local-queue-idempotent-delivery.md)
+- **Status:** Superseded 2026-10-24: memberships / companies by [ADR-0028](0028-one-deployment-one-company.md), tokens by
+  [ADR-0029](0029-per-user-tokens-device-login-expiry.md), the collector design (C1-C27) by
+  [ADR-0030](0030-project-dot-file-and-team-resolution.md). Was: Accepted. Supersedes in part [ADR-0007](0007-ingest-tokens.md); amends [ADR-0011](0011-local-queue-idempotent-delivery.md)
   (queue streams, pre-upgrade stream), [ADR-0012](0012-retention-and-rollups.md), [ADR-0013](0013-dashboard-authentication.md),
   [ADR-0014](0014-db-roles-and-connections.md) (`platform_invitee_status`), BRIEF §4 and §5.1
 - **Date:** 2026-10-08
@@ -218,3 +220,19 @@ have elapsed and for at most 40 ms, no network). This is a reinterpretation of t
 - Dropped events (size cap) are reported once in the next SessionStart text and on every `status` / `doctor`; no stronger alert exists.
 - The SessionStart text is capped at 1000 characters. When it is longer it is shortened in this order: token details, the repeated collector command (written once, then plain `ai-obs`), `--project-dir`, and only then the number of tokens named (Claude, 2026-10-08, after `hook-process.test.ts` showed a long command cutting the token list).
 
+## Amendment 2026-10-24 — superseded by ADR-0028, ADR-0029, ADR-0030
+
+- **Decided by:** Ladislav Soukup (owner, grilling Q1-Q9 of 2026-10-24 and "go" on
+  `docs/briefs/single-deployment-per-user-tokens.md`); design by Claude Fable 5.1. The body and earlier amendments are kept as history.
+
+- **Companies and memberships (Q1, Q6, D4, D5, D9, D10, D11):** superseded by
+  [ADR-0028](0028-one-deployment-one-company.md). One deployment serves one company; `company_memberships` becomes
+  `memberships`; the switcher, the active company, sign-up, `/invitations` and company-bound forms go. D1 (non-destructive
+  removal), D2 (revoke, not delete), D3 (nullable team), D8 (`admin_remove_member` as a definer function) survive without
+  the company.
+- **Tokens (Q2, Q5, Q7, Q9, D6, D7, git-e-mail matching):** superseded by
+  [ADR-0029](0029-per-user-tokens-device-login-expiry.md). Company tokens are gone; person and service-user tokens with
+  expiry and device login replace them. D6 (admins see and revoke every token) survives.
+- **Collector (Q3, Q4 assignment, Q8, routing tables, C1-C27):** replaced by
+  [ADR-0030](0030-project-dot-file-and-team-resolution.md) (committed dot file, stream key by server and team). C2, C3,
+  C11, C12 / C15 pinning, C13 caps (amended: blocked-by-401 time does not count), C16, C24, C25, C26 and C27 survive.

@@ -1,6 +1,6 @@
 # ADR-0010: Portable, EU-hosted, self-hostable deployment
 
-- **Status:** Accepted
+- **Status:** Accepted; amended 2026-10-24 by [ADR-0028](0028-one-deployment-one-company.md) (no official SaaS, self-hosted only)
 - **Date:** 2026-10-05
 - **Deciders:** Ladislav Soukup (owner); options proposed by Claude
 - **Tags:** hosting, compliance
@@ -29,3 +29,13 @@ same image can be self-hosted by companies.
 
 - **Vercel + Neon/Supabase only** — least ops, but vendor lock-in and conflicts with RLS-only access.
 - **Own VPS only** — full control but no portability story.
+
+## Amendment 2026-10-24 — self-hosted only (ADR-0028)
+
+- **Decided by:** Ladislav Soukup (owner, grilling Q1-Q9 of 2026-10-24 and "go" on
+  `docs/briefs/single-deployment-per-user-tokens.md`); design by Claude Fable 5.1. The body and earlier amendments are kept as history.
+
+- There is **no official SaaS** and no multi-tenant edition. Each company runs its own deployment of the same image
+  (one deployment = one company); the Docker Compose file stays the reference deployment. "EU region" now describes where
+  the owner's own deployment runs, not a hosted offering.
+- The `app_platform` service URL and password variables are removed from the configuration.

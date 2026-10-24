@@ -28,7 +28,7 @@ export interface RunawaysResult {
 
 /**
  * Runaway turns in range, newest first (at most `limit`). Members see their own; leads / admins their teams /
- * the company in full mode (RLS), or through agg_runaways in aggregates-only mode (never who).
+ * the deployment in full mode (RLS), or through agg_runaways in aggregates-only mode (never who).
  */
 export async function getRunaways(ctx: QueryCtx, f: Filters, limit = 10): Promise<RunawaysResult> {
   const range = rangeFor(ctx, f);
@@ -39,8 +39,7 @@ export async function getRunaways(ctx: QueryCtx, f: Filters, limit = 10): Promis
     q = sql`select ${cols}, is_mine from agg_runaways(${aggArgs(d, 'ts')}) limit ${limit}`;
   } else {
     const c: SQL[] = [
-      sql`a.company_id = ${ctx.viewer.companyId}::uuid`,
-      sql`a.started_at >= ${d.fromIso}::timestamptz`,
+            sql`a.started_at >= ${d.fromIso}::timestamptz`,
       sql`a.started_at < ${d.toIso}::timestamptz`,
     ];
     if (d.teamId) c.push(sql`a.team_id = ${d.teamId}::uuid`);

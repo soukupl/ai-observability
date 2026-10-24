@@ -13,12 +13,12 @@ function Stat({ label, value, sub, title }: { label: string; value: string; sub?
 }
 
 /**
- * Ingest card (docs/briefs/dashboard-followups-2026-10-10.md): what the collectors delivered, company-wide. `summary`
+ * Ingest card (docs/briefs/dashboard-followups-2026-10-10.md): what the collectors delivered, deployment-wide. `summary`
  * is null when `agg_ingest_stats()` is not available (migration 0015 not applied yet).
  */
 export function IngestCard({ summary }: { summary: IngestSummary | null }) {
   return (
-    <Card title="Ingest" description="Events received from collectors, company-wide (not filtered); the ledger keeps 30 days.">
+    <Card title="Ingest" description="Events received from collectors, deployment-wide (not filtered); the ledger keeps 30 days.">
       {summary === null ? (
         <p className="text-sm text-zinc-500 dark:text-zinc-400">Ingest stats unavailable.</p>
       ) : (

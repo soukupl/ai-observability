@@ -21,7 +21,6 @@ import { writeJsonAtomic } from '../src/fsutil.js';
 import type { IngestEvent } from '../src/protocol-types.js';
 import type { StreamKey } from '../src/queue.js';
 import { cleanupHomes, fakeAdapter, tmpHome, writeTestConfig } from './helpers.js';
-import { OPEN } from './queue-helpers.js';
 
 afterEach(cleanupHomes);
 
@@ -102,8 +101,8 @@ describe('runSummaryCommand', () => {
 });
 
 describe('staged summaries (ADR-0027)', () => {
-  const KEY: StreamKey = { kind: 'project', pk: 'github.com/acme/billing', bind: OPEN };
-  const OTHER: StreamKey = { kind: 'project', pk: 'github.com/acme/web', bind: OPEN };
+  const KEY: StreamKey = { kind: 'project', pk: 'github.com/acme/billing', endpoint: 'http://127.0.0.1:9', team: '' };
+  const OTHER: StreamKey = { kind: 'project', pk: 'github.com/acme/web', endpoint: 'http://127.0.0.1:9', team: '' };
 
   function ctxFor(summarize: (d: unknown[]) => Promise<Map<string, string>>) {
     const paths = tmpHome();
