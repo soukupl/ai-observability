@@ -1,0 +1,43 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__spoor"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 15,
+            "command": "command -v spoor >/dev/null 2>&1 && exec spoor hook session-start || exec npx --yes --prefer-offline spoor-memory@0.5.1 hook session-start"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "command -v spoor >/dev/null 2>&1 && exec spoor hook post-tool-use || exit 0"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 15,
+            "command": "command -v spoor >/dev/null 2>&1 && exec spoor hook stop || exit 0"
+          }
+        ]
+      }
+    ]
+  }
+}

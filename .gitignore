@@ -8,3 +8,6 @@ coverage/
 .ai-obs/
 next-env.d.ts
 !.env.example
+.claude/settings.local.json
+.spoor/
+.mcp.json
