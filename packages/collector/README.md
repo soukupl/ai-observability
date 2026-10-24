@@ -665,3 +665,25 @@ The Claude Code fixture turn ids are prefixed `cc-fixture-`, so demos that send 
 `src/protocol-types.ts` is a dependency-free copy of the `@ai-obs/protocol` types.
 `test/protocol-conformance.test.ts` type-checks it against the package and validates the builders'
 output with `validateBatch()`.
+
+## Releasing
+
+`ai-obs-cli` is published to npm by the GitHub Actions workflow
+[`.github/workflows/publish-collector.yml`](../../.github/workflows/publish-collector.yml) (ADR-0032). It type-checks,
+builds and tests the collector, then runs `npm publish` with npm trusted publishing: no npm token lives in the
+repository, and npm attaches provenance to the release.
+
+1. Bump `version` in `packages/collector/package.json`, update "Upgrading" above when the release needs it, and commit
+   to `main`.
+2. Tag that commit `collector-v<version>` and push the tag, for example `git tag collector-v0.5.1 && git push origin
+   collector-v0.5.1`. The workflow refuses a tag whose version differs from `package.json`. A prerelease version
+   (`0.6.0-rc.1`) is published under the `next` dist-tag, anything else under `latest`.
+3. "Run workflow" on the Actions tab publishes the version in `package.json` without a tag, with the same checks.
+
+One-time setup on npmjs.com (owner). Trusted publishing cannot create a package, so the first version of a new name is
+published by hand (`pnpm build && npm publish` in `packages/collector`, with the browser 2FA prompt). Then, on the
+package's Settings page, add a trusted publisher: GitHub Actions, organization or user `soukupl`, repository
+`ai-observability`, workflow filename `publish-collector.yml`, no environment, and allow `npm publish` (by default a
+trusted publisher may only `npm stage publish`, which parks the version until a maintainer approves it with 2FA). Set
+publishing access to "Require two-factor authentication and disallow tokens"; trusted publishing is not affected. A
+new trusted-publisher record expires unless it publishes something within two days.

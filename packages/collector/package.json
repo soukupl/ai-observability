@@ -4,6 +4,12 @@
   "description": "ai-obs collector: zero-dependency CLI that captures AI coding-agent usage from harness hooks",
   "type": "module",
   "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/soukupl/ai-observability.git",
+    "directory": "packages/collector"
+  },
+  "homepage": "https://github.com/soukupl/ai-observability/tree/main/packages/collector#readme",
   "bin": {
     "ai-obs": "bin/ai-obs.js"
   },

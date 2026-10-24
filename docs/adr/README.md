@@ -31,3 +31,4 @@
 - [ADR-0029: Per-user and service-user tokens, device login, fixed expiry](0029-per-user-tokens-device-login-expiry.md)
 - [ADR-0030: Project dot file and team resolution](0030-project-dot-file-and-team-resolution.md)
 - [ADR-0031: The collector is published on npm as `ai-obs-cli`](0031-npm-package-name-ai-obs-cli.md) — proposed, awaiting the owner's name choice
+- [ADR-0032: The collector is published to npm from GitHub Actions with trusted publishing](0032-publish-collector-from-github-actions.md)

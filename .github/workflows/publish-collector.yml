@@ -1,0 +1,67 @@
+# Publishes the collector (packages/collector, npm package `ai-obs-cli`) to npm.
+#
+# Trigger: push a tag `collector-v<version>` whose version equals packages/collector/package.json, or
+# "Run workflow" in the Actions tab to publish the version in package.json without a tag.
+# Auth: npm trusted publishing (OIDC). No npm token lives in this repository; the trusted-publisher record
+# on npmjs.com names this repository and this file name and allows `npm publish`. The first version of a
+# new package name is published by hand, because trusted publishing cannot create a package.
+# See packages/collector/README.md ("Releasing") and docs/adr/0032-publish-collector-from-github-actions.md.
+name: Publish collector
+
+on:
+  push:
+    tags: ['collector-v*']
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  publish:
+    name: Test and publish ai-obs-cli
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # lets npm verify this run through GitHub OIDC (trusted publishing)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # pnpm version comes from "packageManager" in package.json
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24 # bundles npm 11.x; trusted publishing needs npm 11.5.1 or newer
+          cache: pnpm
+
+      - name: Check the tag matches package.json
+        if: github.ref_type == 'tag'
+        run: |
+          version=$(node -p "require('./packages/collector/package.json').version")
+          if [ "${GITHUB_REF_NAME#collector-v}" != "$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match packages/collector/package.json version $version"
+            exit 1
+          fi
+
+      - name: Check npm supports trusted publishing (11.5.1 or newer)
+        run: |
+          node -e '
+            const v = process.argv[1]; const [a, b, c] = v.split(".").map(Number);
+            if (a < 11 || (a === 11 && (b < 5 || (b === 5 && c < 1)))) {
+              console.error("npm " + v + " is too old for trusted publishing; 11.5.1 or newer is needed");
+              process.exit(1);
+            }
+            console.log("npm " + v);
+          ' "$(npm --version)"
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter ai-obs-cli typecheck
+      - run: pnpm --filter ai-obs-cli build
+      - run: pnpm --filter ai-obs-cli test # includes the real-process hook tests (dist exists; CI timing allowance)
+
+      - name: Publish to npm
+        working-directory: packages/collector
+        run: |
+          version=$(node -p "require('./package.json').version")
+          case "$version" in *-*) tag=next ;; *) tag=latest ;; esac
+          echo "publishing ai-obs-cli@$version with dist-tag $tag"
+          npm publish --tag "$tag"

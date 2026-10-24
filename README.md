@@ -173,6 +173,7 @@ Workspace packages are consumed from source in type-checking and tests (custom e
 | `pnpm db:seed` | Reset and seed the demo deployment SPECTADO (~300 turns over 60 days), its people, a service user and an admin |
 | `RUN_ONCE=<rollups\|budgets\|retention\|runaways> pnpm --filter @ai-obs/worker once` | Run one worker job and exit (e.g. after `pnpm db:seed` to fill `daily_rollups`) |
 | `pnpm dev:token [email] [label] [days\|none]` | Dev only: create a manual user ingest token (default alice@acme.example, label `dev-token`, 90 days) and print it |
+| `git tag collector-v<version> && git push origin collector-v<version>` | Publish the collector to npm from GitHub Actions (trusted publishing, no token in the repository; see [the collector README, "Releasing"](packages/collector/README.md#releasing)) |
 
 ## Configuration
 
