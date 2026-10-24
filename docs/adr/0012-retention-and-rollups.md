@@ -1,3 +1,6 @@
+---
+spoor_id: 99a94d18-82a2-40f5-a127-3589d09da537
+---
 # ADR-0012: Configurable raw retention with permanent daily rollups
 
 - **Status:** Accepted; amended 2026-10-24 by [ADR-0028](0028-one-deployment-one-company.md) (no plan caps)

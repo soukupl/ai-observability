@@ -1,3 +1,6 @@
+---
+spoor_id: e77f1a8d-bdc0-4487-9fcb-2bfa8bf2cc76
+---
 # ADR-0011: Local file queue with idempotent ingest
 
 - **Status:** Accepted; amended 2026-10-08 by [ADR-0022](0022-company-memberships-and-token-kinds.md) and 2026-10-24 by
