@@ -1,3 +1,6 @@
+---
+spoor_id: 7f835c84-850c-46bf-a76b-6cac45289e1b
+---
 # ADR-0017: Outcome-based insights (wasted spend, skill impact, effort advisor) and outcome-split rollups
 
 - **Status:** Accepted

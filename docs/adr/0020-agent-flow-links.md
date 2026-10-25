@@ -1,3 +1,6 @@
+---
+spoor_id: 26a37e40-861a-4e91-abe1-e684de1c0c70
+---
 # ADR-0020: Agent flow — stage index, flow key and typed links between sub-agent runs
 
 - **Status:** Accepted

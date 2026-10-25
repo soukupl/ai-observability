@@ -1,3 +1,6 @@
+---
+spoor_id: ba4eefef-d426-4ef5-86c4-88649fa6b844
+---
 # ADR-0013: Dashboard login via magic link and Google/GitHub OAuth
 
 - **Status:** Accepted; amended 2026-10-24 by [ADR-0028](0028-one-deployment-one-company.md) (bootstrap by `ADMIN_EMAILS` /

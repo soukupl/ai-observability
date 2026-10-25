@@ -1,3 +1,6 @@
+---
+spoor_id: 54440e09-796e-4484-a03e-a94028037875
+---
 # ADR-0014: DB roles as NOLOGIN roles reached via SET ROLE, optional per-service logins
 
 - **Status:** Accepted; amended 2026-10-24 by [ADR-0028](0028-one-deployment-one-company.md) (no `app_platform` role)

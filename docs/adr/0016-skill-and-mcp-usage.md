@@ -1,3 +1,6 @@
+---
+spoor_id: ffa823cd-24d8-412d-9cae-e3d076c696b9
+---
 # ADR-0016: Record skill and MCP usage by name, following the project-naming mode
 
 - **Status:** Accepted

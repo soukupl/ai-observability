@@ -1,3 +1,6 @@
+---
+spoor_id: 73e11ce7-c6d6-41a6-b1aa-4d00f519f097
+---
 # ADR-0019: Agent groups and orchestration ids on runs; git-graph agent timeline
 
 - **Status:** Accepted

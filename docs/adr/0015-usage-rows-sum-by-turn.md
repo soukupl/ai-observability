@@ -1,3 +1,6 @@
+---
+spoor_id: 43ef838f-a9ed-4845-ae5b-ce089cd3c4a7
+---
 # ADR-0015: Usage rows are summed by `turn_id`; ingest stores the turn's usage as given
 
 - **Status:** Proposed (written during integration; owner to confirm)

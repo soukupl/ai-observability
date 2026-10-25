@@ -1,3 +1,6 @@
+---
+spoor_id: edc7995f-de70-47c1-8f3d-9d25891e576a
+---
 # ADR-0021: Friendly model names in the UI; raw ids on machine-facing surfaces
 
 - **Status:** Accepted

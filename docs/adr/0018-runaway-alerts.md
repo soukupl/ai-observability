@@ -1,3 +1,6 @@
+---
+spoor_id: 915d33af-9a1c-4b36-94f5-c0137cae5344
+---
 # ADR-0018: Runaway alerts after a turn ends, evaluated by the worker
 
 - **Status:** Accepted
