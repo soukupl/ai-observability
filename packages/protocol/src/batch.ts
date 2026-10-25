@@ -28,8 +28,8 @@ export const ingestResponse = z.object({
   duplicates: z.int().nonnegative(),
   rejected: z.array(z.object({ event_id: z.string().nullable(), reason: z.string() })),
   /**
-   * At most one per session per batch. Old collectors ignore it. `team` echoes the session_start's `project.team`,
-   * which need not be a valid slug (a `team_unknown` for a malformed one); clients should check it before display.
+   * Retired (ADR-0035): servers no longer send it; kept so responses of older servers still validate. It was at most
+   * one per session per batch, `team` echoing the session_start's `project.team` (ADR-0030 R2).
    */
   warnings: z
     .array(

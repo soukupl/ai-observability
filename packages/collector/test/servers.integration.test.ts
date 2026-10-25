@@ -16,7 +16,6 @@ import { sessionEndEvent, sessionStartEvent } from '../src/events.js';
 import { runHook } from '../src/hook.js';
 import { listJobs } from '../src/jobs.js';
 import type { AiObsPaths } from '../src/paths.js';
-import { resolveProjectKey } from '../src/project-key.js';
 import type { IngestEvent } from '../src/protocol-types.js';
 import { runWorker } from '../src/worker.js';
 import { bearerOf, cleanupHomes, fakeAdapter, gitRepo, startServer, tmpHome, tokenResponder, writeDotFile, type Received, type ServerReply, type TokenResponse } from './helpers.js';
@@ -99,7 +98,6 @@ function machine() {
       stdout: { write: (s: string) => (out += s) },
       spawnWorker: () => {},
       selfCommand: ['ai-obs'],
-      resolveProjectKey: (dir) => resolveProjectKey(dir, { timeoutMs: 5000 }),
     });
     expect(code).toBe(0);
     return out;
@@ -152,7 +150,7 @@ describe('DoD: one machine, several servers, per-user tokens and dot files', () 
     const billing = gitRepo({ remote: 'git@github.com:acme/billing.git' });
     const s1 = await m.session(billing, 's1');
     const text = additionalContext(s1.nudge);
-    expect(text).toContain(`ai-obs link --server <url> --team <team> --project-dir ${billing}`);
+    expect(text).toContain(`ai-obs link --server <url> --project-dir ${billing}`);
     expect(text).not.toContain('aiobs_');
     expect(A.ingests()).toHaveLength(0);
     expect(B.ingests()).toHaveLength(0);
@@ -161,8 +159,8 @@ describe('DoD: one machine, several servers, per-user tokens and dot files', () 
     expect(await m.hook('SessionStart', billing, 's1')).toBe(''); // same text, same session: not repeated
     m.dropJobs();
 
-    // `ai-obs link` → B, team platform: the waiting events follow, hashed with B's salt, with the team.
-    const link = await m.cli(['link', '--server', B.url, '--team', 'platform'], billing);
+    // `ai-obs link` → B: the waiting events follow, hashed with B's salt, without a team (the admin sets it on B).
+    const link = await m.cli(['link', '--server', B.url], billing);
     expect(link.code, link.text).toBe(0);
     expect(link.text).toContain(`2 queued events of this repository recorded without a server now go to ${B.url}`);
     const f1 = await m.cli(['flush']);
@@ -170,7 +168,7 @@ describe('DoD: one machine, several servers, per-user tokens and dot files', () 
     expect(A.ingests()).toHaveLength(0);
     expect(B.ingests().every((r) => bearerOf(r) === 'aiobs_u_b')).toBe(true);
     expect(B.events().map(sidOf)).toEqual(['s1', 's1']);
-    expect(B.projects()).toEqual([{ key: hashed(SB, BILLING), team: 'platform' }]);
+    expect(B.projects()).toEqual([{ key: hashed(SB, BILLING) }]);
     expect(JSON.stringify(B.received)).not.toContain(BILLING);
     expect(m.queued()).toEqual({});
     // linked now: the next session start says nothing and goes straight to B
@@ -178,12 +176,13 @@ describe('DoD: one machine, several servers, per-user tokens and dot files', () 
     expect(s2.nudge).toBe('');
     expect(B.events().filter((e) => sidOf(e) === 's2')).toHaveLength(2);
 
-    // A committed dot file naming A routes another repository to A (plain naming, its team); A starts answering 401.
+    // A committed dot file naming A routes another repository to A (plain naming; a leftover team key is not sent);
+    // A starts answering 401.
     const shop = gitRepo({ remote: 'git@github.com:acme/shop.git' });
     writeDotFile(shop, { server: A.url, team: 'spectado' });
     const s3 = await m.session(shop, 's3');
     expect(s3.nudge).toBe('');
-    expect(A.projects()).toEqual([{ key: SHOP, name: 'shop', team: 'spectado' }]);
+    expect(A.projects()).toEqual([{ key: SHOP, name: 'shop' }]);
     aMap.aiobs_u_a!.status = 401;
     await m.hook('SessionStart', shop, 's4');
     await m.hook('Stop', shop, 's4');
@@ -192,7 +191,7 @@ describe('DoD: one machine, several servers, per-user tokens and dot files', () 
     const w = await runWorker({ paths: m.paths, adapters: [m.adapter] });
     expect(w.flush?.servers[A.url]?.status).toBe('auth_error');
     expect(w.flush?.servers[B.url]?.status).toBe('ok'); // B keeps delivering in the same flush
-    expect(m.queued()).toEqual({ [`${SHOP} ${A.url} spectado`]: 2 });
+    expect(m.queued()).toEqual({ [`${SHOP} ${A.url} -`]: 2 });
     const status = await m.cli(['status'], shop);
     expect(status.text).toContain(`REJECTED (401, expired or revoked): run \`ai-obs login --server ${A.url}\``);
     expect(additionalContext(await m.hook('SessionStart', shop, 's6'))).toContain(`login --server ${A.url}`);
@@ -212,10 +211,10 @@ describe('DoD: one machine, several servers, per-user tokens and dot files', () 
 
     // A dot file naming a server this machine is not logged in to: events wait, no token ever goes there.
     const other = gitRepo({ remote: 'git@github.com:acme/other.git' });
-    writeDotFile(other, { server: C.url, team: 'platform' });
+    writeDotFile(other, { server: C.url });
     const s7 = await m.session(other, 's7');
     expect(additionalContext(s7.nudge)).toContain(`login --server ${C.url}`);
-    expect(m.queued()).toEqual({ [`github.com/acme/other ${C.url} platform`]: 2 });
+    expect(m.queued()).toEqual({ [`github.com/acme/other ${C.url} -`]: 2 });
     expect(C.received).toHaveLength(0);
     expect(A.events().map(sidOf)).not.toContain('s7');
     expect(B.events().map(sidOf)).not.toContain('s7');

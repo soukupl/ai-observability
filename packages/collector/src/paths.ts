@@ -25,8 +25,6 @@ export function aiObsPaths(home: string = resolveHome()) {
     projectKeyCache: join(state, 'project-keys.json'),
     /** cwd → dot-file lookup (.ai-obs.json / .ai-obs.local.json), written by the worker, read by the hook */
     dotFileCache: join(state, 'dot-files.json'),
-    /** latest ingest warning per project key (team_not_member / team_unknown) */
-    warnings: join(state, 'warnings.json'),
     /** SessionStart nudge markers, one file per session id */
     nudged: join(state, 'nudged'),
     /** size-cap drop counters */

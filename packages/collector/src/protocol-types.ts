@@ -21,7 +21,7 @@ export const MAX_STAGE_INDEX = 10_000;
 export const USER_TOKEN_PREFIX = 'aiobs_u_' as const;
 /** Retired prefixes (company `aiobs_c_`, team `aiobs_t_`): never accepted, kept to name them in messages and maskToken. */
 export const RETIRED_TOKEN_PREFIXES = ['aiobs_c_', 'aiobs_t_'] as const;
-/** Team slug (dot file `team`, `session_start.project.team`): 1–63 of a-z0-9-. */
+/** Team slug (collector-config `teams`): 1–63 of a-z0-9-. */
 export const TEAM_SLUG_RE = /^[a-z0-9-]{1,63}$/;
 /** Recursion guard for the collector's own summarizer child process (BRIEF §5.6). */
 export const SUMMARIZING_ENV = 'AI_OBS_SUMMARIZING' as const;
@@ -72,7 +72,7 @@ export interface ProjectRef {
   /** normalized git remote (`github.com/acme/billing`) or `sha256:<64 hex>` — never a local path */
   key: string;
   name?: string;
-  /** team slug of the repository's dot file in force when the session started (absent = no dot file) */
+  /** retired dot-file team (ADR-0030); never sent since ADR-0035, and servers ignore it */
   team?: string;
 }
 
@@ -222,7 +222,7 @@ export interface IngestBatch {
 }
 
 export type IngestWarningCode = 'team_not_member' | 'team_unknown';
-/** The server could not use the session's dot-file team (at most one per session per batch). */
+/** The server could not use the session's dot-file team (ADR-0030). Servers stopped sending it with ADR-0035. */
 export interface IngestWarning {
   code: IngestWarningCode;
   team: string;
@@ -233,7 +233,7 @@ export interface IngestResponse {
   accepted: number;
   duplicates: number;
   rejected: Array<{ event_id: string | null; reason: string }>;
-  /** optional; older servers omit it */
+  /** only from servers before ADR-0035; the collector ignores it */
   warnings?: IngestWarning[];
 }
 

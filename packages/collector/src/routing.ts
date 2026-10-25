@@ -1,7 +1,9 @@
 /**
  * Routing (brief appendix E): a session's events go to a stream keyed by (project key, server endpoint,
  * team slug), fixed at the session's first hook; the sender sends a stream with the token of its endpoint's
- * server entry, and never to an endpoint this machine has not logged in to.
+ * server entry, and never to an endpoint this machine has not logged in to. The team part is always '' for
+ * new sessions (ADR-0035: an admin maps projects to teams on the server); it stays in the key so streams
+ * queued before that still parse.
  */
 import { createHash } from 'node:crypto';
 import { endpointHost, isExpired, loadConfig, tryNormalizeEndpoint, type CollectorConfig, type ServerEntry } from './config.js';
@@ -12,7 +14,7 @@ import { TEAM_SLUG_RE } from './protocol-types.js';
 
 /**
  * Where a session's events go, pinned once per session (C15). `endpoint` '' = no server chosen yet (no dot
- * file and two or more servers); `team` '' = no dot-file team. `unresolved` = git timed out at capture (C16).
+ * file and two or more servers); `team` is '' (a slug only in streams queued before ADR-0035). `unresolved` = git timed out at capture (C16).
  */
 export type StreamKey =
   | { kind: 'project'; pk: string; endpoint: string; team: string }
@@ -40,13 +42,13 @@ export function keyDirName(key: StreamKey): string {
 }
 
 /**
- * The target of a new session: the dot file's server, else the only registered server, else none (''); the
- * dot file's team, else ''. A dot-file server this machine is not logged in to is still the target: its
+ * The target of a new session: the dot file's server, else the only registered server, else none (''); never
+ * a team (ADR-0035). A dot-file server this machine is not logged in to is still the target: its
  * events wait (held `no-server`) until `ai-obs login --server <url>`.
  */
 export function targetFor(config: Pick<CollectorConfig, 'servers'>, dot: DotFileValue): StreamTarget {
   const endpoint = dot.server ?? (config.servers.length === 1 ? config.servers[0]!.endpoint : '');
-  return { endpoint, team: dot.team ?? '' };
+  return { endpoint, team: '' };
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);

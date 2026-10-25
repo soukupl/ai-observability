@@ -2,9 +2,8 @@
  * The SessionStart nudge: one short text the hook puts into the agent's context, only when (a) the
  * repository has no dot-file server and two or more servers are registered (run `ai-obs link`), (b) the
  * repository's server has no token, or an expired or refused one (run `ai-obs login --server …`), (c) its
- * token expires within 14 days, (d) queued events were dropped, (e) the server ignored this project's
- * dot-file team. Identifiers only (hosts, URLs, team slugs, the sanitized directory), at most 1000
- * characters, once per session per text. Imports only fs-level modules: the hook must stay fast.
+ * token expires within 14 days, (d) queued events were dropped. Identifiers only (hosts, URLs, the sanitized
+ * directory), at most 1000 characters, once per session per text. No git call. Imports only fs-level modules: the hook must stay fast.
  */
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync } from 'node:fs';
@@ -15,9 +14,7 @@ import { droppedTotal, markDroppedShown, readDelivery, readDropped, serverDelive
 import { lookupDotFile } from './dotfile.js';
 import { writeFileAtomic } from './fsutil.js';
 import { nudgeMarkerPath, type AiObsPaths } from './paths.js';
-import { cachedPk, readPkCache } from './pk-cache.js';
-import { TEAM_SLUG_RE, type HarnessName, type IngestWarningCode } from './protocol-types.js';
-import { readWarnings } from './warnings.js';
+import type { HarnessName } from './protocol-types.js';
 
 /**
  * How SessionStart output reaches the agent. Claude Code: JSON `hookSpecificOutput.additionalContext`.
@@ -52,8 +49,6 @@ export type NudgeMain =
 
 export interface NudgeInput {
   main: NudgeMain | null;
-  /** the server ignored this project's dot-file team (latest ingest warning) */
-  warning?: { code: IngestWarningCode; team: string } | null;
   /** kept (held) events deleted by the size cap that the user has not been told about */
   droppedEvents?: number;
   /** sendable events deleted by the 30-day / size caps that the user has not been told about (C13) */
@@ -100,7 +95,7 @@ export function buildNudge(input: NudgeInput): string | null {
           const shown = m.hosts.slice(0, listMax);
           const more = m.hosts.length - shown.length;
           parts.push(
-            `ai-obs: this repository has no .ai-obs.json and this machine is logged in to ${m.hosts.length} ai-obs servers (${shown.join(', ')}${more > 0 ? ` and ${more} more` : ''}), so its AI usage data is kept on this machine and not reported. Ask the user which server and team this repository reports to, then run \`${cmd} link --server <url> --team <team>${dirFlag}\`.${dirNote} Do not choose without asking; ask only once in this session.${cmdNote}${ASK}`,
+            `ai-obs: this repository has no .ai-obs.json and this machine is logged in to ${m.hosts.length} ai-obs servers (${shown.join(', ')}${more > 0 ? ` and ${more} more` : ''}), so its AI usage data is kept on this machine and not reported. Ask the user which server this repository reports to, then run \`${cmd} link --server <url>${dirFlag}\`.${dirNote} Do not choose without asking; ask only once in this session.${cmdNote}${ASK}`,
           );
           break;
         }
@@ -125,12 +120,6 @@ export function buildNudge(input: NudgeInput): string | null {
           break;
         }
       }
-    }
-    const w = input.warning;
-    if (w && TEAM_SLUG_RE.test(w.team)) {
-      parts.push(
-        `ai-obs: the server ignored team "${w.team}" from this repository's .ai-obs.json (${w.code === 'team_not_member' ? 'the user is not a member of that team' : 'no team has that slug'}), so the user's primary team is used, or no team if they have none. Tell the user (\`${cmd} status\`).`,
-      );
     }
     if (input.droppedEvents && input.droppedEvents > 0)
       parts.push(`Note: ai-obs deleted ${Math.floor(input.droppedEvents)} kept events because its local queue reached the 50 MB cap; tell the user (\`${cmd} status\`).`);
@@ -162,22 +151,11 @@ export interface NudgeContext {
   sessionId: unknown;
   /** wall clock, ms */
   now: number;
-  /** `perfNow()` at hook entry */
-  startedAt: number;
-  perfNow: () => number;
-  resolveProjectKey: (cwd: string, opts: { timeoutMs: number; bounded?: boolean }) => Promise<string | null>;
   selfCommand: readonly string[] | null;
 }
 
-/** Git is tried only while fewer than this many ms have elapsed since hook entry, and for at most this long (C26). */
-export const GIT_START_LIMIT_MS = 40;
-export const GIT_BUDGET_MS = 40;
-export const HOOK_BUDGET_MS = 80;
-
 interface Decision {
   main: NudgeMain | null;
-  /** the endpoint this repository's new sessions go to ('' = none chosen) */
-  endpoint: string | null;
   /** the repository root (where `link` writes the dot file); null outside git */
   root: string | null;
 }
@@ -191,39 +169,25 @@ function decideMain(ctx: NudgeContext): Decision | null {
   const servers = config.servers;
   if (!dot.server && servers.length >= 2) {
     const hosts = servers.map((s) => safeHost(s.endpoint)).filter((h): h is string => h !== null);
-    return { main: { kind: 'link', hosts }, endpoint: '', root };
+    return { main: { kind: 'link', hosts }, root };
   }
   const endpoint = dot.server ?? (servers.length === 1 ? servers[0]!.endpoint : null);
-  if (!endpoint) return { main: null, endpoint: null, root };
+  if (!endpoint) return { main: null, root };
   const entry = findServer(config, endpoint);
-  if (!entry) return { main: { kind: 'login', server: endpoint, reason: 'no-token' }, endpoint, root };
-  if (isExpired(entry, ctx.now)) return { main: { kind: 'login', server: endpoint, reason: 'expired' }, endpoint, root };
+  if (!entry) return { main: { kind: 'login', server: endpoint, reason: 'no-token' }, root };
+  if (isExpired(entry, ctx.now)) return { main: { kind: 'login', server: endpoint, reason: 'expired' }, root };
   let blocked = false;
   try {
     blocked = !!serverDelivery(readDelivery(ctx.paths), entry).blocked;
   } catch {
     blocked = false;
   }
-  if (blocked) return { main: { kind: 'login', server: endpoint, reason: 'rejected' }, endpoint, root };
+  if (blocked) return { main: { kind: 'login', server: endpoint, reason: 'rejected' }, root };
   const days = daysLeft(entry, ctx.now);
   if (days !== null && Date.parse(entry.expires_at!) - ctx.now <= EXPIRY_NUDGE_DAYS * DAY_MS) {
-    return { main: { kind: 'expiring', server: endpoint, days, date: entry.expires_at!.slice(0, 10) }, endpoint, root };
+    return { main: { kind: 'expiring', server: endpoint, days, date: entry.expires_at!.slice(0, 10) }, root };
   }
-  return { main: null, endpoint, root };
-}
-
-/** (e): the latest warning of this project, for the server its new sessions go to. Git only when a warning exists. */
-async function decideWarning(ctx: NudgeContext, endpoint: string | null): Promise<NudgeInput['warning']> {
-  if (!endpoint) return null;
-  const warnings = readWarnings(ctx.paths);
-  if (!Object.keys(warnings).length) return null;
-  let pk = cachedPk(readPkCache(ctx.paths), ctx.cwd);
-  if (pk === null) {
-    const elapsed = ctx.perfNow() - ctx.startedAt;
-    if (elapsed < GIT_START_LIMIT_MS) pk = await ctx.resolveProjectKey(ctx.cwd, { timeoutMs: Math.min(GIT_BUDGET_MS, HOOK_BUDGET_MS - elapsed), bounded: true });
-  }
-  const w = pk !== null && Object.prototype.hasOwnProperty.call(warnings, pk) ? warnings[pk] : undefined;
-  return w && w.endpoint === endpoint ? { code: w.code, team: w.team } : null;
+  return { main: null, root };
 }
 
 export interface Nudge {
@@ -236,7 +200,6 @@ export interface Nudge {
 export async function computeNudge(ctx: NudgeContext): Promise<Nudge | null> {
   const d = decideMain(ctx);
   if (!d) return null;
-  const warning = await decideWarning(ctx, d.endpoint);
   let droppedEvents = 0;
   let droppedSendable = 0;
   let droppedShown = false;
@@ -247,7 +210,7 @@ export async function computeNudge(ctx: NudgeContext): Promise<Nudge | null> {
     droppedSendable = Math.max(0, dropped.sendable_events - dropped.shown_sendable);
     droppedShown = true;
   }
-  const text = buildNudge({ main: d.main, warning, droppedEvents, droppedSendable, selfCommand: ctx.selfCommand, dir: d.root ?? ctx.cwd });
+  const text = buildNudge({ main: d.main, droppedEvents, droppedSendable, selfCommand: ctx.selfCommand, dir: d.root ?? ctx.cwd });
   if (text === null) return null;
 
   const markerFile = nudgeMarkerPath(ctx.paths, ctx.sessionId);

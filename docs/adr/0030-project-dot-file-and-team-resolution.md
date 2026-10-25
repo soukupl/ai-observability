@@ -3,7 +3,8 @@ spoor_id: 33662462-0b21-4623-89b5-c00bf4c43555
 ---
 # ADR-0030: Project dot file and team resolution
 
-- **Status:** Accepted. Replaces the collector design of [ADR-0022](0022-company-memberships-and-token-kinds.md)
+- **Status:** Accepted; **amended by [ADR-0035](0035-teams-assigned-by-admin-only.md)**: the dot file no longer names a
+  team, the server ignores `project.team` and sends no warnings (admin mapping, else primary team). Replaces the collector design of [ADR-0022](0022-company-memberships-and-token-kinds.md)
   (Q3, Q4 assignment, Q8, routing tables A and B, C1-C27 except those listed under "What survives of C1-C27"); amends
   [ADR-0011](0011-local-queue-idempotent-delivery.md) (stream key)
 - **Date:** 2026-10-24

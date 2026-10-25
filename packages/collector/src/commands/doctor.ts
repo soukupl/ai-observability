@@ -82,7 +82,7 @@ export async function doctorCommand(args: readonly string[], io: Io, deps: CliDe
   }
   view = loadRouting(deps.paths, nowMs) ?? view; // doctor may have refreshed caches, entries and blocked flags
 
-  // 3. This repository: dot file, server, team, warnings
+  // 3. This repository: dot file, server, how the team is set
   const cwd = deps.cwd ?? process.cwd();
   for (const l of await checkRepository(view, deps, cwd, nowMs)) {
     const text = `repository: ${terminalSafe(l.text)}`;

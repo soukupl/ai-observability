@@ -237,10 +237,9 @@ describe('ai-obs cli', () => {
   it('keeps local files under ~/.ai-obs', () => {
     const p = aiObsPaths('/h/.ai-obs');
     expect([p.config, p.state, p.queue]).toEqual(['/h/.ai-obs/config.json', '/h/.ai-obs/state', '/h/.ai-obs/queue']);
-    expect([p.collectorConfigDir, p.dotFileCache, p.warnings, p.queueProjects]).toEqual([
+    expect([p.collectorConfigDir, p.dotFileCache, p.queueProjects]).toEqual([
       '/h/.ai-obs/state/collector-config',
       '/h/.ai-obs/state/dot-files.json',
-      '/h/.ai-obs/state/warnings.json',
       '/h/.ai-obs/queue/p',
     ]);
   });

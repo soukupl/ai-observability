@@ -78,7 +78,7 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
       expect(t).toMatchObject({
         user_id: w.users.alice,
         attribution: 'verified',
-        team_id: w.teams.mobile, // the admin's project mapping wins over the dot-file team and alice's primary team
+        team_id: w.teams.mobile, // the admin's project mapping wins over alice's primary team (project.team is ignored)
         session_id: s!.id,
         project_id: w.projects.billing,
         model: 'claude-opus-5-5',
@@ -142,7 +142,7 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
     });
   });
 
-  describe('attribution and team resolution (ADR-0029, ADR-0030)', () => {
+  describe('attribution and team resolution (ADR-0029, ADR-0035)', () => {
     const teamOf = async (table: 'turns' | 'agent_sessions', id: string) =>
       (await q<{ team_id: string | null; user_id: string | null; attribution?: string }>(
         table === 'turns'
@@ -166,7 +166,7 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
       expect(await teamOf('turns', 'svc-t')).toEqual({ user_id: w.users.svc, attribution: 'verified', team_id: w.teams.mobile });
     });
 
-    it('the admin mapping wins over the dot-file team (no warning, even for a team the user is not in)', async () => {
+    it('the admin mapping sets the team; a project.team from an older collector is ignored', async () => {
       for (const [id, team] of [['tr-map-1', 'design'], ['tr-map-2', 'nope'], ['tr-map-3', 'mobile']] as const) {
         const res = await post(w.tokens.alice, batch([ev.sessionStart(id, 'github.com/acme/billing', undefined, team), ev.turn(id, `${id}-t`)]));
         expect(res.body).toEqual({ accepted: 2, duplicates: 0, rejected: [] });
@@ -175,106 +175,75 @@ describe.skipIf(skip !== null)(`ingest API against Postgres${skip ? ` (skipped: 
       }
     });
 
-    it("the dot-file team applies when the user is a member of it; the session's turns, runs and usage follow", async () => {
+    it("an unmapped project reports to the user's primary team whatever project.team says, without warnings", async () => {
       const res = await post(w.tokens.alice, batch([
         ev.sessionStart('tr-dot', 'github.com/acme/web', 'web', 'design'),
         ev.turn('tr-dot', 'tr-dot-t'),
         ev.run('tr-dot-t', 'tr-dot-r', null, 1),
-      ]));
-      expect(res.body).toEqual({ accepted: 3, duplicates: 0, rejected: [] });
-      expect((await teamOf('agent_sessions', 'tr-dot'))!.team_id).toBe(w.teams.design);
-      expect((await teamOf('turns', 'tr-dot-t'))!.team_id).toBe(w.teams.design);
-      expect(await q(sql`select team_id from runs where external_id = 'tr-dot-r'`)).toEqual([{ team_id: w.teams.design }]);
-      expect(await q(sql`select distinct u.team_id from usage u join turns t on t.id = u.turn_id where t.external_id = 'claude-code:tr-dot-t'`))
-        .toEqual([{ team_id: w.teams.design }]);
-    });
-
-    it('a dot-file team the user is not in, or that does not exist, falls through to the primary team with a warning', async () => {
-      const res = await post(w.tokens.alice, batch([
         ev.sessionStart('tr-nm', 'github.com/acme/web', undefined, 'mobile'),
-        ev.turn('tr-nm', 'tr-nm-t'),
         ev.sessionStart('tr-unk', 'github.com/acme/web', undefined, 'no-such-team'),
       ]));
-      expect(res.status).toBe(200);
-      expect(res.body).toMatchObject({ accepted: 3, duplicates: 0, rejected: [] });
-      expect(res.body.warnings).toEqual(expect.arrayContaining([
-        { code: 'team_not_member', team: 'mobile', session_id: 'tr-nm' },
-        { code: 'team_unknown', team: 'no-such-team', session_id: 'tr-unk' },
-      ]));
-      expect(res.body.warnings).toHaveLength(2);
+      expect(res).toEqual({ status: 200, body: { accepted: 5, duplicates: 0, rejected: [] } });
       expect(schemas.ingestResponse.safeParse(res.body).success).toBe(true);
-      expect((await teamOf('agent_sessions', 'tr-nm'))!.team_id).toBe(w.teams.platform);
-      expect((await teamOf('turns', 'tr-nm-t'))!.team_id).toBe(w.teams.platform);
-      expect((await teamOf('agent_sessions', 'tr-unk'))!.team_id).toBe(w.teams.platform);
+      for (const id of ['tr-dot', 'tr-nm', 'tr-unk']) expect((await teamOf('agent_sessions', id))!.team_id).toBe(w.teams.platform);
+      expect((await teamOf('turns', 'tr-dot-t'))!.team_id).toBe(w.teams.platform);
+      expect(await q(sql`select team_id from runs where external_id = 'tr-dot-r'`)).toEqual([{ team_id: w.teams.platform }]);
+      expect(await q(sql`select distinct u.team_id from usage u join turns t on t.id = u.turn_id where t.external_id = 'claude-code:tr-dot-t'`))
+        .toEqual([{ team_id: w.teams.platform }]);
     });
 
-    it('without a primary team the fall-through ends at no team; without a dot file there is no warning', async () => {
+    it('without a mapping or a primary team a session has no team, even when project.team names one of the user\'s teams', async () => {
       const res = await post(w.tokens.nora, batch([
         ev.sessionStart('tr-nora', 'github.com/acme/web', undefined, 'design'),
         ev.turn('tr-nora', 'tr-nora-t'),
         ev.sessionStart('tr-nora2', 'github.com/acme/web'),
       ]));
-      expect(res.body).toEqual({
-        accepted: 3, duplicates: 0, rejected: [],
-        warnings: [{ code: 'team_not_member', team: 'design', session_id: 'tr-nora' }],
-      });
+      expect(res.body).toEqual({ accepted: 3, duplicates: 0, rejected: [] });
       expect(await teamOf('turns', 'tr-nora-t')).toEqual({ user_id: w.users.nora, attribution: 'verified', team_id: null });
       expect((await teamOf('agent_sessions', 'tr-nora2'))!.team_id).toBeNull();
     });
 
-    it('at most one warning per session per batch; a replayed batch is all duplicates and warns no more', async () => {
-      const b = batch([
-        ev.sessionStart('tr-once', 'github.com/acme/web', undefined, 'nope'),
-        ev.sessionStart('tr-once', 'github.com/acme/web', undefined, 'nope'),
-      ]);
-      const first = await post(w.tokens.alice, b);
-      expect(first.body).toEqual({
-        accepted: 2, duplicates: 0, rejected: [], warnings: [{ code: 'team_unknown', team: 'nope', session_id: 'tr-once' }],
-      });
-      expect((await post(w.tokens.alice, b)).body).toEqual({ accepted: 0, duplicates: 2, rejected: [] });
-    });
-
     it('the team is pinned at session_start: a later mapping does not move the running session, a new session follows it', async () => {
-      await post(w.tokens.alice, batch([ev.sessionStart('tr-pin', 'github.com/acme/pinned', undefined, 'design'), ev.turn('tr-pin', 'tr-pin-1')]));
-      expect((await teamOf('turns', 'tr-pin-1'))!.team_id).toBe(w.teams.design);
+      await post(w.tokens.alice, batch([ev.sessionStart('tr-pin', 'github.com/acme/pinned'), ev.turn('tr-pin', 'tr-pin-1')]));
+      expect((await teamOf('turns', 'tr-pin-1'))!.team_id).toBe(w.teams.platform);
       await q(sql`update projects set team_id = ${w.teams.mobile} where key = 'github.com/acme/pinned'`);
       await post(w.tokens.alice, batch([ev.turn('tr-pin', 'tr-pin-2'), ev.run('tr-pin-2', 'tr-pin-r', null, 1)]));
-      expect((await teamOf('turns', 'tr-pin-2'))!.team_id).toBe(w.teams.design);
-      expect(await q(sql`select team_id from runs where external_id = 'tr-pin-r'`)).toEqual([{ team_id: w.teams.design }]);
-      await post(w.tokens.alice, batch([ev.sessionStart('tr-pin-new', 'github.com/acme/pinned', undefined, 'design'), ev.turn('tr-pin-new', 'tr-pin-3')]));
+      expect((await teamOf('turns', 'tr-pin-2'))!.team_id).toBe(w.teams.platform);
+      expect(await q(sql`select team_id from runs where external_id = 'tr-pin-r'`)).toEqual([{ team_id: w.teams.platform }]);
+      await post(w.tokens.alice, batch([ev.sessionStart('tr-pin-new', 'github.com/acme/pinned'), ev.turn('tr-pin-new', 'tr-pin-3')]));
       expect((await teamOf('turns', 'tr-pin-3'))!.team_id).toBe(w.teams.mobile);
     });
 
     it('a later session_start of the same session keeps the pinned team, so its turns never split across teams', async () => {
-      await post(w.tokens.alice, batch([ev.sessionStart('tr-rr', 'github.com/acme/repin', undefined, 'design'), ev.turn('tr-rr', 'tr-rr-1')]));
+      await post(w.tokens.alice, batch([ev.sessionStart('tr-rr', 'github.com/acme/repin'), ev.turn('tr-rr', 'tr-rr-1')]));
       await q(sql`update projects set team_id = ${w.teams.mobile} where key = 'github.com/acme/repin'`);
       // A lost collector state sends a fresh session_start for the running session.
-      const res = await post(w.tokens.alice, batch([ev.sessionStart('tr-rr', 'github.com/acme/repin', undefined, 'design'), ev.turn('tr-rr', 'tr-rr-2')]));
+      const res = await post(w.tokens.alice, batch([ev.sessionStart('tr-rr', 'github.com/acme/repin'), ev.turn('tr-rr', 'tr-rr-2')]));
       expect(res.body).toEqual({ accepted: 2, duplicates: 0, rejected: [] });
-      expect((await teamOf('agent_sessions', 'tr-rr'))!.team_id).toBe(w.teams.design);
-      expect((await teamOf('turns', 'tr-rr-1'))!.team_id).toBe(w.teams.design);
-      expect((await teamOf('turns', 'tr-rr-2'))!.team_id).toBe(w.teams.design);
+      expect((await teamOf('agent_sessions', 'tr-rr'))!.team_id).toBe(w.teams.platform);
+      expect((await teamOf('turns', 'tr-rr-1'))!.team_id).toBe(w.teams.platform);
+      expect((await teamOf('turns', 'tr-rr-2'))!.team_id).toBe(w.teams.platform);
       // A re-sent old turn stays on the pinned team as well.
       await post(w.tokens.alice, batch([ev.turn('tr-rr', 'tr-rr-1')]));
-      expect((await teamOf('turns', 'tr-rr-1'))!.team_id).toBe(w.teams.design);
+      expect((await teamOf('turns', 'tr-rr-1'))!.team_id).toBe(w.teams.platform);
     });
 
-    it('turns, runs and usage that arrived before session_start move to the resolved team when it arrives', async () => {
+    it('turns, runs and usage that arrived before session_start move to the resolved (mapped) team when it arrives', async () => {
       await post(w.tokens.alice, batch([ev.turn('tr-late', 'tr-late-t'), ev.run('tr-late-t', 'tr-late-r', null, 1)]));
       expect((await teamOf('turns', 'tr-late-t'))!.team_id).toBe(w.teams.platform); // primary team meanwhile
-      const res = await post(w.tokens.alice, batch([ev.sessionStart('tr-late', 'github.com/acme/web', undefined, 'design')]));
+      const res = await post(w.tokens.alice, batch([ev.sessionStart('tr-late', 'github.com/acme/billing')]));
       expect(res.body).toEqual({ accepted: 1, duplicates: 0, rejected: [] });
-      expect((await teamOf('agent_sessions', 'tr-late'))!.team_id).toBe(w.teams.design);
-      expect((await teamOf('turns', 'tr-late-t'))!.team_id).toBe(w.teams.design);
-      expect(await q(sql`select team_id from runs where external_id = 'tr-late-r'`)).toEqual([{ team_id: w.teams.design }]);
+      expect((await teamOf('agent_sessions', 'tr-late'))!.team_id).toBe(w.teams.mobile);
+      expect((await teamOf('turns', 'tr-late-t'))!.team_id).toBe(w.teams.mobile);
+      expect(await q(sql`select team_id from runs where external_id = 'tr-late-r'`)).toEqual([{ team_id: w.teams.mobile }]);
       expect(await q(sql`select distinct team_id from usage where turn_id = (select id from turns where external_id = 'claude-code:tr-late-t')
-        or run_id = (select id from runs where external_id = 'tr-late-r')`)).toEqual([{ team_id: w.teams.design }]);
+        or run_id = (select id from runs where external_id = 'tr-late-r')`)).toEqual([{ team_id: w.teams.mobile }]);
     });
 
     it('a session_start without a project keeps the team the session already has', async () => {
-      await post(w.tokens.alice, batch([ev.sessionStart('tr-keep', 'github.com/acme/web', undefined, 'design')]));
+      await post(w.tokens.alice, batch([ev.sessionStart('tr-keep', 'github.com/acme/billing')]));
       await post(w.tokens.alice, batch([ev.sessionStart('tr-keep')]));
-      expect((await teamOf('agent_sessions', 'tr-keep'))!.team_id).toBe(w.teams.design);
+      expect((await teamOf('agent_sessions', 'tr-keep'))!.team_id).toBe(w.teams.mobile);
     });
 
     describe('hashed project naming', () => {

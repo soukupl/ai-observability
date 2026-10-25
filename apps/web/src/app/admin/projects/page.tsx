@@ -23,7 +23,7 @@ export default async function AdminProjectsPage() {
     <div className="space-y-4">
       <PageHeader
         title="Projects"
-        description="Give projects a readable name (useful for hashed keys) and map them to a team. A mapping overrides the team named by the repository's dot file (.ai-obs.json) and the person's primary team for new sessions; recorded turns keep their team."
+        description="Give projects a readable name (useful for hashed keys) and map them to a team. The mapping is the only way a project gets a team: unmapped projects report to each person's primary team. It applies to new sessions; recorded turns keep their team."
       />
       <Card>
         {projects.length === 0 ? (
@@ -35,7 +35,7 @@ export default async function AdminProjectsPage() {
                 <tr className="border-b border-zinc-200 dark:border-zinc-800">
                   <th className={thCls}>Key</th>
                   <th className={thCls}>Display name</th>
-                  <th className={thCls} title="Overrides the repository's dot file">Team (overrides the repository's dot file)</th>
+                  <th className={thCls} title="New sessions of this project report to this team">Team</th>
                   <th className={`${thCls} text-right`} title="All turns of the project in the last 30 days (deployment aggregate)">
                     Turns (30 d)
                   </th>
@@ -60,7 +60,7 @@ export default async function AdminProjectsPage() {
                       <ActionForm action={setProjectTeamAction} submitLabel="Save" tone="subtle" className="flex flex-nowrap items-end gap-2">
                         <input type="hidden" name="projectId" value={p.id} />
                         <select name="teamId" defaultValue={p.teamId ?? ''} aria-label={`Team of ${p.key}`} className={`${selectCls} w-40`}>
-                          <option value="">(not mapped: dot file decides)</option>
+                          <option value="">(not mapped: each person's primary team)</option>
                           {teams.map((t) => (
                             <option key={t.id} value={t.id}>
                               {t.name}

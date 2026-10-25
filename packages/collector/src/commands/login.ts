@@ -430,7 +430,7 @@ export async function registerServer(input: RegisterInput, io: Io, deps: CliDeps
     const dot = lookupDotFile(deps.cwd ?? process.cwd());
     const here = dot.root && !dot.server ? ' (this repository has none yet)' : '';
     io.out(
-      `! ${servers} servers are registered: a repository reports to the server in its .ai-obs.json${here}; without one its data stays on this machine until you run \`ai-obs link --server <url> --team <slug>\` in it`,
+      `! ${servers} servers are registered: a repository reports to the server in its .ai-obs.json${here}; without one its data stays on this machine until you run \`ai-obs link --server <url>\` in it`,
     );
   }
   if (!before && !opts.fromInit) io.out('→ run `ai-obs init` to install the harness hooks');

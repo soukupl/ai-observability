@@ -288,7 +288,7 @@ export const HELD_LABEL: Record<HeldReason, string> = {
 export function noServerLines(q: QueueSummary): string[] {
   return Object.entries(q.noServer).map(([ep, n]) =>
     ep === ''
-      ? `${n} events of repositories without a server (several are registered): run \`ai-obs link --server <url> --team <slug>\` in each`
+      ? `${n} events of repositories without a server (several are registered): run \`ai-obs link --server <url>\` in each`
       : `${n} events for ${ep}, which this machine is not logged in to: run \`ai-obs login --server ${ep}\``,
   );
 }

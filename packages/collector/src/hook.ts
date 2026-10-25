@@ -2,7 +2,7 @@
  * `ai-obs hook <harness> <hookName>` — the FAST PATH run inside the harness. Budget: < 100 ms.
  * Reads the stdin JSON, writes a job file, spawns the detached worker, exits 0. It never blocks or
  * fails the harness: every error is logged to ~/.ai-obs/log and swallowed. Keep imports minimal.
- * On SessionStart only it may also print the nudge (nudge.ts: link / login / expiry / warnings); every other hook stays silent on stdout.
+ * On SessionStart only it may also print the nudge (nudge.ts: link / login / expiry / dropped events); every other hook stays silent on stdout.
  * The budget is measured in-process from `runHook` entry (Node startup is outside the collector's control).
  */
 import { spawn } from 'node:child_process';
@@ -14,7 +14,6 @@ import { filterEnv, writeJob } from './jobs.js';
 import { createLogger } from './log.js';
 import { computeNudge, formatSessionStartOutput, isSessionStart, SESSION_START_OUTPUT } from './nudge.js';
 import { aiObsPaths, type AiObsPaths } from './paths.js';
-import { resolveProjectKey } from './project-key.js';
 import type { HarnessName } from './protocol-types.js';
 
 const HARNESSES: readonly string[] = ['claude-code', 'codex'];
@@ -31,12 +30,8 @@ export interface HookDeps {
   spawnWorker?: (paths: AiObsPaths) => void;
   /** where the SessionStart nudge is written; default process.stdout */
   stdout?: { write(s: string): unknown };
-  /** plain-key resolver used on a key-cache miss; default `resolveProjectKey` */
-  resolveProjectKey?: (cwd: string, opts: { timeoutMs: number; bounded?: boolean }) => Promise<string | null>;
   /** argv of this collector for the commands in the nudge text; default `[process.execPath, process.argv[1], --home …]` */
   selfCommand?: readonly string[];
-  /** monotonic clock in ms; default `performance.now()` */
-  perfNow?: () => number;
 }
 
 /** `[node, entry, ...(--home <root> when the home is not the default)]`; null when the entry is unknown. */
@@ -96,8 +91,6 @@ export function defaultSpawnWorker(paths: AiObsPaths): void {
 
 /** Always resolves 0. `args` = [harness, hookName]. */
 export async function runHook(args: readonly string[], deps: HookDeps = {}): Promise<number> {
-  const perfNow = deps.perfNow ?? (() => performance.now());
-  const startedAt = perfNow();
   const env = deps.env ?? process.env;
   if (env.AI_OBS_SUMMARIZING) return 0;
   const paths = deps.paths ?? aiObsPaths();
@@ -144,9 +137,6 @@ export async function runHook(args: readonly string[], deps: HookDeps = {}): Pro
           cwd,
           sessionId: fields.session_id,
           now,
-          startedAt,
-          perfNow,
-          resolveProjectKey: deps.resolveProjectKey ?? resolveProjectKey,
           selfCommand: deps.selfCommand ?? defaultSelfCommand(paths),
         });
         const out = nudge ? formatSessionStartOutput(harness as HarnessName, nudge.text) : null;

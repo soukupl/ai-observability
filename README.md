@@ -49,8 +49,8 @@ requests redirect to `/login?error=config` with a clear message (the cause is lo
 ```sh
 npx ai-obs-cli login --server https://obs.example.com        # prints a code; approve it at <server>/device in the browser
 npx ai-obs-cli init                                          # hooks for every detected harness (Claude Code, Codex)
-cd path/to/repo && npx ai-obs-cli link --team platform       # once per repository: which team it reports to
-git add .ai-obs.json && git commit -m "Report to the platform team"
+cd path/to/repo && npx ai-obs-cli link                       # once per repository: which server it reports to
+git add .ai-obs.json && git commit -m "Report AI usage to obs.example.com"
 ```
 
 `login` uses a device code like `gh auth login`: the CLI shows `ABCD-EFGH`, you open `/device`, check the client name and
@@ -58,12 +58,13 @@ approve. The token it receives is yours (not a company token), lasts 90 days and
 (mode 0600). A machine can hold one token per server, so a developer who works for two companies logs in to both servers.
 `login --token <t>` stores a token made on the dashboard's "My tokens" page instead (CI uses a service-user token).
 
-`ai-obs link --team <slug>` writes the **dot file** `.ai-obs.json` at the repository root, `{"server": "https://…", "team": "<slug>"}`:
-commit it so everyone who clones the repository reports to the same server and team. `--local` writes the git-ignored
+`ai-obs link [--server <url>]` writes the **dot file** `.ai-obs.json` at the repository root, `{"server": "https://…"}`:
+commit it so everyone who clones the repository reports to the same server. `--local` writes the git-ignored
 `.ai-obs.local.json` instead, which overrides the committed one key by key. Tokens never go into either file, and the collector
-sends only to servers it holds a token for. The team is checked on the server: the admin's project → team mapping always
-wins; otherwise the dot-file team counts if you are a member of it, else your primary team. A refused team shows in
-`ai-obs status` and `doctor`. Details: [packages/collector/README.md](packages/collector/README.md), ADR-0029, ADR-0030.
+sends only to servers it holds a token for. **Teams are set on the server only**: an admin maps each project to a team
+(Admin → Projects); an unmapped project reports to each person's primary team. The collector never chooses a team, and a
+`team` key left in an older dot file is ignored (`ai-obs status` says so). Details:
+[packages/collector/README.md](packages/collector/README.md), ADR-0029, ADR-0030, ADR-0035.
 
 ### Upgrading to one deployment per company (ADR-0028 to 0030)
 
@@ -76,7 +77,7 @@ Order matters (the brief's release order):
    `app_platform` itself stays until you drop it by hand (`DROP ROLE app_platform;`) once no database uses it. Existing user tokens stay valid and expire 90 days after the cutover.
 2. **Then the collectors.** Each developer updates to **0.5.0** (`npx ai-obs-cli@latest login --server …`, then `init`); it migrates
    `~/.ai-obs/config.json` to v3, keeps queued data (re-bound to its server) and ignores the old `projects.json`. 0.4.0 was
-   never published, so 0.5.0 also carries the live-session work. Run `ai-obs link --team <slug>` in each repository. The npm package is now `ai-obs-cli`
+   never published, so 0.5.0 also carries the live-session work. Run `ai-obs link` in each repository. The npm package is now `ai-obs-cli`
    ([ADR-0031](docs/adr/0031-npm-package-name-ai-obs-cli.md)): `@soukupl/ai-obs` stays at 0.3.0 and is deprecated, so `npx @soukupl/ai-obs@latest`
    would not find 0.5.0.
 3. **Last, `MIN_COLLECTOR_VERSION=0.5.0`**, once every collector is on 0.5.0: older ones are then told to upgrade.
@@ -144,8 +145,8 @@ TOKEN=$(pnpm -s dev:token alice@acme.example my-laptop 30)   # [email] [label] [
 node packages/collector/bin/ai-obs.js login --server http://localhost:3000 --token "$TOKEN"
 ```
 
-To report to a second server, run `login --server <other>` again; in each repository `ai-obs link --team <slug> --server <url>`
-picks the server and team. With two or more servers and no dot file, a repository's events stay on the machine until it is linked.
+To report to a second server, run `login --server <other>` again; in each repository `ai-obs link --server <url>`
+picks the server. With two or more servers and no dot file, a repository's events stay on the machine until it is linked.
 
 ## Repository map
 

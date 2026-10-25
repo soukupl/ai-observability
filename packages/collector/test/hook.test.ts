@@ -6,7 +6,6 @@ import { readStdin, runHook } from '../src/hook.js';
 import { filterEnv, listJobs, type JobFile } from '../src/jobs.js';
 import { cleanupHomes, gitRepo, tmpHome, writeDotFile, writeTestConfig, writeTestServers } from './helpers.js';
 import { writeJsonAtomic } from '../src/fsutil.js';
-import { rememberPk } from '../src/pk-cache.js';
 import { readDropped, recordDropped, writeServerDelivery } from '../src/delivery.js';
 
 afterEach(cleanupHomes);
@@ -88,7 +87,6 @@ describe('hook fast path', () => {
 
 describe('SessionStart nudge', () => {
   const SELF = ['/usr/bin/node', '/app/bin/ai-obs.js'] as const;
-  const KEY = 'github.com/acme/billing';
   const A = 'https://obs.acme.io';
   const B = 'https://obs.globex.io';
   const DAY = 86_400_000;
@@ -101,19 +99,14 @@ describe('SessionStart nudge', () => {
     extra: Partial<Parameters<typeof runHook>[1]> = {},
   ) {
     const out: string[] = [];
-    const calls: Array<{ cwd: string; timeoutMs: number; bounded?: boolean }> = [];
     return runHook([harness, hook], {
       paths,
       stdin: stdinWith(JSON.stringify({ session_id: 'sess-1', cwd: '/work/billing', ...payload })),
       spawnWorker: () => {},
       stdout: { write: (x: string) => void out.push(x) },
       selfCommand: SELF,
-      resolveProjectKey: async (cwd, opts) => {
-        calls.push({ cwd, ...opts });
-        return KEY;
-      },
       ...extra,
-    }).then((code) => ({ code, out, calls }));
+    }).then((code) => ({ code, out }));
   }
   const textOf = (line: string) => (JSON.parse(line) as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput.additionalContext;
   const two = (paths: ReturnType<typeof tmpHome>) => writeTestServers(paths, [{ endpoint: A }, { endpoint: B }]);
@@ -129,13 +122,12 @@ describe('SessionStart nudge', () => {
     expect(json.hookSpecificOutput.hookEventName).toBe('SessionStart');
     const text = json.hookSpecificOutput.additionalContext;
     expect(text).toContain('obs.acme.io, obs.globex.io');
-    expect(text).toContain("/usr/bin/node /app/bin/ai-obs.js link --server <url> --team <team> --project-dir /work/billing");
+    expect(text).toContain("/usr/bin/node /app/bin/ai-obs.js link --server <url> --project-dir /work/billing");
     expect(text).not.toContain('aiobs_');
-    expect(cc.calls).toHaveLength(0); // no git without a warning to look up
     const codex = await run(paths, 'codex', 'SessionStart', { session_id: 'c1' });
     expect(codex.out).toHaveLength(1);
     expect(() => JSON.parse(codex.out[0]!)).toThrow();
-    expect(codex.out[0]).toContain('link --server <url> --team <team>');
+    expect(codex.out[0]).toContain('link --server <url> --project-dir');
   });
 
   it('stays silent for other hooks, sub-agents, one server without a dot file, and a dot file naming a registered server', async () => {
@@ -144,7 +136,7 @@ describe('SessionStart nudge', () => {
     expect((await run(paths, 'claude-code', 'Stop')).out).toEqual([]);
     expect((await run(paths, 'claude-code', 'SessionStart', { agent_id: 'sub' })).out).toEqual([]);
     const repo = gitRepo();
-    writeDotFile(repo, { server: B, team: 'platform' });
+    writeDotFile(repo, { server: B });
     expect((await run(paths, 'claude-code', 'SessionStart', { cwd: repo })).out).toEqual([]);
     const one = tmpHome();
     writeTestConfig(one, A);
@@ -155,7 +147,7 @@ describe('SessionStart nudge', () => {
     const paths = tmpHome();
     writeTestConfig(paths, A);
     const repo = gitRepo();
-    writeDotFile(repo, { server: 'https://obs.other.io', team: 'platform' });
+    writeDotFile(repo, { server: 'https://obs.other.io' });
     const r = await run(paths, 'claude-code', 'SessionStart', { cwd: repo });
     const text = textOf(r.out[0]!);
     expect(text).toContain('reports to https://obs.other.io');
@@ -188,30 +180,6 @@ describe('SessionStart nudge', () => {
     const later = tmpHome();
     writeTestConfig(later, A, { expiresAt: new Date(Date.now() + 20 * DAY).toISOString() });
     expect((await run(later, 'claude-code', 'SessionStart')).out).toEqual([]);
-  });
-
-  it('(e) a server warning about this project’s team (key from the cache, git only when warnings exist)', async () => {
-    const paths = tmpHome();
-    writeTestConfig(paths, A);
-    writeJsonAtomic(paths.warnings, { [KEY]: { code: 'team_not_member', team: 'mobile', endpoint: A, session_id: 's0', at: new Date().toISOString() } });
-    rememberPk(paths, '/work/billing', KEY);
-    const hit = await run(paths, 'claude-code', 'SessionStart');
-    expect(hit.calls).toHaveLength(0);
-    expect(textOf(hit.out[0]!)).toContain('ignored team "mobile"');
-    // no cache entry: git, bounded
-    const miss = tmpHome();
-    writeTestConfig(miss, A);
-    writeJsonAtomic(miss.warnings, { [KEY]: { code: 'team_unknown', team: 'mobile', endpoint: A, session_id: 's0', at: new Date().toISOString() } });
-    const m = await run(miss, 'claude-code', 'SessionStart');
-    expect(m.calls).toHaveLength(1);
-    expect(m.calls[0]).toMatchObject({ bounded: true });
-    expect(m.calls[0]!.timeoutMs).toBeLessThanOrEqual(40);
-    expect(textOf(m.out[0]!)).toContain('no team has that slug');
-    // a warning from another server is not about where this repository reports now
-    const other = tmpHome();
-    writeTestConfig(other, A);
-    writeJsonAtomic(other.warnings, { [KEY]: { code: 'team_unknown', team: 'mobile', endpoint: B, session_id: 's0', at: new Date().toISOString() } });
-    expect((await run(other, 'claude-code', 'SessionStart')).out).toEqual([]);
   });
 
   it('prints a text only once per session until it changes', async () => {
@@ -278,14 +246,12 @@ describe('SessionStart nudge', () => {
     expect(r2.out).toEqual([]);
   });
 
-  it('skips git when 40 ms have already passed since hook entry (stdin held open)', async () => {
+  it('stays within its budget when stdin is held open', async () => {
     const paths = tmpHome();
     writeTestConfig(paths, A);
-    writeJsonAtomic(paths.warnings, { [KEY]: { code: 'team_unknown', team: 'mobile', endpoint: A, session_id: 's0', at: new Date().toISOString() } });
     const stdin = new PassThrough(); // never ends: readStdin gives up after its 50 ms cap
     stdin.write(JSON.stringify({ session_id: 's', cwd: '/work/billing' }));
     const out: string[] = [];
-    let called = 0;
     const t = performance.now();
     const code = await runHook(['claude-code', 'SessionStart'], {
       paths,
@@ -293,14 +259,9 @@ describe('SessionStart nudge', () => {
       spawnWorker: () => {},
       stdout: { write: (x: string) => void out.push(x) },
       selfCommand: SELF,
-      resolveProjectKey: async () => {
-        called++;
-        return KEY;
-      },
     });
     expect(code).toBe(0);
-    expect(called).toBe(0);
-    expect(out).toEqual([]); // no key, so no warning
+    expect(out).toEqual([]);
     expect(performance.now() - t).toBeLessThan(100);
     expect(listJobs(paths.jobs)).toHaveLength(1);
   });

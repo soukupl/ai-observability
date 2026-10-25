@@ -6,12 +6,9 @@ import { errorMessage, writeFileAtomic } from '../fsutil.js';
 import { gitTopLevel } from '../git.js';
 import { defaultSpawnWorker } from '../hook.js';
 import { resolveProjectKey, RESOLVE_TIMEOUT_MS } from '../project-key.js';
-import { TEAM_SLUG_RE } from '../protocol-types.js';
-import { getCollectorConfig, syncServerEntry } from '../sender.js';
-import { openStore, parseOptions, terminalSafe, UsageError, withWriteLock, type CliDeps, type Io } from './common.js';
+import { openStore, parseOptions, UsageError, withWriteLock, type CliDeps, type Io } from './common.js';
 
 export const LINK_OPTIONS = {
-  team: { type: 'string' },
   server: { type: 'string' },
   local: { type: 'boolean', default: false },
   'project-dir': { type: 'string' },
@@ -36,21 +33,21 @@ export function ensureGitignored(dir: string, name: string): boolean {
 }
 
 /**
- * `ai-obs link --team <slug> [--server URL] [--local] [--project-dir <dir>]`: writes the repository's dot file
- * at its git top level (`.ai-obs.json`, to commit; with --local `.ai-obs.local.json`, git-ignored), naming
- * the server and team its sessions report to. The team is checked against the server's collector-config when
- * this machine is logged in to that server. Never writes a token. Events of this repository recorded while no
- * server was chosen move to the linked server.
+ * `ai-obs link [--server URL] [--local] [--project-dir <dir>]`: writes the repository's dot file at its git top
+ * level (`.ai-obs.json`, to commit; with --local `.ai-obs.local.json`, git-ignored), naming the server its
+ * sessions report to. The team is not chosen here: an admin maps projects to teams on the server (ADR-0035), and
+ * a leftover `team` key is removed. Never writes a token. Events of this repository recorded while no server was
+ * chosen move to the linked server.
  */
 export async function linkCommand(args: readonly string[], io: Io, deps: CliDeps): Promise<number> {
+  if (args.some((a) => a === '--team' || a.startsWith('--team='))) {
+    throw new UsageError('--team is gone: an admin assigns projects to teams on the server (dashboard → Admin → Projects)');
+  }
   const { values } = parseOptions(args, LINK_OPTIONS);
-  const team = values.team;
-  if (!team) throw new UsageError('--team is required (the team slug, see `ai-obs status` or the dashboard)');
-  if (looksLikeToken(team) || (values.server && looksLikeToken(values.server))) {
+  if (values.server && looksLikeToken(values.server)) {
     io.err('✗ that looks like a token: tokens never go into a dot file (they stay in ~/.ai-obs/config.json). Nothing was written.');
     return 2;
   }
-  if (!TEAM_SLUG_RE.test(team)) throw new UsageError('--team must be a team slug: 1–63 characters of a-z, 0-9 and -');
   const cwd = deps.cwd ?? process.cwd();
   // the dot file lives at the git top level, also when --project-dir names a subdirectory (the nudge passes the session's cwd)
   const given = values['project-dir'] ? resolve(values['project-dir']) : null;
@@ -78,29 +75,8 @@ export async function linkCommand(args: readonly string[], io: Io, deps: CliDeps
     }
   }
 
-  // check the team on that server
-  const entry = config ? findServer(config, server) : undefined;
-  if (entry) {
-    const cc = await getCollectorConfig(
-      { server: entry, paths: deps.paths, ...(deps.transport ? { transport: deps.transport } : {}), ...(deps.now ? { now: deps.now } : {}) },
-      { force: true },
-    );
-    if (cc.source === 'fresh') syncServerEntry(deps.paths, entry, cc.value);
-    const teams = cc.source !== 'default' ? cc.value.teams : undefined;
-    if (cc.status === 401 || cc.status === 403) {
-      io.out(`! ${server} rejected this machine's token (expired or revoked): the team is not checked. Run \`ai-obs login --server ${server}\``);
-    } else if (!teams) {
-      io.out(`! could not read your teams from ${server} (${cc.error ?? 'older server'}): the team is not checked`);
-    } else if (!teams.some((t) => t.slug === team)) {
-      const list = teams.map((t) => t.slug).join(', ');
-      io.err(`✗ team "${team}" is not one of your teams on ${server}${list ? ` (${terminalSafe(list)})` : ' (you are in no team)'}. Nothing was written.`);
-      return 1;
-    } else {
-      const name = teams.find((t) => t.slug === team)!.name;
-      io.out(`✓ team ${team} (${terminalSafe(name)}) on ${server}${cc.source === 'cache' ? ' (from the cached server answer)' : ''}`);
-    }
-  } else {
-    io.out(`! this machine is not logged in to ${server}: the team is not checked, and data waits on this machine until you run \`ai-obs login --server ${server}\``);
+  if (!(config && findServer(config, server))) {
+    io.out(`! this machine is not logged in to ${server}: data waits on this machine until you run \`ai-obs login --server ${server}\``);
   }
 
   // write the file, keeping unknown keys of an existing one; never a token
@@ -121,7 +97,11 @@ export async function linkCommand(args: readonly string[], io: Io, deps: CliDeps
       io.out(`! removed "${k}" from ${file}: tokens never go into a dot file`);
     }
   }
-  obj = { ...obj, server, team };
+  if ('team' in obj) {
+    delete obj.team;
+    io.out(`! removed "team" from ${file}: an admin assigns projects to teams on the server`);
+  }
+  obj = { ...obj, server };
   const text = `${JSON.stringify(obj, null, 2)}\n`;
   if (!parseDotFile(text).ok || looksLikeToken(text)) {
     io.err(`✗ refusing to write ${file}. Nothing was written.`);
@@ -133,7 +113,7 @@ export async function linkCommand(args: readonly string[], io: Io, deps: CliDeps
     io.err(`✗ cannot write ${file}: ${errorMessage(err)}`);
     return 1;
   }
-  io.out(`✓ wrote ${file}: server ${server}, team ${team}`);
+  io.out(`✓ wrote ${file}: server ${server}`);
   if (values.local) {
     try {
       if (ensureGitignored(dir, LOCAL_DOT_FILE)) io.out(`✓ added ${LOCAL_DOT_FILE} to ${join(dir, '.gitignore')}`);
@@ -141,19 +121,20 @@ export async function linkCommand(args: readonly string[], io: Io, deps: CliDeps
       io.out(`! could not add ${LOCAL_DOT_FILE} to .gitignore (${errorMessage(err)}): keep it out of git yourself`);
     }
   } else {
-    io.out(`  commit ${DOT_FILE} so everyone's sessions in this repository report to this team`);
+    io.out(`  commit ${DOT_FILE} so everyone's sessions in this repository report to this server`);
   }
   const after = lookupDotFile(dir);
-  if (after.root && (after.server !== server || after.team !== team)) {
-    io.out(`! ${LOCAL_DOT_FILE} overrides it here: sessions report to ${after.server ?? '(no server)'}, team ${after.team ?? '(none)'}`);
+  if (after.root && after.server !== server) {
+    io.out(`! ${LOCAL_DOT_FILE} overrides it here: sessions report to ${after.server ?? '(no server)'}`);
   }
-  io.out('  sessions that are already running keep the server and team they started with');
+  io.out('  sessions that are already running keep the server they started with');
+  io.out('  the team is set on the server: an admin maps this project to a team, else your primary team is used');
 
   // events recorded while no server was chosen follow the link
   if (!config?.servers.length || !after.server) return 0;
   const pk = await (deps.resolveProjectKey ?? ((c: string, o: { timeoutMs: number }) => resolveProjectKey(c, o)))(dir, { timeoutMs: RESOLVE_TIMEOUT_MS });
   if (pk === null) return 0;
-  const target = { endpoint: after.server, team: after.team ?? '' };
+  const target = { endpoint: after.server, team: '' };
   const locked = await withWriteLock(deps, io, () => openStore(deps.paths).retarget(pk, target));
   if (locked?.value) {
     io.out(`✓ ${locked.value} queued events of this repository recorded without a server now go to ${after.server}`);

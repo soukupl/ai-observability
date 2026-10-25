@@ -91,7 +91,7 @@ export async function handleIngest(request: Request, deps: IngestDeps): Promise<
 
 /**
  * GET /api/v1/collector-config (brief Appendix A, ADR-0029). Naming mode, project salt and minimum collector version
- * as before, plus the deployment, the token's user, the teams they belong to (`ai-obs link` validates against them),
+ * as before, plus the deployment, the token's user, the teams they belong to (shown by `ai-obs login` and `doctor`),
  * their primary team and the token's expiry, label and source. Cached privately for 5 minutes per token.
  */
 export async function handleCollectorConfig(request: Request, deps: IngestDeps): Promise<Response> {

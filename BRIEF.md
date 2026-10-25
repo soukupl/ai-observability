@@ -40,7 +40,7 @@ The design is now being implemented; see README.md for the build.
 | 13 | Cost | Estimated cost at **API list prices** from a dated price table, computed at query time | brief only |
 | 14 | Retention | Per-deployment, 30 days – 24 months raw, **default 13 months**; daily rollups kept forever | [0012](docs/adr/0012-retention-and-rollups.md) |
 | 15 | Delivery | Local file queue + retry; client-generated event IDs; server de-duplicates | [0011](docs/adr/0011-local-queue-idempotent-delivery.md) |
-| 16 | Install | One CLI: `npx ai-obs-cli login --server <url>` (device code, or `--token`), `npx ai-obs-cli init` configures every detected harness, `ai-obs link --team <slug>` writes the repository's dot file `.ai-obs.json` | [0029](docs/adr/0029-per-user-tokens-device-login-expiry.md), [0030](docs/adr/0030-project-dot-file-and-team-resolution.md) |
+| 16 | Install | One CLI: `npx ai-obs-cli login --server <url>` (device code, or `--token`), `npx ai-obs-cli init` configures every detected harness, `ai-obs link` writes the repository's dot file `.ai-obs.json` (its server) | [0029](docs/adr/0029-per-user-tokens-device-login-expiry.md), [0030](docs/adr/0030-project-dot-file-and-team-resolution.md) |
 | 17 | Dashboard | All eight views in v1 (see §8) | brief only |
 | 18 | Alerts | Monthly token/cost budgets per team/user, e-mail at 80 % / 100 %, never blocking | brief only |
 | 19 | ~~Billing~~ | ~~Plans + limits~~ — dropped 2026-10-24: self-hosted, no plans, no payments | [0028](docs/adr/0028-one-deployment-one-company.md) |
@@ -55,7 +55,7 @@ The design is now being implemented; see README.md for the build.
 | 28 | Live sessions | `turn_started` event; working / idle / stale with elapsed time on `/sessions` "Active now" (10 s polling) and the session page; local `ai-obs live` terminal | [0027](docs/adr/0027-live-session-status.md) |
 | 29 | One deployment = one company | `companies` and every `company_id` leave the schema; a one-row `deployment` table holds name, slug, settings and project salt; the dev database's four companies are merged into SPECTADO by a one-off script before migration 0018 | [0028](docs/adr/0028-one-deployment-one-company.md) |
 | 30 | Device login and token expiry | `ai-obs login` pairs a device code with a browser approval at `/device`; device tokens last a fixed 90 days (collector warns 14 days before); service users for CI | [0029](docs/adr/0029-per-user-tokens-device-login-expiry.md) |
-| 31 | Dot file and team resolution | Committed `.ai-obs.json` (`server`, `team`) with git-ignored `.ai-obs.local.json` override; admin mapping wins, else a dot-file team the user belongs to, else the primary team; refusals come back as ingest warnings | [0030](docs/adr/0030-project-dot-file-and-team-resolution.md) |
+| 31 | Dot file and team resolution | Committed `.ai-obs.json` (`server`) with git-ignored `.ai-obs.local.json` override; the team is set only by an admin on the server: project mapping, else the user's primary team (the dot-file team and ingest warnings were retired) | [0030](docs/adr/0030-project-dot-file-and-team-resolution.md), [0035](docs/adr/0035-teams-assigned-by-admin-only.md) |
 
 ## 3. Scope
 
@@ -116,8 +116,7 @@ Deployment (one company; name, slug, settings)
 - The active mode is displayed to every user (banner in settings + footer).
 
 **Team attribution of a turn** (first match wins, decided once per session at `session_start`): (1) the admin's project → team
-mapping, (2) the team named in the repository's dot file, if the user is a member of it (otherwise the ingest response carries a
-`team_not_member` / `team_unknown` warning and resolution continues), (3) the user's primary team, (4) none.
+mapping, (2) the user's primary team, (3) none. Only an admin assigns a project to a team; the collector never sends one (ADR-0035).
 
 ## 5. Data capture (collector)
 
@@ -128,24 +127,23 @@ mapping, (2) the team named in the repository's dot file, if the user is a membe
   `login --token <t>` stores a pasted token instead. One token per server; a machine may hold several servers.
 - `npx ai-obs-cli init [--project]` — detects installed harnesses and writes hook config (user-level by default, repo-level
   with `--project`; no token is ever written into a repo). `init --token <t> --endpoint <url>` stays as the non-interactive alias.
-- `ai-obs link --team <slug> [--server <url>] [--local]` — writes the repository's dot file `.ai-obs.json` (`{ "server", "team" }`,
-  committed; `--local` writes the git-ignored `.ai-obs.local.json` that overrides it per key), validating the team against the
-  server. The collector sends only to servers it holds a token for, so a committed server URL can never leak a token elsewhere.
-  Without a dot file a repository reports to the only registered server (no team: the server applies mapping, then primary team);
+- `ai-obs link [--server <url>] [--local]` — writes the repository's dot file `.ai-obs.json` (`{ "server" }`, committed;
+  `--local` writes the git-ignored `.ai-obs.local.json` that overrides it per key). No team: an admin sets it on the server. The collector sends only to servers it holds a token for, so a committed server URL can never leak a token elsewhere.
+  Without a dot file a repository reports to the only registered server;
   with two or more servers its events are held locally until `ai-obs link`.
 - **Status:** collector 0.5.0 (0.4.0 was never published; 0.5.0 also carries the live-session work). Files: `~/.ai-obs/config.json`
   v3 (`servers[]`: endpoint, token, e-mail, deployment, label, expiry, source), `~/.ai-obs/state/` (per-session transcript cursors,
-  per-server collector-config cache and delivery state, project-key and dot-file caches, `warnings.json`), `~/.ai-obs/queue/`
-  (capped ~50 MB / 30 days: one stream per project, server and team under `queue/p/s-<id>/`). Streams that cannot be sent (no
+  per-server collector-config cache and delivery state, project-key and dot-file caches), `~/.ai-obs/queue/`
+  (capped ~50 MB / 30 days: one stream per project and server under `queue/p/s-<id>/`). Streams that cannot be sent (no
   server, rejected token, opted out) are exempt from the 30-day age cap, which counts from when a stream became sendable and
   does not run while the token is refused with 401; the size cap applies to all and its drops are counted and shown.
 - Commands: `login`, `init`, `link`, `token list|remove <server>`, `doctor`, `status`, `flush`, `live`, `uninstall`. `status` and
-  `doctor` show, per server, the token state and expiry, and for this repository its server, team and dot-file validity.
-- Each session is pinned once, at its first hook, to its stream (project key, server, team slug); a dot file changed mid-session
+  `doctor` show, per server, the token state and expiry, and for this repository its server, dot-file validity and how its team is set.
+- Each session is pinned once, at its first hook, to its stream (project key, server); a dot file changed mid-session
   never retargets a running session.
 - The `SessionStart` hook (JSON `additionalContext` for Claude Code, plain text for Codex) prints a nudge only in these cases:
   no dot file while two or more servers are registered, the repository's server has no token or an expired / rejected one, a
-  token expires within 14 days, events were dropped, or the server ignored the repository's dot-file team (latest ingest warning). Local files and a bounded git call only; no network.
+  token expires within 14 days, or events were dropped. Local files only; no git, no network.
 - A token lasts at most 90 days from `login`; the collector keeps the expiry locally, warns 14 days before and then asks for
   `ai-obs login` again. Admins can issue service-user tokens (CI, bots, shared machines) that never use the device flow.
 - Node ≥ 20, **zero runtime dependencies**. Hook handlers return in < 100 ms of in-process time from hook entry (Node
@@ -236,7 +234,7 @@ provisional outcome and later sends a `turn_outcome` patch event.
   "identity":  { "git_email": "dev@acme.com" },          // optional, ignored by the server (attribution is the token's user)
   "events": [
     { "event_id": "ulid", "type": "session_start", "harness": "claude-code", "harness_version": "2.x",
-      "session_id": "…", "project": { "key": "github.com/acme/billing" /* or "sha256:…" */, "name": "billing", "team": "platform" /* dot-file team slug, optional */ },
+      "session_id": "…", "project": { "key": "github.com/acme/billing" /* or "sha256:…" */, "name": "billing" },
       "at": "2026-10-05T10:00:00Z" },
     { "event_id": "ulid", "type": "turn", "session_id": "…", "turn_id": "…",
       "started_at": "…", "ended_at": "…", "model": "claude-opus-5-5", "effort": "high",
@@ -264,9 +262,9 @@ provisional outcome and later sends a `turn_outcome` patch event.
 }
 ```
 
-- Response: `{ accepted, duplicates, rejected: [{event_id, reason}], warnings? }`. Duplicate `event_id`s are ignored,
-  so retries are always safe. `warnings` (at most one per session per batch) is `[{ code: "team_not_member" | "team_unknown", team, session_id }]`
-  and tells the collector that the dot-file team of a session was not used; old collectors ignore it.
+- Response: `{ accepted, duplicates, rejected: [{event_id, reason}] }`. Duplicate `event_id`s are ignored, so retries are
+  always safe. `project.team` and the response's `warnings` stay optional in the schema for older peers; the server ignores
+  the one and no longer sends the other (ADR-0035).
 - The team of a session is resolved once, at `session_start` (§4); later events of the session reuse it.
 - Unknown `harness` values are accepted; harness-specific extras go into an `ext` object.
 - `GET /api/v1/collector-config` → `{ project_naming, min_collector_version, project_salt, deployment: { name, slug }, user: { email, name, kind },
@@ -385,8 +383,8 @@ typecheck, 1627 tests) and committed: schema and migration 0018 (one `deployment
 `db:merge-companies`, the web app and worker without companies, plans or super admin, and collector 0.5.0 (0.4.0 was never
 published). The dev database was merged into the SPECTADO deployment (four companies, six teams, all 1820 turns kept; dump
 before the merge in `~/ai-obs-backups/`) and migrated; the dev containers run the new image. Still with the owner: publish
-collector 0.5.0 to npm, upgrade the collectors (`init`, then `ai-obs link --team <slug>` per repository), check `ai-obs login`
-in the browser and a new turn landing under the linked team, then raise `MIN_COLLECTOR_VERSION` to 0.5.0. Item 4 below now
+collector 0.5.0 to npm, upgrade the collectors (`init`, then `ai-obs link` per repository), check `ai-obs login`
+in the browser and a new turn landing under the project's mapped team, then raise `MIN_COLLECTOR_VERSION` to 0.5.0. Item 4 below now
 reads "own rows, led teams, admin, aggregates-only"; the cross-company and super-admin proofs went with the concepts.
 
 ### Status (2026-10-06)

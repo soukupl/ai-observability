@@ -41,7 +41,7 @@ export function createContext(deps: ContextDeps): CollectorContext {
     let dot: DotFileValue = {};
     try {
       const d = dotFile(cwd);
-      dot = { ...(d.server ? { server: d.server } : {}), ...(d.team ? { team: d.team } : {}) };
+      dot = d.server ? { server: d.server } : {};
     } catch (err) {
       deps.log.warn('context: dot-file lookup failed', { error: String(err).slice(0, 200) });
     }

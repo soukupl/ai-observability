@@ -25,5 +25,5 @@ export const optionalId = z.preprocess((v) => (v === '' || v === undefined ? nul
 export const name = (max = 80) => z.string().trim().min(1, 'required').max(max, `at most ${max} characters`);
 export const teamRole = z.enum(['member', 'lead']);
 export const memberRole = z.enum(['admin', 'member']);
-/** Team slug (ADR-0030): 1–63 of a-z, 0-9 and '-'. */
+/** Team slug (ADR-0030 R4): 1–63 of a-z, 0-9 and '-'. */
 export const teamSlug = z.string().trim().toLowerCase().regex(/^[a-z0-9-]{1,63}$/, 'use 1–63 lower-case letters, digits or -');

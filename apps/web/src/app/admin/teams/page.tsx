@@ -34,9 +34,9 @@ export default async function TeamsPage() {
     <div className="space-y-4">
       <PageHeader
         title="Teams"
-        description="A session's team is: the project's mapped team (Projects page), else the team its repository's .ai-obs.json names when the user is a member of it, else the user's primary team; otherwise no team."
+        description="A session's team is the project's mapped team (Projects page), else the user's primary team; otherwise no team."
       />
-      <Card title="New team" description="The slug is what a repository's .ai-obs.json names. Leave it empty to derive it from the name.">
+      <Card title="New team" description="The slug identifies the team to collectors (`ai-obs login` lists it). Leave it empty to derive it from the name.">
         <ActionForm action={createTeamAction} submitLabel="Create team">
           <label className={`${labelCls} grow sm:max-w-xs`}>
             Name
@@ -78,14 +78,13 @@ export default async function TeamsPage() {
               <ActionForm action={setTeamSlugAction} submitLabel="Change slug" tone="subtle">
                 <Hidden n="teamId" v={t.id} />
                 <label className={`${labelCls} sm:max-w-48`}>
-                  Slug (.ai-obs.json)
+                  Slug
                   <input name="slug" required maxLength={63} pattern="[a-z0-9-]{1,63}" defaultValue={t.slug} className={`${inputCls} font-mono`} />
                 </label>
               </ActionForm>
             </div>
             <p className={`mb-3 ${noteCls}`}>
-              The slug can be changed only until the first turn is recorded for this team; after that it is fixed so committed
-              .ai-obs.json files keep working.
+              The slug can be changed only until the first turn is recorded for this team; after that it is fixed.
             </p>
             {t.members.length === 0 ? (
               <p className={noteCls}>No members yet.</p>

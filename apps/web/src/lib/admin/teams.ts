@@ -20,7 +20,7 @@ export interface TeamMember {
 export interface TeamWithMembers {
   id: string;
   name: string;
-  /** What `.ai-obs.json` names (ADR-0030); fixed once a turn references the team. */
+  /** The team's identifier for collectors (ADR-0030 R4); fixed once a turn references the team. */
   slug: string;
   members: TeamMember[];
 }

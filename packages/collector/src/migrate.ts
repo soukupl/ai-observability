@@ -87,7 +87,7 @@ export function migrateHome(paths: AiObsPaths, opts: MigrateOptions = {}): strin
     const target = freeName(`${paths.legacyProjects}.v2`, now);
     try {
       renameSync(paths.legacyProjects, target);
-      notes.push(`projects.json is no longer used (repositories choose their team in .ai-obs.json): kept as ${target}`);
+      notes.push(`projects.json is no longer used (repositories choose their server in .ai-obs.json): kept as ${target}`);
     } catch (err) {
       log.error('migrate: cannot rename projects.json', { error: errorMessage(err) });
     }

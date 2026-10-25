@@ -1,15 +1,15 @@
 /**
  * The repository dot file (brief appendix E): `.ai-obs.json` (committed) and `.ai-obs.local.json`
- * (git-ignored) say which server and team a repository reports to. No git call: the lookup walks from the
- * working directory up to the directory that holds `.git`; the first directory with either file wins and
- * the local file overrides the committed one per key. A malformed file counts as absent and is reported.
+ * (git-ignored) say which server a repository reports to. The team is not a dot-file setting: an admin
+ * maps projects to teams on the server (ADR-0035); a leftover `team` key is ignored and reported. No git
+ * call: the lookup walks from the working directory up to the directory that holds `.git`; the first
+ * directory with either file wins and the local file overrides the committed one per key. A malformed file counts as absent and is reported.
  * Imports only node built-ins and fs helpers: the hook calls this inside its budget.
  */
 import { readFileSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { readJsonFile, writeJsonAtomic } from './fsutil.js';
 import type { AiObsPaths } from './paths.js';
-import { TEAM_SLUG_RE } from './protocol-types.js';
 
 export const DOT_FILE = '.ai-obs.json';
 export const LOCAL_DOT_FILE = '.ai-obs.local.json';
@@ -25,7 +25,6 @@ const TOKEN_RE = /aiobs_[a-z]_[A-Za-z0-9]/i;
 export interface DotFileValue {
   /** normalized endpoint */
   server?: string;
-  team?: string;
 }
 
 export interface DotFileState {
@@ -35,6 +34,8 @@ export interface DotFileState {
   value?: DotFileValue;
   /** the file contains something that looks like an ai-obs token (it is still read: tokens are just ignored) */
   token?: true;
+  /** the file still has a `team` key (ADR-0030); it is ignored, teams are assigned by an admin (ADR-0035) */
+  team?: true;
 }
 
 export interface DotFileLookup {
@@ -46,7 +47,6 @@ export interface DotFileLookup {
   local: DotFileState | null;
   /** merged result: local overrides committed per key, malformed files count as absent */
   server?: string;
-  team?: string;
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -64,8 +64,11 @@ function normalizeServer(raw: string): string | null {
   }
 }
 
-/** Parses one dot file's text. Unknown keys are ignored; a bad `server` or `team` makes the whole file malformed. */
-export function parseDotFile(text: string): { ok: true; value: DotFileValue } | { ok: false; error: string } {
+/**
+ * Parses one dot file's text. Unknown keys are ignored; a bad `server` makes the whole file malformed. `team` reports
+ * whether the retired `team` key is present (whatever its value).
+ */
+export function parseDotFile(text: string): { ok: true; value: DotFileValue; team: boolean } | { ok: false; error: string } {
   let raw: unknown;
   try {
     raw = JSON.parse(text);
@@ -80,11 +83,7 @@ export function parseDotFile(text: string): { ok: true; value: DotFileValue } | 
     if (!server) return { ok: false, error: '"server" must be an http(s) URL' };
     value.server = server;
   }
-  if (raw.team !== undefined) {
-    if (typeof raw.team !== 'string' || !TEAM_SLUG_RE.test(raw.team)) return { ok: false, error: '"team" must be 1–63 characters of a-z, 0-9 and -' };
-    value.team = raw.team;
-  }
-  return { ok: true, value };
+  return { ok: true, value, team: raw.team !== undefined };
 }
 
 function readState(path: string): DotFileState {
@@ -99,7 +98,9 @@ function readState(path: string): DotFileState {
   }
   const r = parseDotFile(text);
   const token = TOKEN_RE.test(text) ? { token: true as const } : {};
-  return r.ok ? { path, status: 'ok', value: r.value, ...token } : { path, status: 'malformed', error: r.error, ...token };
+  return r.ok
+    ? { path, status: 'ok', value: r.value, ...token, ...(r.team ? { team: true as const } : {}) }
+    : { path, status: 'malformed', error: r.error, ...token };
 }
 
 const exists = (p: string): boolean => {

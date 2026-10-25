@@ -246,10 +246,10 @@ describe.skipIf(skipReason !== null)(skipReason ? `admin console — SKIPPED: ${
     expect((await auditRows('user.remove')).at(-1)!.meta).toMatchObject({ email: 'leaver@spectado.test', revokedTokens: 1 });
   });
 
-  it('projects: display name and the mapping that overrides the dot file, audited', async () => {
+  it('projects: display name and the team mapping, audited', async () => {
     const a = people.admin!;
     expect(await as(a, (tx) => setProjectName(tx, a, { projectId, displayName: 'Billing' }))).toBe('Display name saved.');
-    expect(await as(a, (tx) => setProjectTeam(tx, a, { projectId, teamId: teams.Mobile }))).toMatch(/whatever the repository's dot file says/);
+    expect(await as(a, (tx) => setProjectTeam(tx, a, { projectId, teamId: teams.Mobile }))).toMatch(/New sessions are attributed to this team/);
     const [p] = await as(a, (tx) => listAdminProjects(tx));
     expect(p).toMatchObject({ displayName: 'Billing', teamId: teams.Mobile, teamName: 'Mobile', hashed: false });
     expect((await auditRows('project.map'))[0]!.meta).toEqual({ before: null, after: teams.Mobile });

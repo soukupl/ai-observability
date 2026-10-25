@@ -14,7 +14,7 @@ import type {
   TurnSummaryEvent,
 } from '@ai-obs/protocol';
 import { assertOwner, OwnerConflictError, rows, type BatchContext } from './context';
-import { resolveSessionTeam, sessionKey, turnKey, upsertProject } from './resolve';
+import { resolveTeam, sessionKey, turnKey, upsertProject } from './resolve';
 import { mergeUsage, sumUsage } from './usage';
 import { propagateTurnOwner, replaceUsage } from './usage-rows';
 
@@ -123,19 +123,16 @@ const seenAt = (iso: string) => sql`least(${iso}::timestamptz, now())`;
 const bumpSeen = (iso: string) => sql`last_seen_at = greatest(agent_sessions.last_seen_at, ${seenAt(iso)})`;
 
 /**
- * session_start resolves and pins the session's team (ADR-0030, Appendix D): admin mapping → dot-file team (members
- * only, else a warning) → primary team → none. Later events of the session reuse the stored team. The first
+ * session_start resolves and pins the session's team (ADR-0035): admin mapping → primary team → none; a
+ * `project.team` from an older collector is ignored. Later events of the session reuse the stored team. The first
  * session_start with a project pins it: a later one (a lost collector state, a resume on a fresh state) keeps the
  * stored project and team even when the admin mapping or the user's memberships changed meanwhile, so one session's
- * turns never split across two teams. Without a project the event carries no dot-file team either, so an existing
- * session keeps its team.
+ * turns never split across two teams. Without a project an existing session keeps its team.
  */
 export async function applySessionStart(tx: Tx, ctx: BatchContext, e: SessionStartEvent): Promise<void> {
   const key = sessionKey(e.harness, e.session_id);
   const project = e.project ? await upsertProject(tx, ctx, e.project) : null;
-  const teamId = project
-    ? await resolveSessionTeam(tx, ctx, { key, sessionId: e.session_id }, project, e.project?.team)
-    : ctx.primaryTeamId;
+  const teamId = project ? resolveTeam({ mappedTeamId: project.teamId, primaryTeamId: ctx.primaryTeamId }) : ctx.primaryTeamId;
   await lockSessionKey(tx, key);
   const [session] = await rows<{ id: string; team_id: string | null; project_id: string | null }>(
     tx,

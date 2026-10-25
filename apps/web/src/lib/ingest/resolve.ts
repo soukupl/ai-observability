@@ -13,47 +13,12 @@ export const sessionKey = (harness: string, sessionId: string) => `${harness}:${
 export const turnKey = (harness: string, turnId: string) => `${harness}:${turnId}`;
 
 /**
- * Team of a session, first match wins (ADR-0030 R1, brief Appendix D): the admin's project → team mapping, then the
- * repository's dot-file team when the user is a member of it, then the user's primary team, else no team. Pure.
+ * Team of a session, first match wins (ADR-0035): the admin's project → team mapping, then the user's primary team,
+ * else no team. The collector does not choose a team; a `session_start.project.team` from an older collector is
+ * ignored. Pure.
  */
-export function resolveTeam(input: {
-  mappedTeamId: string | null | undefined;
-  dotFileTeamId: string | null | undefined;
-  primaryTeamId: string | null | undefined;
-}): string | null {
-  return input.mappedTeamId || input.dotFileTeamId || input.primaryTeamId || null;
-}
-
-/**
- * Resolves the team a session reports to at its session_start (Appendix D); later events of the session reuse the team
- * stored on the session row. A dot-file team the user is not a member of, or that does not exist, falls through with
- * one warning for the session (ADR-0030 R2): ingest_team_status() is SECURITY DEFINER and membership-checked, so no
- * token holder can feed a team they do not belong to.
- */
-export async function resolveSessionTeam(
-  tx: Tx,
-  ctx: BatchContext,
-  session: { key: string; sessionId: string },
-  project: { teamId: string | null } | null,
-  dotFileTeam: string | undefined,
-): Promise<string | null> {
-  if (project?.teamId) return project.teamId;
-  let dotFileTeamId: string | null = null;
-  if (dotFileTeam) {
-    const [status] = await rows<{ team_id: string | null; status: 'member' | 'not_member' | 'unknown' }>(
-      tx,
-      sql`select team_id, status from ingest_team_status(${ctx.userId}::uuid, ${dotFileTeam})`,
-    );
-    if (status?.status === 'member') dotFileTeamId = status.team_id;
-    else {
-      ctx.warnings.set(session.key, {
-        code: status?.status === 'not_member' ? 'team_not_member' : 'team_unknown',
-        team: dotFileTeam,
-        session_id: session.sessionId,
-      });
-    }
-  }
-  return resolveTeam({ mappedTeamId: null, dotFileTeamId, primaryTeamId: ctx.primaryTeamId });
+export function resolveTeam(input: { mappedTeamId: string | null | undefined; primaryTeamId: string | null | undefined }): string | null {
+  return input.mappedTeamId || input.primaryTeamId || null;
 }
 
 /**

@@ -422,7 +422,7 @@ export class QueueStore {
 
   /**
    * `ai-obs link`: the key's streams recorded while no server was chosen (endpoint '') move into the stream
-   * of the linked server and team. Streams already bound to a server keep it (capture-time pinning).
+   * of the linked server. Streams already bound to a server keep it (capture-time pinning).
    * Returns the number of events moved.
    */
   retarget(pk: string, to: StreamTarget): number {

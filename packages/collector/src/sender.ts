@@ -21,7 +21,6 @@ import {
 import { identityOfRef, loggableKey, type BatchLimits, type QueueStore, type StreamRef } from './queue.js';
 import { loadRouting, resolveStream, type HeldReason, type RoutingView, type StreamIdentity } from './routing.js';
 import { COLLECTOR_NAME, COLLECTOR_VERSION } from './version.js';
-import { parseIngestWarnings, recordBatchWarnings } from './warnings.js';
 
 export const INGEST_PATH = '/api/v1/ingest';
 export const COLLECTOR_CONFIG_PATH = '/api/v1/collector-config';
@@ -117,10 +116,9 @@ function parseIngestResponse(body: string): IngestResponse {
       accepted: Number(r.accepted) || 0,
       duplicates: Number(r.duplicates) || 0,
       rejected: Array.isArray(r.rejected) ? r.rejected : [],
-      warnings: parseIngestWarnings(r.warnings),
     };
   } catch {
-    return { accepted: 0, duplicates: 0, rejected: [], warnings: [] };
+    return { accepted: 0, duplicates: 0, rejected: [] };
   }
 }
 
@@ -145,8 +143,8 @@ function retryAfterMs(header: string | string[] | undefined): number | null {
 
 /**
  * Send-time naming (C3): a project stream's `session_start.project` is rebuilt from the plain stream key for
- * the receiving server (path keys always as a keyed hash) and carries the stream's dot-file team (appendix
- * C); skill / MCP names are hashed in hashed mode. Event ids depend on neither, so server de-dup is unaffected.
+ * the receiving server (path keys always as a keyed hash) and never carries a team, also for streams queued
+ * with one before ADR-0035 (an admin maps projects to teams on the server); skill / MCP names are hashed in hashed mode. Event ids depend on neither, so server de-dup is unaffected.
  */
 export function prepareForSend(
   events: IngestEvent[],
@@ -155,7 +153,7 @@ export function prepareForSend(
 ): IngestEvent[] {
   const named =
     stream.kind === 'project'
-      ? events.map((e) => (e.type === 'session_start' ? { ...e, project: { ...sendRef(stream.pk, o), ...(stream.team ? { team: stream.team } : {}) } } : e))
+      ? events.map((e) => (e.type === 'session_start' ? { ...e, project: sendRef(stream.pk, o) } : e))
       : events;
   return applyUsageNaming(named, o.naming, o.salt);
 }
@@ -485,13 +483,7 @@ async function sendStream(store: QueueStore, ref: StreamRef, identity: StreamIde
     for (const rej of r.rejected.slice(0, 20)) {
       c.log.warn('sender: event rejected by server', { event_id: rej.event_id, reason: String(rej.reason).slice(0, 200) });
     }
-    if (identity.kind === 'project') {
-      // a duplicate session_start (a retry after a lost response) runs no team resolution on the server and so
-      // returns no warning: only a batch without duplicates may clear the project's warning
-      const started = r.duplicates > 0 ? 0 : batch.events.filter((e) => e.type === 'session_start').length;
-      recordBatchWarnings(c.deps.paths, identity.pk, t.endpoint, r.warnings ?? [], started, new Date(c.now()));
-      run.repos.add(identity.pk);
-    }
+    if (identity.kind === 'project') run.repos.add(identity.pk);
     queue.ack(batch);
     run.result.batches++;
     run.result.sent += batch.events.length;

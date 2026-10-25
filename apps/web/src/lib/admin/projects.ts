@@ -65,8 +65,8 @@ export async function setProjectName(tx: Tx, actor: Actor, input: unknown): Prom
 }
 
 /**
- * Project → team mapping: the first rule of team resolution for new sessions; it overrides the team a repository's
- * `.ai-obs.json` names (ADR-0030 R1, Q5).
+ * Project → team mapping: the only way a project gets a team; unmapped projects report to each user's primary team
+ * (ADR-0035). Applies to new sessions.
  */
 export async function setProjectTeam(tx: Tx, actor: Actor, input: unknown): Promise<string> {
   ensure(isAdmin(actor), 'Only admins can map projects to teams.');
@@ -79,5 +79,5 @@ export async function setProjectTeam(tx: Tx, actor: Actor, input: unknown): Prom
   }
   await tx.update(projects).set({ teamId }).where(eq(projects.id, projectId));
   await audit(tx, actor, teamId ? 'project.map' : 'project.unmap', `project:${projectId}`, { before: p.teamId, after: teamId });
-  return teamId ? 'Project mapped. New sessions are attributed to this team, whatever the repository\'s dot file says.' : 'Mapping removed.';
+  return teamId ? 'Project mapped. New sessions are attributed to this team.' : 'Mapping removed.';
 }

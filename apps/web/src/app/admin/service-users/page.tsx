@@ -46,7 +46,7 @@ export default async function ServiceUsersPage() {
     <div className="space-y-4">
       <PageHeader
         title="Service users"
-        description="For CI, bots and shared machines: a name and a primary team, no login. Their sessions land in the project's mapped team, else the dot-file team they belong to, else the primary team."
+        description="For CI, bots and shared machines: a name and a primary team, no login. Their sessions land in the project's mapped team, else their primary team."
       />
       <Card title="New service user">
         <ActionForm action={createServiceUserAction} submitLabel="Create service user">

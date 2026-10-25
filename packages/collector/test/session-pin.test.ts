@@ -112,15 +112,15 @@ describe('session pinning (C12, C15)', () => {
     expect(streams[0]!.stream).toMatchObject({ kind: 'project', pk: 'github.com/acme/billing', endpoint: A, team: '' });
   });
 
-  it('the dot file in force at the first hook pins server and team; a dot file changed mid-session never retargets it', async () => {
-    const h = claudeHarness([A, B], { [CWD]: { server: A, team: 'platform' } });
+  it('the dot file in force at the first hook pins the server; a dot file changed mid-session never retargets it', async () => {
+    const h = claudeHarness([A, B], { [CWD]: { server: A } });
     const fx = threeTurnSession();
     writeSession(h.projectDir, fx, { upTo: fx.turn2End });
     await h.hook('SessionStart', at(-1), CWD, { source: 'startup' });
-    h.dots[CWD] = { server: B, team: 'web' }; // `ai-obs link` while the session runs
+    h.dots[CWD] = { server: B }; // `ai-obs link` while the session runs
     await h.hook('Stop', at(31.5));
     await h.hook('SessionStart', at(400), CWD, { source: 'startup' }, 'second-session');
-    expect(h.calls.map((c) => target(c.key))).toEqual([`${A}|platform`, `${A}|platform`, `${B}|web`]);
+    expect(h.calls.map((c) => target(c.key))).toEqual([`${A}|`, `${A}|`, `${B}|`]);
     const first = h.store.stats().streams.find((s) => s.stream.endpoint === A)!;
     const queued = h.store.stream(first.stream).readBatch()!.events;
     expect(queued.filter((e) => e.type === 'session_start')).toHaveLength(1);
@@ -133,12 +133,12 @@ describe('session pinning (C12, C15)', () => {
     writeSession(h.projectDir, fx, { upTo: fx.turn2End });
     await h.hook('SessionStart', at(-1), CWD, { source: 'startup' }); // two servers, no dot file: no server
     expect(target(h.calls[0]!.key)).toBe('|');
-    h.dots[CWD] = { server: B, team: 'web' };
+    h.dots[CWD] = { server: B };
     await h.hook('Stop', at(31.5));
-    expect(h.calls.slice(1).every((c) => target(c.key) === `${B}|web`)).toBe(true);
+    expect(h.calls.slice(1).every((c) => target(c.key) === `${B}|`)).toBe(true);
     h.dots[CWD] = { server: A }; // a later change does not take those events away
     await h.hook('Stop', at(32));
-    expect(h.calls.slice(1).every((c) => target(c.key) === `${B}|web`)).toBe(true);
+    expect(h.calls.slice(1).every((c) => target(c.key) === `${B}|`)).toBe(true);
   });
 
   it('not logged in to any server: nothing is recorded', async () => {
@@ -168,7 +168,7 @@ describe('session pinning (C12, C15)', () => {
     const paths = env.ctx.paths;
     const t0 = Date.now();
     const c = loadConfig(paths)!;
-    const { ctx, calls, dots } = contextFor(env.adapter, paths, c, () => new Date(t0 + 5000), { '/work/first': { team: 'platform' } });
+    const { ctx, calls, dots } = contextFor(env.adapter, paths, c, () => new Date(t0 + 5000), { '/work/first': {} });
     const hook = (name: string, receivedAt: number) =>
       env.adapter.handleHook(
         { harness: 'codex', hook: name, payload: { session_id: CODEX_SESSION, transcript_path: env.mainPath, cwd: '/work/first' }, cwd: '/work/first', env: {}, receivedAt: new Date(receivedAt).toISOString() },
@@ -177,11 +177,11 @@ describe('session pinning (C12, C15)', () => {
     await hook('SessionStart', t0 - 60_000); // the rollout is not written yet: nothing enqueued, but the stream is pinned
     expect(calls).toEqual([]);
     saveConfig(paths, { ...c, servers: [...c.servers, { ...c.servers[0]!, endpoint: B, token: 'aiobs_u_b' }] }); // a second login
-    dots['/work/first'] = { server: B, team: 'web' };
+    dots['/work/first'] = { server: B };
     copyFixtures(env);
     await hook('SessionEnd', t0 + 2000);
     expect(calls.length).toBeGreaterThan(0);
-    expect(new Set(calls.map((x) => target(x.key)))).toEqual(new Set([`${c.servers[0]!.endpoint}|platform`]));
+    expect(new Set(calls.map((x) => target(x.key)))).toEqual(new Set([`${c.servers[0]!.endpoint}|`]));
   });
 
   it('Codex: a session whose first hook precedes session_meta stays in one stream', async () => {

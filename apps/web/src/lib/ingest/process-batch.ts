@@ -14,7 +14,7 @@ import {
 } from './apply-events';
 import { OwnerConflictError, rows, type BatchContext, type TokenContext } from './context';
 import { enforceLimits, timeWindowProblem } from './limits';
-import { sessionKey, upsertMachine } from './resolve';
+import { upsertMachine } from './resolve';
 
 /** Apply order inside a batch: sessions, turn starts, turns, runs (parents first), patches, session ends. */
 const TYPE_ORDER: Record<IngestEvent['type'], number> = {
@@ -91,7 +91,6 @@ type Outcome = 'accepted' | 'duplicate';
  * rejected without losing the rest of the batch and without being marked as seen.
  *
  * Every row belongs to the token's user (attribution `verified`, ADR-0029); `header.identity.git_email` is ignored.
- * Team warnings of session_start events (ADR-0030) come back in `warnings`, at most one per session.
  */
 export async function processBatch(
   tx: Tx,
@@ -107,7 +106,6 @@ export async function processBatch(
     attribution: 'verified',
     primaryTeamId: token.primaryTeamId,
     machineRowId: await upsertMachine(tx, header.machine, token.userId),
-    warnings: new Map(),
   };
 
   let accepted = 0;
@@ -153,14 +151,12 @@ export async function processBatch(
       outcomes.forEach(tally);
       continue;
     } catch {
-      // Rolled back as a whole (its warnings are re-collected below); find the failing event(s).
-      for (const event of chunk) forgetWarning(ctx, event);
+      // Rolled back as a whole; find the failing event(s).
     }
     for (const event of chunk) {
       try {
         tally(await tx.transaction((sp) => applyOne(sp, event)));
       } catch (err) {
-        forgetWarning(ctx, event);
         if (err instanceof OwnerConflictError) {
           rejected.push({ event_id: event.event_id, reason: 'conflicts with data owned by another user' });
           continue;
@@ -170,13 +166,7 @@ export async function processBatch(
       }
     }
   }
-  const warnings = [...ctx.warnings.values()];
-  return warnings.length ? { accepted, duplicates, rejected, warnings } : { accepted, duplicates, rejected };
-}
-
-/** Drops the team warning a rolled-back session_start left behind. */
-function forgetWarning(ctx: BatchContext, event: IngestEvent): void {
-  if (event.type === 'session_start') ctx.warnings.delete(sessionKey(event.harness, event.session_id));
+  return { accepted, duplicates, rejected };
 }
 
 function defaultLog(msg: string, err: unknown) {

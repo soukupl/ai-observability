@@ -6,10 +6,8 @@ import { droppedLine, readDelivery, readDropped, serverDelivery } from '../deliv
 import { dotFileProblems, lookupDotFile } from '../dotfile.js';
 import { readJsonFile } from '../fsutil.js';
 import { listJobs } from '../jobs.js';
-import { resolveProjectKey, RESOLVE_TIMEOUT_MS } from '../project-key.js';
 import { loadRouting, targetFor, type HeldReason, type RoutingView } from '../routing.js';
 import { COLLECTOR_VERSION, compareVersions } from '../version.js';
-import { readWarnings, warningText } from '../warnings.js';
 import { countStagedDigests, pendingSummariesPath } from '../analysis/summaries.js';
 import {
   ago,
@@ -38,8 +36,8 @@ export interface RepoLine {
 }
 
 /**
- * "This repository": its dot file (and whether it is valid), the server and team its new sessions report to,
- * that server's token state, and the latest warning the server gave about its team (status, doctor).
+ * "This repository": its dot file (and whether it is valid), the server its new sessions report to, and that
+ * server's token state (status, doctor). The team is assigned on the server by an admin (ADR-0035).
  */
 export async function checkRepository(view: RoutingView, deps: CliDeps, cwd: string, nowMs: number): Promise<RepoLine[]> {
   const out: RepoLine[] = [];
@@ -49,18 +47,18 @@ export async function checkRepository(view: RoutingView, deps: CliDeps, cwd: str
   else if (!dot.dir) out.push({ level: 'info', text: `no .ai-obs.json in ${dot.root}` });
   else {
     for (const f of [dot.committed, dot.local]) {
-      if (f?.status === 'ok') out.push({ level: 'ok', text: `${f.path}: ${[f.value?.server && `server ${f.value.server}`, f.value?.team && `team ${f.value.team}`].filter(Boolean).join(', ') || 'no keys'}` });
+      if (f?.status === 'ok') out.push({ level: 'ok', text: `${f.path}: ${f.value?.server ? `server ${f.value.server}` : 'no keys'}` });
+      if (f?.team) out.push({ level: 'info', text: `${f.path}: "team" is ignored (an admin assigns projects to teams on the server): remove the key` });
     }
   }
   for (const p of dotFileProblems(dot)) out.push({ level: 'bad', text: p });
-  const target = targetFor(view.config, { ...(dot.server ? { server: dot.server } : {}), ...(dot.team ? { team: dot.team } : {}) });
+  const target = targetFor(view.config, dot.server ? { server: dot.server } : {});
   const via = dot.server ? 'from the dot file' : 'the only server';
-  let teams: string[] | null = null;
   if (target.endpoint === '') {
     if (servers.length) {
       out.push({
         level: 'warn',
-        text: `no server chosen (${servers.length} servers are registered and no dot file names one): new sessions are kept on this machine. Run \`ai-obs link --server <url> --team <slug>\``,
+        text: `no server chosen (${servers.length} servers are registered and no dot file names one): new sessions are kept on this machine. Run \`ai-obs link --server <url>\``,
       });
     } else out.push({ level: 'warn', text: 'not logged in to any server: nothing is recorded' });
   } else {
@@ -70,22 +68,12 @@ export async function checkRepository(view: RoutingView, deps: CliDeps, cwd: str
     } else {
       const st = serverState(view, deps, entry, nowMs);
       out.push({ level: st.problem ? 'bad' : 'ok', text: `server ${entry.endpoint} (${via}): ${st.short}` });
-      teams = cachedValue(deps.paths, entry)?.teams?.map((t) => t.slug) ?? null;
+      const primary = cachedValue(deps.paths, entry)?.primary_team;
+      out.push({
+        level: 'info',
+        text: `team: set on the server by an admin (project mapping), else your primary team${primary ? ` (${terminalSafe(primary)})` : primary === null ? ' (none)' : ''}`,
+      });
     }
-  }
-  if (target.team) {
-    if (teams && !teams.includes(target.team)) {
-      out.push({ level: 'warn', text: `team ${target.team}: you are not a member of it on that server (your teams: ${teams.join(', ') || 'none'}); the server uses the project mapping or your primary team` });
-    } else out.push({ level: 'ok', text: `team ${target.team}` });
-  } else if (target.endpoint) {
-    out.push({ level: 'info', text: 'team: none in the dot file (the server uses the project mapping, else your primary team)' });
-  }
-  const warnings = readWarnings(deps.paths);
-  if (Object.keys(warnings).length) {
-    const resolveKey = deps.resolveProjectKey ?? ((c: string, o: { timeoutMs: number }) => resolveProjectKey(c, o));
-    const pk = await resolveKey(cwd, { timeoutMs: RESOLVE_TIMEOUT_MS });
-    const w = pk !== null ? warnings[pk] : undefined;
-    if (w) out.push({ level: 'warn', text: `server warning (${w.at.slice(0, 10)}, ${w.endpoint}): ${warningText(w)}` });
   }
   return out;
 }

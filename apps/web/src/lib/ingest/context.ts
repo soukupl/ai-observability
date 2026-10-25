@@ -1,6 +1,6 @@
 import { sql, type SQL } from 'drizzle-orm';
 import { effectiveRetentionDays, type Database, type DeploymentSettings, type Tx } from '@ai-obs/db';
-import type { IngestWarning, ProjectNamingMode, TokenSource, UserKind } from '@ai-obs/protocol';
+import type { ProjectNamingMode, TokenSource, UserKind } from '@ai-obs/protocol';
 
 /**
  * Attribution of new rows. Always `verified` since every token belongs to one user (ADR-0029); `matched` and
@@ -37,12 +37,10 @@ export interface BatchContext {
   /** The token's user: every row this batch writes belongs to them. */
   userId: string;
   attribution: Attribution;
-  /** The user's primary team (team resolution step 3; also the team of rows created before their session_start). */
+  /** The user's primary team (team resolution step 2; also the team of rows created before their session_start). */
   primaryTeamId: string | null;
   /** machines.id of the sending machine. */
   machineRowId: string;
-  /** Team warnings of this batch, at most one per session (keyed by the session's external key). */
-  warnings: Map<string, IngestWarning>;
 }
 
 /** Runs a query and returns its rows (raw SQL keeps app_ingest's column-level grants explicit). */

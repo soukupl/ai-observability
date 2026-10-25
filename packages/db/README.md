@@ -53,8 +53,9 @@ Design: [BRIEF §7](../../BRIEF.md), [ADR-0006](../../docs/adr/0006-tenant-isola
   and the trigger `teams_fill_slug` derives it from the name (`team_slug_base`, same rule as `slugifyTeamName()`;
   `-2`, `-3` … on a clash); once a turn references the team, `teams_slug_immutable` refuses a change (23514).
 - `turns`, `runs` and `usage` carry denormalized `team_id` and `user_id`, so RLS can check each row
-  on its own. `user_id` is null only on old `unverified` company-token turns (new rows are always `verified`); `turns.team_id` is null when neither the project mapping, the repository's dot-file team
-  (membership-checked, `ingest_team_status`) nor the user's primary team gives one (ADR-0030).
+  on its own. `user_id` is null only on old `unverified` company-token turns (new rows are always `verified`); `turns.team_id` is null when neither the project mapping nor the user's primary team gives
+  one (ADR-0035; `ingest_team_status` / `ingest_resolve_team`, the membership-checked dot-file lookup of ADR-0030, stay
+  in the schema but ingest no longer calls them).
 - Collector ids are stored in `external_id` columns, and `external_id` is unique, so ingest
   is idempotent. A run that arrives before its turn keeps `turn_id = null` and is linked later through
   `turn_external_id`. `parent_external_id` is linked to `parent_run_id` the same way.
@@ -227,7 +228,6 @@ const [tok] = await dbFor('ingest').execute(sql`select * from lookup_ingest_toke
 await withIngestContext(dbFor('ingest'), tok.user_id, async (tx) => {
   // insert into ingest_events … on conflict (event_id) do nothing returning event_id   → de-dup
   // insert into turns (…, user_id = tok.user_id) … on conflict (external_id) do update set col = <bound value> returning id
-  // select ingest_team_status(${tok.user_id}, ${slug})                                  → dot-file team, membership-checked
 });
 ```
 

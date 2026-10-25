@@ -4,7 +4,6 @@ import { main } from '../src/cli.js';
 import { loadConfig } from '../src/config.js';
 import { readDelivery, writeServerDelivery } from '../src/delivery.js';
 import { sessionEndEvent } from '../src/events.js';
-import { writeJsonAtomic } from '../src/fsutil.js';
 import { tryLock } from '../src/lock.js';
 import type { AiObsPaths } from '../src/paths.js';
 import { cleanupHomes, fakeAdapter, gitRepo, okResponder, startServer, tmpHome, tokenResponder, writeDotFile, writeTestConfig, writeTestServers } from './helpers.js';
@@ -79,12 +78,11 @@ describe('token list / remove', () => {
 });
 
 describe('status', () => {
-  it('servers, this repository (dot file, server, team, warning), kept events per reason', async () => {
+  it('servers, this repository (dot file, server, how the team is set), kept events per reason', async () => {
     const paths = tmpHome();
     writeTestServers(paths, [{ endpoint: 'https://obs.a.io' }, { endpoint: 'https://obs.b.io', expiresAt: new Date(Date.now() + 3 * DAY + 3600_000).toISOString() }]);
     const repo = gitRepo();
     writeDotFile(repo, { server: 'https://obs.b.io', team: 'mobile' });
-    writeJsonAtomic(paths.warnings, { [PK]: { code: 'team_not_member', team: 'mobile', endpoint: 'https://obs.b.io', session_id: 's', at: '2026-10-20T00:00:00.000Z' } });
     one(paths, 'github.com/x/none', '');
     one(paths, 'github.com/x/other', 'https://obs.other.io');
     const c = capture();
@@ -93,10 +91,11 @@ describe('status', () => {
     expect(t).toMatch(/servers\s+https:\/\/obs\.a\.io\s+dev@acme\.com · SPECTADO · test-mac, no expiry · never sent/);
     expect(t).toContain('https://obs.b.io  dev@acme.com · SPECTADO');
     expect(t).toContain('expires in 3 days');
-    expect(t).toContain(`repository ${repo}/.ai-obs.json: server https://obs.b.io, team mobile`);
+    expect(t).toContain(`repository ${repo}/.ai-obs.json: server https://obs.b.io`);
+    expect(t).toContain(`${repo}/.ai-obs.json: "team" is ignored (an admin assigns projects to teams on the server): remove the key`);
     expect(t).toContain('server https://obs.b.io (from the dot file): never sent; expires in 3 days');
-    expect(t).toContain('! team mobile: you are not a member of it on that server (your teams: platform, spectado)');
-    expect(t).toContain('! server warning (2026-10-20, https://obs.b.io): the server ignored team "mobile" from the dot file: you are not a member of it');
+    expect(t).toContain('team: set on the server by an admin (project mapping), else your primary team (spectado)');
+    expect(t).not.toContain('team mobile');
     expect(t).toContain('1 events of repositories without a server (several are registered)');
     expect(t).toContain('1 events for https://obs.other.io, which this machine is not logged in to: run `ai-obs login --server https://obs.other.io`');
   });

@@ -63,7 +63,7 @@ describe.skipIf(!built)('real process (needs `pnpm --filter ai-obs-cli build`)',
     expect(out.hookSpecificOutput.hookEventName).toBe('SessionStart');
     const text = out.hookSpecificOutput.additionalContext;
     expect(text).toContain('obs.acme.io, obs.globex.io');
-    expect(text).toContain('link --server <url> --team <team>');
+    expect(text).toContain('link --server <url> --project-dir');
     expect(text.length).toBeLessThanOrEqual(1000);
     expect(text).not.toContain('aiobs_');
     expect(res.stderr.toString()).toBe('');
@@ -74,7 +74,7 @@ describe.skipIf(!built)('real process (needs `pnpm --filter ai-obs-cli build`)',
     const paths = tmpHome();
     writeTestConfig(paths, 'https://obs.acme.io');
     const repo = gitRepo({ remote: 'git@github.com:acme/billing.git' });
-    writeDotFile(repo, { server: 'https://obs.other.io', team: 'platform' });
+    writeDotFile(repo, { server: 'https://obs.other.io' });
     const deep = join(repo, 'a', 'b', 'c', 'd');
     mkdirSync(deep, { recursive: true });
     const { res, ms } = runHookProcess(paths, ['codex', 'SessionStart'], { session_id: 's1', cwd: deep, hook_event_name: 'SessionStart' });

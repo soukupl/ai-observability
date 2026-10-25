@@ -197,6 +197,6 @@ describe('migrating a 0.4 home', () => {
     expect(migrateHome(paths).join('\n')).toContain('4 of them wait for a server (several are registered): run `ai-obs link` in their repository');
     const c = capture();
     await main(['status'], c.io, { paths, env: {}, resolveProjectKey: async () => PK });
-    expect(c.text()).toContain('4 events of repositories without a server (several are registered): run `ai-obs link --server <url> --team <slug>` in each');
+    expect(c.text()).toContain('4 events of repositories without a server (several are registered): run `ai-obs link --server <url>` in each');
   });
 });

@@ -72,7 +72,7 @@ point counts toward the next turn.
 `ai-obs hook codex SessionStart` may print one text into the model's context (the nudge, see `src/nudge.ts`:
 run `ai-obs link` when several servers are registered and the repository has no dot-file server, run
 `ai-obs login --server …` when its server has no token or an expired / refused one, a token that expires within
-14 days, dropped events, a team the server ignored). Every other hook stays silent on stdout.
+14 days, dropped events). Every other hook stays silent on stdout.
 
 - **Format ai-obs uses for Codex: plain text on stdout** (`SESSION_START_OUTPUT.codex = 'text'`). Claude Code gets
   `{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"..."}}` instead.

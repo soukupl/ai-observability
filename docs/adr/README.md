@@ -29,7 +29,8 @@
 - [ADR-0027: Live session status: turn_started, Active now, ai-obs live](0027-live-session-status.md)
 - [ADR-0028: One deployment = one company; the company leaves the schema](0028-one-deployment-one-company.md)
 - [ADR-0029: Per-user and service-user tokens, device login, fixed expiry](0029-per-user-tokens-device-login-expiry.md)
-- [ADR-0030: Project dot file and team resolution](0030-project-dot-file-and-team-resolution.md)
+- [ADR-0030: Project dot file and team resolution](0030-project-dot-file-and-team-resolution.md) — team part amended by ADR-0035
 - [ADR-0031: The collector is published on npm as `ai-obs-cli`](0031-npm-package-name-ai-obs-cli.md) — proposed, awaiting the owner's name choice
 - [ADR-0032: The collector is published to npm from GitHub Actions with trusted publishing](0032-publish-collector-from-github-actions.md)
 - [ADR-0033: The server image is built by GitHub Actions and published to GitHub Container Registry](0033-publish-server-image-to-ghcr.md)
+- [ADR-0035: A project's team is set by an admin on the server, never by the collector](0035-teams-assigned-by-admin-only.md)

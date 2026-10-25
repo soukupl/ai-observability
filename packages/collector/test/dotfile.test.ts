@@ -7,15 +7,15 @@ import { cleanupHomes, gitRepo, tmpHome, writeDotFile } from './helpers.js';
 afterEach(cleanupHomes);
 
 describe('parseDotFile', () => {
-  it('normalizes the server, checks the team slug and ignores unknown keys', () => {
-    expect(parseDotFile('{"server":"https://Obs.Example.com/","team":"platform","x":1}')).toEqual({ ok: true, value: { server: 'https://obs.example.com', team: 'platform' } });
-    expect(parseDotFile('{}')).toEqual({ ok: true, value: {} });
+  it('normalizes the server, ignores unknown keys, and reports a leftover team key (ignored, ADR-0035)', () => {
+    expect(parseDotFile('{"server":"https://Obs.Example.com/","x":1}')).toEqual({ ok: true, value: { server: 'https://obs.example.com' }, team: false });
+    expect(parseDotFile('{"server":"https://obs.example.com","team":"platform"}')).toEqual({ ok: true, value: { server: 'https://obs.example.com' }, team: true });
+    expect(parseDotFile('{"team":"Bad Team"}')).toEqual({ ok: true, value: {}, team: true });
+    expect(parseDotFile('{}')).toEqual({ ok: true, value: {}, team: false });
     expect(parseDotFile('nope')).toMatchObject({ ok: false, error: 'not valid JSON' });
     expect(parseDotFile('[]')).toMatchObject({ ok: false });
     expect(parseDotFile('{"server":"ftp://x"}')).toMatchObject({ ok: false });
     expect(parseDotFile('{"server":"https://u:p@x.io"}')).toMatchObject({ ok: false });
-    expect(parseDotFile('{"team":"Bad Team"}')).toMatchObject({ ok: false });
-    expect(parseDotFile('{"team":7}')).toMatchObject({ ok: false });
     expect(parseDotFile(JSON.stringify({ server: `https://x.io/${'a'.repeat(600)}` }))).toMatchObject({ ok: false, error: '"server" is longer than 512 characters' });
   });
 });
@@ -27,18 +27,20 @@ describe('lookupDotFile', () => {
     mkdirSync(sub, { recursive: true });
     expect(lookupDotFile(sub)).toMatchObject({ root: repo, dir: null });
     writeDotFile(repo, { server: 'https://obs.example.com', team: 'platform' });
-    expect(lookupDotFile(sub)).toMatchObject({ root: repo, dir: repo, server: 'https://obs.example.com', team: 'platform' });
-    writeDotFile(repo, { team: 'mobile' }, true);
-    expect(lookupDotFile(sub)).toMatchObject({ server: 'https://obs.example.com', team: 'mobile' });
+    const l = lookupDotFile(sub);
+    expect(l).toMatchObject({ root: repo, dir: repo, server: 'https://obs.example.com', committed: { status: 'ok', team: true } });
+    expect(l).not.toHaveProperty('team');
+    writeDotFile(repo, { server: 'https://local.example.com' }, true);
+    expect(lookupDotFile(sub)).toMatchObject({ server: 'https://local.example.com' });
     // a monorepo package with its own file: first hit wins (its committed file only)
-    writeDotFile(sub, { team: 'web' });
-    expect(lookupDotFile(sub)).toMatchObject({ dir: sub, team: 'web' });
+    writeDotFile(sub, { note: 'web' });
+    expect(lookupDotFile(sub)).toMatchObject({ dir: sub });
     expect(lookupDotFile(sub).server).toBeUndefined();
   });
 
   it('never reads above the repository, and nothing outside one', () => {
     const outer = gitRepo();
-    writeDotFile(outer, { server: 'https://outer.io', team: 'outer' });
+    writeDotFile(outer, { server: 'https://outer.io' });
     const inner = join(outer, 'vendor', 'lib');
     mkdirSync(join(inner, '.git'), { recursive: true });
     expect(lookupDotFile(inner)).toMatchObject({ root: inner, dir: null });
@@ -50,10 +52,10 @@ describe('lookupDotFile', () => {
 
   it('a file holding a token is still read, but reported', () => {
     const repo = gitRepo();
-    writeDotFile(repo, { server: 'https://ok.io', team: 'mobile', token: 'aiobs_u_secretsecret' });
-    writeDotFile(repo, { team: 'web', note: 'aiobs_c_oldcompany1' }, true);
+    writeDotFile(repo, { server: 'https://ok.io', token: 'aiobs_u_secretsecret' });
+    writeDotFile(repo, { server: 'https://local.io', note: 'aiobs_c_oldcompany1' }, true);
     const l = lookupDotFile(repo);
-    expect(l).toMatchObject({ server: 'https://ok.io', team: 'web' });
+    expect(l).toMatchObject({ server: 'https://local.io' });
     expect(dotFileProblems(l)).toEqual([
       expect.stringContaining('.ai-obs.json contains an ai-obs token: remove it'),
       expect.stringContaining('.ai-obs.local.json contains an ai-obs token: remove it'),
@@ -63,13 +65,13 @@ describe('lookupDotFile', () => {
 
   it('a malformed file counts as absent and is reported', () => {
     const repo = gitRepo();
-    writeDotFile(repo, '{"server": "https://ok.io", "team": "Not A Slug"}');
-    writeDotFile(repo, { team: 'mobile' }, true);
+    writeDotFile(repo, '{"server": "ftp://ok.io"}');
+    writeDotFile(repo, { note: 'local' }, true);
     const l = lookupDotFile(repo);
-    expect(l).toMatchObject({ team: 'mobile' });
     expect(l.server).toBeUndefined();
     expect(l.committed).toMatchObject({ status: 'malformed' });
-    expect(dotFileProblems(l)).toEqual([expect.stringContaining('.ai-obs.json: "team" must be')]);
+    expect(l.local).toMatchObject({ status: 'ok' });
+    expect(dotFileProblems(l)).toEqual([expect.stringContaining('.ai-obs.json: "server" must be an http(s) URL')]);
   });
 
   it('cache: reused while nothing changed; a created, edited or deleted file is seen at once', () => {
@@ -81,19 +83,19 @@ describe('lookupDotFile', () => {
     // a cached entry is used as long as its stamps hold (the hook only reads)
     const cache = JSON.parse(readFileSync(paths.dotFileCache, 'utf8'));
     expect(Object.keys(cache)).toEqual([sub]);
-    const file = writeDotFile(repo, { server: 'https://obs.example.com', team: 'a' });
-    expect(lookupDotFile(sub, { cache: paths })).toMatchObject({ team: 'a' });
+    const file = writeDotFile(repo, { server: 'https://a.example.com' });
+    expect(lookupDotFile(sub, { cache: paths })).toMatchObject({ server: 'https://a.example.com' });
     lookupDotFile(sub, { cache: paths, write: true });
-    writeFileSync(file, JSON.stringify({ server: 'https://obs.example.com', team: 'b' }));
+    writeFileSync(file, JSON.stringify({ server: 'https://b.example.com' }));
     const t = new Date(Date.now() + 5000);
     utimesSync(file, t, t);
-    expect(lookupDotFile(sub, { cache: paths })).toMatchObject({ team: 'b' });
+    expect(lookupDotFile(sub, { cache: paths })).toMatchObject({ server: 'https://b.example.com' });
     // a tampered cache entry whose stamps still match is trusted: prove the cache is actually read
     lookupDotFile(sub, { cache: paths, write: true });
     const c2 = JSON.parse(readFileSync(paths.dotFileCache, 'utf8'));
-    c2[sub].lookup.team = 'from-cache';
+    c2[sub].lookup.server = 'https://from-cache.example.com';
     writeFileSync(paths.dotFileCache, JSON.stringify(c2));
-    expect(lookupDotFile(sub, { cache: paths }).team).toBe('from-cache');
-    expect(lookupDotFile(sub).team).toBe('b');
+    expect(lookupDotFile(sub, { cache: paths }).server).toBe('https://from-cache.example.com');
+    expect(lookupDotFile(sub).server).toBe('https://b.example.com');
   });
 });

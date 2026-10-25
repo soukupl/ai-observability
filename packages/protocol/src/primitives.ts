@@ -44,9 +44,8 @@ export const project = z.object({
   key: projectKey,
   name: z.string().min(1).max(200).optional(),
   /**
-   * Team slug from the repository dot file in force at session start; absent or empty means no dot file. Collectors
-   * send a valid slug (TEAM_SLUG_RE), but ingest accepts any short string so a typo costs a `team_unknown` warning and
-   * a fallback team rather than the whole session_start (ADR-0030 R1, R2).
+   * Retired dot-file team slug (ADR-0030). Collectors no longer send it and ingest ignores it: an admin maps projects
+   * to teams on the server (ADR-0035). Still accepted so older collectors' batches validate.
    */
   team: z.string().max(MAX_TEAM_REF_LENGTH).optional(),
 });

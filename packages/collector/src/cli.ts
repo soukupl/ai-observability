@@ -26,13 +26,13 @@ Commands:
   init [--project] [--project-dir <dir>] [--harness claude-code,codex] [--token <token> --endpoint <url> [--label <name>]]
                                      install the harness hooks (user level; --project: this repository);
                                      with --token: log in without a browser first
-  link --team <slug> [--server <url>] [--local] [--project-dir <dir>]
+  link [--server <url>] [--local] [--project-dir <dir>]
                                      write .ai-obs.json at the repository root (--local: .ai-obs.local.json,
-                                     git-ignored): the server and team this repository reports to
+                                     git-ignored): the server this repository reports to (an admin sets its team)
   token list                         servers, accounts, token expiry and state
   token remove <server>              forget a server's token (its queued events stay on this machine)
   doctor                             check servers, tokens, this repository, harnesses, hooks and queue
-  status                             show servers, this repository's server and team, queue and last send
+  status                             show servers, this repository's server, queue and last send
   live [--cwd] [--once]              watch this machine's running sessions: status, elapsed, tokens, ≈ cost (local only; q quits)
   flush [--wait <seconds>]           send queued events now (also retries a refused token)
   uninstall [--purge [--yes]] [--project-dir <dir>]

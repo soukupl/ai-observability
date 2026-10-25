@@ -12,7 +12,6 @@ import type { IngestEvent } from '../src/protocol-types.js';
 import { EventQueue } from '../src/queue.js';
 import { unresolvedDirName, type StreamKey } from '../src/routing.js';
 import { flushQueue, getCollectorConfig, prepareForSend, probeCollectorConfig, rejectedMessage } from '../src/sender.js';
-import { readWarnings } from '../src/warnings.js';
 import {
   bearerOf,
   ccValue,
@@ -91,13 +90,13 @@ describe('flushQueue (one server)', () => {
     expect(readdirSync(paths.queueProjects)).toEqual([]); // empty stream dirs pruned
   });
 
-  it('session_start.project carries the stream’s dot-file team; no team key without one', async () => {
+  it('session_start.project never carries a team, also for a stream queued with one before ADR-0035', async () => {
     const { srv, paths, store, key } = await setup(okResponder());
     store.enqueue(sessionEvents('a'), key(PK, 'platform'));
     store.enqueue(sessionEvents('b'), key(PK, ''));
     expect((await flushQueue(store, { paths })).status).toBe('ok');
     const starts = sentEvents(srv).filter((e) => e.type === 'session_start') as Array<{ session_id: string; project: unknown }>;
-    expect(starts.find((e) => e.session_id === 'a')!.project).toEqual({ key: PK, name: 'billing', team: 'platform' });
+    expect(starts.find((e) => e.session_id === 'a')!.project).toEqual({ key: PK, name: 'billing' });
     expect(starts.find((e) => e.session_id === 'b')!.project).toEqual({ key: PK, name: 'billing' });
   });
 
@@ -167,45 +166,11 @@ describe('flushQueue (one server)', () => {
     expect(loadConfig(paths)!.servers[0]).toMatchObject({ expires_at: exp, email: 'alice@spectado.io', deployment: { slug: 'spectado' }, source: 'device' });
   });
 
-  it('records ingest warnings per project (latest wins) and clears them when a session starts without one', async () => {
-    let warn = true;
-    const { paths, store, key, srv } = await setup(
-      okResponder('plain', { warnings: (evs) => (warn ? evs.filter((e) => e.type === 'session_start').map((e) => ({ code: 'team_not_member' as const, team: 'mobile', session_id: e.session_id! })) : []) }),
-    );
-    store.enqueue(sessionEvents('s1'), key(PK, 'mobile'));
-    await flushQueue(store, { paths });
-    expect(readWarnings(paths)[PK]).toMatchObject({ code: 'team_not_member', team: 'mobile', endpoint: srv.url, session_id: 's1' });
-    warn = false;
-    store.enqueue(events(1, 50), key(PK, 'mobile')); // no session_start: the warning stays
-    await flushQueue(store, { paths });
-    expect(readWarnings(paths)[PK]).toBeTruthy();
-    store.enqueue(sessionEvents('s2'), key(PK, 'platform'));
-    await flushQueue(store, { paths });
-    expect(readWarnings(paths)[PK]).toBeUndefined();
-  });
-
-  it('a replayed session_start (server duplicates, so no team resolution and no warning) keeps the warning', async () => {
-    let n = 0;
-    const { paths, store, key } = await setup((req) => {
-      if (req.url !== '/api/v1/ingest') return okResponder()(req);
-      const evs = (req.json as { events: Array<{ type: string; session_id?: string }> }).events;
-      return n++ === 0
-        ? { status: 200, body: { accepted: evs.length, duplicates: 0, rejected: [], warnings: [{ code: 'team_not_member', team: 'mobile', session_id: 's1' }] } }
-        : { status: 200, body: { accepted: 0, duplicates: evs.length, rejected: [], warnings: [] } };
-    });
-    store.enqueue(sessionEvents('s1'), key(PK, 'mobile'));
-    await flushQueue(store, { paths });
-    expect(readWarnings(paths)[PK]).toMatchObject({ team: 'mobile' });
-    store.enqueue(sessionEvents('s1'), key(PK, 'mobile')); // the same batch again, after a lost response
-    await flushQueue(store, { paths });
-    expect(readWarnings(paths)[PK]).toMatchObject({ team: 'mobile' });
-  });
-
-  it('ignores malformed warnings', async () => {
-    const { paths, store, key } = await setup(() => ({ status: 200, body: { accepted: 2, duplicates: 0, rejected: [], warnings: [{ code: 'nope', team: 'x', session_id: 's' }, { code: 'team_unknown', team: 'BAD SLUG', session_id: 's' }] } }));
+  it('ignores team warnings from servers before ADR-0035', async () => {
+    const { paths, store, key } = await setup(() => ({ status: 200, body: { accepted: 2, duplicates: 0, rejected: [], warnings: [{ code: 'team_not_member', team: 'mobile', session_id: 's' }] } }));
     store.enqueue(sessionEvents(), key());
-    await flushQueue(store, { paths });
-    expect(readWarnings(paths)).toEqual({});
+    expect(await flushQueue(store, { paths })).toMatchObject({ status: 'ok', sent: 2 });
+    expect(existsSync(join(paths.state, 'warnings.json'))).toBe(false);
   });
 
   it('honours Retry-After on 429', async () => {
@@ -326,7 +291,7 @@ describe('flushQueue (several servers)', () => {
     enqueueFor(store, PK, B.url, sessionEvents('sb'));
     expect((await flushQueue(store, { paths })).status).toBe('ok');
     const [aStart, aTurn] = sentEvents(A) as unknown as Array<Record<string, unknown>>;
-    expect(aStart!.project).toEqual({ key: `sha256:${hmac(SA, PK)}`, team: 'platform' });
+    expect(aStart!.project).toEqual({ key: `sha256:${hmac(SA, PK)}` });
     expect(Object.keys(aTurn!.skills as object)).toEqual([hashUsageName('skill:ship-check', SA)]);
     expect(Object.keys(aTurn!.mcp as object)).toEqual([hashUsageName('mcp:github', SA)]);
     expect(JSON.stringify(sentEvents(A))).not.toMatch(/billing|ship-check|github/);
@@ -403,7 +368,7 @@ describe('flushQueue (several servers)', () => {
     expect(r.servers).toMatchObject({ [A.url]: { sent: 2, left: 3 }, [B.url]: { sent: 2, left: 0 } });
   });
 
-  it('adopts an unresolved stream once its key resolves, then sends it with its team (C16)', async () => {
+  it('adopts an unresolved stream once its key resolves, then sends it (C16); a team queued before ADR-0035 is not sent', async () => {
     const { A, paths } = await twoServers({ aiobs_u_a: {} }, {});
     writeTestServers(paths, [{ endpoint: A.url, token: 'aiobs_u_a' }]);
     const repo = gitRepo({ remote: 'git@github.com:acme/billing.git' });
@@ -411,7 +376,7 @@ describe('flushQueue (several servers)', () => {
     store.enqueue(sessionEvents(), { kind: 'unresolved', cwd: repo, endpoint: A.url, team: 'platform' });
     expect(readdirSync(paths.queueUnresolved)).toEqual([unresolvedDirName(repo, A.url, 'platform')]);
     expect(await flushQueue(store, { paths })).toMatchObject({ status: 'ok', sent: 2 });
-    expect((sentEvents(A)[0] as { project?: unknown }).project).toEqual({ key: PK, name: 'billing', team: 'platform' });
+    expect((sentEvents(A)[0] as { project?: unknown }).project).toEqual({ key: PK, name: 'billing' });
     expect(existsSync(join(paths.queueUnresolved, unresolvedDirName(repo, A.url, 'platform')))).toBe(false);
   });
 
@@ -431,7 +396,7 @@ describe('prepareForSend', () => {
     const id = (pk: string, team = '') => ({ kind: 'project' as const, pk, endpoint: 'https://x.io', team });
     expect((prepareForSend(evs, id(PK), { naming: 'plain', pathSecret: 'p'.repeat(64) })[0] as { project?: unknown }).project).toEqual({ key: PK, name: 'billing' });
     const path = prepareForSend(evs, id('/Users/dev/notes', 'platform'), { naming: 'plain', pathSecret: 'p'.repeat(64) });
-    expect((path[0] as { project?: unknown }).project).toEqual({ key: `sha256:${hmac('p'.repeat(64), 'path:/Users/dev/notes')}`, team: 'platform' });
+    expect((path[0] as { project?: unknown }).project).toEqual({ key: `sha256:${hmac('p'.repeat(64), 'path:/Users/dev/notes')}` });
     const hashed = prepareForSend(evs, id(PK), { naming: 'hashed', salt: null, pathSecret: null });
     expect((hashed[0] as { project?: { key: string; name?: string } }).project!.name).toBeUndefined();
     expect(prepareForSend(hashed, id(PK), { naming: 'hashed', salt: null, pathSecret: null })).toEqual(hashed);

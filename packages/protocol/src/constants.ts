@@ -102,7 +102,7 @@ export type TokenSource = (typeof TOKEN_SOURCES)[number];
 export const USER_KINDS = ['person', 'service'] as const;
 export type UserKind = (typeof USER_KINDS)[number];
 
-/** Ingest warning codes (batch response `warnings`). */
+/** Ingest warning codes (batch response `warnings`). Retired: servers stopped sending them with ADR-0035. */
 export const INGEST_WARNING_CODES = ['team_not_member', 'team_unknown'] as const;
 export type IngestWarningCode = (typeof INGEST_WARNING_CODES)[number];
 
@@ -110,8 +110,8 @@ export type IngestWarningCode = (typeof INGEST_WARNING_CODES)[number];
 export const TEAM_SLUG_RE = /^[a-z0-9-]{1,63}$/;
 
 /**
- * Longest `session_start.project.team` ingest accepts. The wire field is not slug-checked: a malformed team names no
- * team, so ingest answers it with `team_unknown` and falls back instead of rejecting the session (ADR-0030 R2).
+ * Longest `session_start.project.team` ingest accepts. The field is retired (ADR-0035): ingest ignores it, and keeps
+ * accepting it so older collectors' batches still validate.
  */
 export const MAX_TEAM_REF_LENGTH = 128;
 

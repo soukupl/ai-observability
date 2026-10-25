@@ -11,7 +11,9 @@ describe('buildNudge', () => {
   it('(a) link: names every server host and the command, asks once', () => {
     const t = build({ kind: 'link', hosts: ['obs.acme.example', 'obs.globex.example:8443'] })!;
     expect(t).toContain('logged in to 2 ai-obs servers (obs.acme.example, obs.globex.example:8443)');
-    expect(t).toContain('`/usr/bin/node /app/bin/ai-obs.js link --server <url> --team <team> --project-dir /work/billing`');
+    expect(t).toContain('`/usr/bin/node /app/bin/ai-obs.js link --server <url> --project-dir /work/billing`');
+    expect(t).toContain('which server this repository reports to');
+    expect(t).not.toContain('team');
     expect(t).toContain('ask only once in this session');
     expect(t).toContain('If you cannot ask the user');
     expect(t).not.toMatch(/\n/);
@@ -32,13 +34,10 @@ describe('buildNudge', () => {
     expect(build({ kind: 'expiring', server: A, days: 0, date: '2027-01-22' })).toContain('expires today');
   });
 
-  it('(d) and (e): dropped events and team warnings, alone or after another text', () => {
+  it('(d): dropped events, alone or after another text', () => {
     expect(build(null, { droppedEvents: 12 })).toContain('deleted 12 kept events');
     expect(build(null, { droppedSendable: 4 })).toContain('deleted 4 events it could not send in time');
     expect(build({ kind: 'login', server: A, reason: 'expired' }, { droppedEvents: 3 })).toMatch(/expired.*deleted 3 kept events/);
-    expect(build(null, { warning: { code: 'team_not_member', team: 'mobile' } })).toContain('ignored team "mobile" from this repository\'s .ai-obs.json (the user is not a member of that team)');
-    expect(build(null, { warning: { code: 'team_unknown', team: 'mobile' } })).toContain('no team has that slug');
-    expect(build(null, { warning: { code: 'team_unknown', team: 'Bad"\nslug' } })).toBeNull();
     expect(build(null)).toBeNull();
   });
 
@@ -72,7 +71,7 @@ describe('buildNudge', () => {
   it('a long command shortens to `ai-obs` written once, then plain; never cut mid-sentence', () => {
     const nvm = '/Users/someone/.nvm/versions/node/v22.20.5';
     const self = [`${nvm}/bin/node`, `${nvm}/lib/node_modules/ai-obs/bin/ai-obs.js`, '--home', '/var/folders/99/3kw8qvnx5lnd6vqmqbcmc7xm0000gn/T/ai-obs-test-EttozP/.ai-obs'];
-    const t = build({ kind: 'link', hosts: ['obs.acme.example', 'obs.globex.example'] }, { selfCommand: self, droppedEvents: 5, warning: { code: 'team_unknown', team: 'mobile' } })!;
+    const t = build({ kind: 'link', hosts: ['obs.acme.example', 'obs.globex.example'] }, { selfCommand: self, droppedEvents: 5 })!;
     expect(t.length).toBeLessThanOrEqual(NUDGE_MAX_CHARS);
     expect(t).toContain('obs.globex.example');
     expect(t).toContain('deleted 5 kept events');
@@ -80,7 +79,7 @@ describe('buildNudge', () => {
 
   it('a very long server URL is named by its host before anything is cut', () => {
     const long = `https://obs.example.com/${'p'.repeat(600)}`;
-    const t = build({ kind: 'login', server: long, reason: 'expired' }, { warning: { code: 'team_unknown', team: 'mobile' }, droppedEvents: 3, droppedSendable: 2 })!;
+    const t = build({ kind: 'login', server: long, reason: 'expired' }, { droppedEvents: 3, droppedSendable: 2 })!;
     expect(t.length).toBeLessThanOrEqual(NUDGE_MAX_CHARS);
     expect(t).toContain('the ai-obs token for obs.example.com has expired');
     expect(t).toContain('login --server <url>` themselves');

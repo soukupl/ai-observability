@@ -310,6 +310,6 @@ describe('ai-obs login --token', () => {
     expect(await main(['login', '--server', srv.url, '--token', 'aiobs_u_b'], c.io, deps(paths).deps)).toBe(0);
     expect(loadConfig(paths)!.servers.map((s) => s.endpoint)).toEqual(['https://obs.first.io', srv.url]);
     expect(c.text()).toContain('2 servers are registered');
-    expect(c.text()).toContain('ai-obs link --server <url> --team <slug>');
+    expect(c.text()).toContain('ai-obs link --server <url>');
   });
 });

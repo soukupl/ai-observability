@@ -18,8 +18,9 @@ npx ai-obs-cli init                                          # user-level hooks 
 ```
 
 One ai-obs server is one company (a "deployment"). A token belongs to you (or to a service user an admin made) and
-identifies you on that server; which **team** a repository reports to comes from a dot file in the repository (see
-"The dot file"). A machine can be logged in to several servers, one token per server (see "Several servers").
+identifies you on that server; which **server** a repository reports to comes from a dot file in the repository (see
+"The dot file"). Which **team** its sessions count for is set on the server by an admin (ADR-0035). A machine can be
+logged in to several servers, one token per server (see "Several servers").
 
 ### `ai-obs login`
 
@@ -83,15 +84,14 @@ Without a login `init` still installs the hooks, and says that nothing is record
 A repository says where its sessions report in a file at its git top level:
 
 ```json
-{ "server": "https://obs.example.com", "team": "platform" }
+{ "server": "https://obs.example.com" }
 ```
 
 | Key | Meaning |
 |---|---|
 | `server` | The ai-obs server (http/https URL) this repository's sessions go to. Optional with one registered server |
-| `team` | The team slug (1–63 of `a-z`, `0-9`, `-`) the sessions are attributed to. Optional |
 
-- **`.ai-obs.json` is committed**, so everyone working in the repository reports to the same server and team.
+- **`.ai-obs.json` is committed**, so everyone working in the repository reports to the same server.
   **`.ai-obs.local.json`** (git-ignored) has the same keys and overrides the committed file per key, for a personal
   choice. Unknown keys are ignored. Tokens never go in either file (`link` refuses and strips them; `status` and
   `doctor` report a file that holds one with ✗: remove it and revoke the token). `server` is at most 512 characters.
@@ -99,17 +99,15 @@ A repository says where its sessions report in a file at its git top level:
   directory with either file wins (so a package of a monorepo may have its own). Nothing outside a git repository is
   read. The result is cached in `state/dot-files.json` and checked with a few `stat` calls, so the hook stays inside
   its budget. A **malformed file counts as absent** and is reported by `status` and `doctor`.
-- **Write it with `ai-obs link --team <slug> [--server <url>] [--local]`**. The server defaults to the one the dot
-  file already names, else the only registered server. When this machine is logged in to that server, the team is
-  checked against your teams in its collector-config (a team you are not in is refused); otherwise `link` warns and
-  writes anyway. `--local` writes `.ai-obs.local.json` and adds it to `.gitignore`. The file goes to the git top level,
-  also when `--project-dir` names a subdirectory. Events of the repository that were recorded while no server was
-  chosen move to the linked server.
-- **The server decides the team** (ADR-0030): an admin's project → team mapping wins; else the dot-file team if you
-  are a member of it; else your primary team; else none. A team you are not in, or an unknown slug, is ignored and
-  the server answers a warning (`team_not_member`, `team_unknown`) that `status`, `doctor` and the next session's
-  start text show.
-- **Pinned per session**: a session keeps the server and team in force at its first hook, also when the dot file
+- **Write it with `ai-obs link [--server <url>] [--local]`**. The server defaults to the one the dot file already
+  names, else the only registered server. When this machine is not logged in to that server, `link` warns and writes
+  anyway. A leftover `team` key is removed. `--local` writes `.ai-obs.local.json` and adds it to `.gitignore`. The
+  file goes to the git top level, also when `--project-dir` names a subdirectory. Events of the repository that were
+  recorded while no server was chosen move to the linked server.
+- **No team in the dot file** (ADR-0035). The server decides the team: an admin's project → team mapping (Admin →
+  Projects), else your primary team, else none. The collector never sends a team. A `team` key in a dot file written by
+  an older version is ignored (the file still counts), and `status` / `doctor` say so; `ai-obs link --team` fails.
+- **Pinned per session**: a session keeps the server in force at its first hook, also when the dot file
   changes while it runs; the next session takes the new values. A session that started while no server was chosen
   joins the repository's server from its next event once there is one.
 
@@ -118,7 +116,7 @@ A repository says where its sessions report in a file at its git top level:
 ```sh
 ai-obs login --server https://obs.acme.example
 ai-obs login --server https://obs.globex.example
-cd ~/work/billing && ai-obs link --server https://obs.globex.example --team web
+cd ~/work/billing && ai-obs link --server https://obs.globex.example
 ```
 
 - **With one server nothing more is needed**: every repository without a dot-file server reports to it.
@@ -151,15 +149,13 @@ the 30-day queue age cap.
 The SessionStart hook puts one short text into the agent's context only when:
 
 1. the repository has no dot-file server and two or more servers are registered: ask the user, then
-   `ai-obs link --server <url> --team <team> --project-dir <repository root>`;
+   `ai-obs link --server <url> --project-dir <repository root>`;
 2. the repository's server has no token, or an expired or refused one: tell the user to run
    `ai-obs login --server <url>` (never ask for a token);
 3. that server's token expires within 14 days;
-4. queued events were dropped by the caps (only the ones dropped since the text last mentioned drops);
-5. the server ignored this repository's dot-file team (latest warning): your primary team is used, or no team if you
-   have none.
+4. queued events were dropped by the caps (only the ones dropped since the text last mentioned drops).
 
-It needs no network, carries only identifiers (hosts, server URLs, team slugs, the sanitized directory), never a
+It needs no network and no git call, carries only identifiers (hosts, server URLs, the sanitized directory), never a
 token or an e-mail, is at most 1000 characters (the repeated command is written once, then plainly as `ai-obs`, then
 `--project-dir` and the list of hosts are shortened, then a server URL is named by its host only) and appears at most
 once per session per text. Claude Code gets
@@ -178,7 +174,7 @@ npm with a pointer here.
 
 ```sh
 npx ai-obs-cli@0.5.0 init            # refreshes the runtime and the hooks, and migrates ~/.ai-obs
-npx ai-obs-cli status                # then check server, token expiry and this repository's team
+npx ai-obs-cli status                # then check server, token expiry and this repository's server
 ```
 
 `ai-obs` is not on PATH after `npx`, so use `npx` for the follow-up commands too.
@@ -241,7 +237,6 @@ Options:
 | `--label <name>` | `login`, `init --token`: the client name shown on the approval page and in "My tokens" (default: this machine's hostname) |
 | `--endpoint <url>` | `init --token`: the server of that token |
 | `--keep-queue` | `login`: when the new token belongs to another account, send the previous account's queued events with it instead of setting them aside |
-| `--team <slug>` | `link`: the team the repository reports to |
 | `--local` | `link`: write `.ai-obs.local.json` (git-ignored) instead of `.ai-obs.json` |
 | `--harness claude-code,codex` | `init`: limit setup to these harnesses |
 | `--project-dir <dir>` | `init --project`, `link`, `uninstall`: the repository root (for `link`, a subdirectory is resolved to its git top level). Default: the git top level of the current directory |
@@ -254,11 +249,11 @@ Options:
 |---|---|
 | `login [--server <url>] [--token <t>\|-] [--no-browser] [--label <name>] [--keep-queue]` | Log this machine in to a server (device login or a pasted token), as described above |
 | `init [--project] [--project-dir <dir>] [--harness …] [--token <t> --endpoint <url> [--label <name>]]` | Install the hooks (and, with `--token`, log in first) |
-| `link --team <slug> [--server <url>] [--local] [--project-dir <dir>]` | Write the repository's dot file (server and team), checking the team on the server |
+| `link [--server <url>] [--local] [--project-dir <dir>]` | Write the repository's dot file (its server; the team is set by an admin on the server) |
 | `token list` | Servers: endpoint, e-mail, deployment, label, expiry, repositories delivered, queued events, state |
 | `token remove <server>` | Forget a server's token (URL or host). Its queued events stay on this machine |
-| `doctor` | Checks the config, each server (reachable, token valid or expired / revoked, expiry, your teams, minimum version, naming), this repository (dot-file validity, its server and token, its team, the server's warning), each harness (installed, version supported, hooks installed), the node binary and script baked into the hooks (✗ with "run `ai-obs init` again" when they are gone), Codex hooks waiting to be trusted (`!`), the queue and the last send per server. Prints ✓, ! or ✗ per check and exits 1 if any check shows ✗ |
-| `status` | Local state without the network: servers with account, deployment, expiry and state; this repository's dot file, server, token state, team and latest warning; queue size and what is kept (no server chosen, not logged in, refused / expired, unresolved, pre-upgrade); dropped events; pending hook jobs; summaries (`<n> waiting for retry, <m> due`); last send and last error |
+| `doctor` | Checks the config, each server (reachable, token valid or expired / revoked, expiry, your teams, minimum version, naming), this repository (dot-file validity and an ignored `team` key, its server and token, how its team is set), each harness (installed, version supported, hooks installed), the node binary and script baked into the hooks (✗ with "run `ai-obs init` again" when they are gone), Codex hooks waiting to be trusted (`!`), the queue and the last send per server. Prints ✓, ! or ✗ per check and exits 1 if any check shows ✗ |
+| `status` | Local state without the network: servers with account, deployment, expiry and state; this repository's dot file, server, token state and how its team is set; queue size and what is kept (no server chosen, not logged in, refused / expired, unresolved, pre-upgrade); dropped events; pending hook jobs; summaries (`<n> waiting for retry, <m> due`); last send and last error |
 | `flush [--wait <s>]` | First runs every adapter's idle-session sweep (Codex ends sessions idle for 1 h, Claude Code ones silent for 24 h) and writes the staged and pending summaries (`<Harness>: summaries X of Y done, Z still waiting`; while the background worker holds `summaries.lock` it says so and skips this), then sends the queue now, per server, ignoring the retry backoff and retrying a refused server once (an expired token is never used). Kept data stays kept (exit 0); exit 1 when a server failed or refused |
 | `live [--cwd] [--once]` | Watch the Claude Code and Codex sessions running on this machine: a table redrawn about once per second (alternate screen, in place; `q`, `Q` or Ctrl-C quits and restores the terminal). Local only: no network, nothing written, hook state files and offsets untouched, works without a login. `--cwd` narrows to the current git repository (or the directory itself outside one). `--once`, or a stdin or stdout that is not a terminal, prints one frame without escape codes and exits 0; on a non-terminal it is cut at 200 columns, with `--once` on a terminal at the terminal width. An unknown flag exits 2 with the usage text. Details below |
 | `uninstall [--purge [--yes]] [--project-dir <dir>]` | Removes our hooks from user scope and from the current repo. `--purge` also deletes `~/.ai-obs`: tokens and queue (with all local state); it needs `--yes` while unsent events wait. Dot files in repositories are not touched |
@@ -272,8 +267,8 @@ Options:
 | `config.json.v2` | The 0.2 – 0.4 config.json (mode 0600, with its tokens), kept by the migration and no longer read; delete it when you no longer need it |
 | `projects.json.v2` | The 0.2 – 0.4 per-repository choices, renamed by the migration and no longer read (the migration reads them once, to choose between two tokens of one server) |
 | `project-secret` | Random 32-byte hex secret (mode 0600, created on first use, never sent) that keys the hash of a repo with no remote |
-| `queue/p/s-<id>/` | One stream per (project key, server endpoint, team slug), each with `stream.json` (`{key, endpoint, team}`; `endpoint` "" = no server chosen yet, `team` "" = no dot-file team) and `*.ndjson` segments named by ULID |
-| `queue/u/s-<id>/` | Streams whose project key could not be resolved when recorded (git timed out), with their server and team. A later flush adopts them into their project stream |
+| `queue/p/s-<id>/` | One stream per (project key, server endpoint, team), each with `stream.json` (`{key, endpoint, team}`; `endpoint` "" = no server chosen yet; `team` is always "" for new streams and a slug only in streams 0.5.x queued, which is never sent, ADR-0035) and `*.ndjson` segments named by ULID |
+| `queue/u/s-<id>/` | Streams whose project key could not be resolved when recorded (git timed out), with their server. A later flush adopts them into their project stream |
 | `queue/p/o-…`, `queue/p/t-…` | 0.2 – 0.4 streams, converted to `s-` streams by the migration |
 | `queue/*.ndjson` | The pre-upgrade stream written by 0.1.x: frozen, never sent |
 | `queue/dead/` | Batches the server refused as a whole (HTTP 400), kept for inspection (max 5 MB), and `pre-upgrade/` (left as it is) |
@@ -285,7 +280,6 @@ Options:
 | `state/summaries/staged/<harness>/<ulid>.json` | Digests due for a summary (mode 0600, local only). The hook job writes them before it clears them from the session state; the summary phase deletes them after the summaries are queued |
 | `state/collector-config/<host>.json` | Cached collector-config per server (`:` in the host written as `_`). TTL 6 h; after a failed fetch, the next try waits 10 min |
 | `state/delivery.json` | Per server host: last attempt, last success, last error, backoff, a `blocked` flag (401 / 403) and the repositories delivered (`token list`) |
-| `state/warnings.json` | Latest ingest warning per project key (`team_not_member` / `team_unknown`, team, server, session) |
 | `state/dropped.json` | Counters of events dropped by the caps, split into waiting and sendable |
 | `state/project-keys.json` | Working directory → project key cache (500 entries) that the hook reads without running git |
 | `state/dot-files.json` | Working directory → dot-file lookup cache (500 entries), checked with `stat` calls |
@@ -306,8 +300,8 @@ harness hook ─▶ ai-obs hook <harness> <hook>      (always exit 0)
 
 worker:  take worker.lock (or exit: the holder picks the job up)
          ├─ for each job, oldest first: adapter.handleHook(job, ctx)
-         │     pins each session once, at its first hook: project key + the dot file's server and team
-         │     (else the only server) → one queue stream per (project, server, team)
+         │     pins each session once, at its first hook: project key + the dot file's server
+         │     (else the only server) → one queue stream per (project, server)
          │     (+ adapter.sweepCrashedSessions after session-start hooks)
          ├─ (first run after an upgrade: migrate config.json v2, projects.json, o- / t- streams)
          ├─ flush: send every stream to its server's entry (no entry → kept); per server
@@ -322,11 +316,8 @@ summary phase (after the flush, under ~/.ai-obs/summaries.lock, at most 3 passes
 ```
 
 - **SessionStart text.** The time budget counts in-process from hook entry (Node start-up is not counted). The hook
-  reads config.json, the dot file (a bounded `stat` walk, cached in `state/dot-files.json`) and the delivery state;
-  it needs the project key only when a server warning exists, from `state/project-keys.json` (a cached key is used
-  only while the directory's git config is unchanged). On a cache miss it runs git for at most 40 ms, and only when
-  less than 40 ms have passed, then kills it; when git is slower, this session shows no warning and the next one
-  does. It does no network call and prints at most once per session and text. The Claude Code `SessionStart` entry
+  reads config.json, the dot file (a bounded `stat` walk, cached in `state/dot-files.json`) and the delivery state.
+  It runs no git and does no network call and prints at most once per session and text. The Claude Code `SessionStart` entry
   has `timeout: 5`. Every other hook prints nothing.
 - **Summaries** (ADR-0027). When digests are due (session ended, 10 waiting, or the oldest has waited 10 minutes) the hook
   job only stages them to `state/summaries/staged/<harness>/<ulid>.json` and clears them from the session state after
@@ -344,12 +335,10 @@ summary phase (after the flush, under ~/.ai-obs/summaries.lock, at most 3 passes
   text; automatic flushes skip it, `ai-obs flush` tries it once, a new login clears it. A token past its
   `expires_at` is never used. `maxBatches` per flush counts per server. Hook-triggered flushes respect the backoff;
   `ai-obs flush` ignores it. On 413 the batch size is halved; on 400 the batch goes to `queue/dead/`. Nothing is
-  sent with a token whose collector-config was never fetched; a fresh collector-config (fetched by a send, `doctor` or
-  `link`) also updates the server entry (e-mail, deployment, label, expiry). `session_start.project` is rebuilt at send time from the stream key
-  with the receiving deployment's naming mode and salt, plus the stream's dot-file `team`; skill / MCP names are
-  hashed the same way. An ingest response's `warnings` (`team_not_member`, `team_unknown`) are kept per project in
-  `state/warnings.json`; a later batch whose sessions start without one clears it (not a batch with server-side
-  duplicates: a replayed `session_start` gets no team resolution, so no warning).
+  sent with a token whose collector-config was never fetched; a fresh collector-config (fetched by a send or by
+  `doctor`) also updates the server entry (e-mail, deployment, label, expiry). `session_start.project` is rebuilt at send time from the stream key
+  with the receiving deployment's naming mode and salt, and never with a team (ADR-0035); skill / MCP names are
+  hashed the same way. `warnings` in an ingest response from an older server are ignored.
 - **Idempotency.** Event builders derive `event_id` from a seed plus the event time (`ulidFrom`), so
   re-processing a transcript after a crash produces the same IDs, and the server de-duplicates them.
 - **Crashed jobs.** A job is renamed to `*.processing` before it is handled. If the worker dies, the
@@ -622,7 +611,7 @@ last 8 MB). It never writes, and never touches the hook state files or their off
   that leaves the machine is the ≤ 140-char turn summary and the ≤ 140-char session title (Claude Code's `/rename` or
   generated title, ADR-0026). Before either is sent, it is whitespace-collapsed and any path in it is reduced to its
   last segment.
-- **Project identity:** the normalized git remote, with credentials, `user@` and port stripped. The queue keeps the plain key and plain skill / MCP names (local files, mode 0600); they are hashed or named **at send time** with the receiving deployment's salt and naming mode, so each server sees only its own form. A plain path key never leaves the machine. The dot-file team slug is sent with `session_start`; the server decides whether to use it.
+- **Project identity:** the normalized git remote, with credentials, `user@` and port stripped. The queue keeps the plain key and plain skill / MCP names (local files, mode 0600); they are hashed or named **at send time** with the receiving deployment's salt and naming mode, so each server sees only its own form. A plain path key never leaves the machine. No team is sent: the server sets it (ADR-0035).
   - **`hashed` mode:** `sha256:` + a hash of that remote, with no name. When collector-config sends a
     per-deployment `project_salt` (this server does, since migration 0004), the hash is HMAC-SHA256 keyed by it (the same on every machine, so
     keys still agree). Without one (an older server) it is plain sha256, which anyone with the key (the server, DB
@@ -646,8 +635,8 @@ last 8 MB). It never writes, and never touches the hook state files or their off
 - **Local only:** prompt digests for summaries (including the staged files), edit fingerprints for revert detection (hashes only)
   and next-prompt correction checks.
 - No git e-mail is sent: the token identifies the user (the batch `identity` is empty).
-- The SessionStart text carries only hosts, server URLs, team slugs and the sanitized directory, never a token or an e-mail.
-- Tokens live only in `~/.ai-obs/config.json` (0600; after an upgrade from 0.4 also in its copy `config.json.v2`, 0600), never in a repository: the dot file holds a server URL and a team slug, and a token is only ever sent to the server it was issued for.
+- The SessionStart text carries only hosts, server URLs and the sanitized directory, never a token or an e-mail.
+- Tokens live only in `~/.ai-obs/config.json` (0600; after an upgrade from 0.4 also in its copy `config.json.v2`, 0600), never in a repository: the dot file holds a server URL, and a token is only ever sent to the server it was issued for.
 
 ## Development
 

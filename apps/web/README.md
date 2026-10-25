@@ -132,8 +132,8 @@ Collector-facing endpoints (BRIEF §6, ADR-0005/0011, ADR-0029, ADR-0030). Route
 
 | Endpoint | Auth | Response |
 |---|---|---|
-| `POST /api/v1/ingest` | `Authorization: Bearer aiobs_u_…` (a person's or a service user's token) | `200 { accepted, duplicates, rejected: [{ event_id, reason }], warnings?: [{ code: "team_not_member" \| "team_unknown", team, session_id }] }` (`warnings` at most one per session per batch, only when there is one) |
-| `GET /api/v1/collector-config` | same | brief Appendix A: `{ project_naming: "plain" \| "hashed", min_collector_version, project_salt, deployment: { name, slug }, user: { email \| null, name, kind: "person" \| "service" }, teams: [{ slug, name }], primary_team: slug \| null, token: { expires_at \| null, label \| null, source: "device" \| "manual" } }` (`MIN_COLLECTOR_VERSION`, default `0.0.0`; `project_salt` is the deployment's stable 64-hex secret the collector HMACs hashed project keys with, ADR-0008; `teams` are the user's teams in slug order, which `ai-obs link` validates against; cached privately for 300 s) |
+| `POST /api/v1/ingest` | `Authorization: Bearer aiobs_u_…` (a person's or a service user's token) | `200 { accepted, duplicates, rejected: [{ event_id, reason }] }` (the protocol's optional `warnings` is no longer sent, ADR-0035) |
+| `GET /api/v1/collector-config` | same | brief Appendix A: `{ project_naming: "plain" \| "hashed", min_collector_version, project_salt, deployment: { name, slug }, user: { email \| null, name, kind: "person" \| "service" }, teams: [{ slug, name }], primary_team: slug \| null, token: { expires_at \| null, label \| null, source: "device" \| "manual" } }` (`MIN_COLLECTOR_VERSION`, default `0.0.0`; `project_salt` is the deployment's stable 64-hex secret the collector HMACs hashed project keys with, ADR-0008; `teams` are the user's teams in slug order, which `ai-obs login` and `doctor` list; cached privately for 300 s) |
 | `POST /api/v1/device/code` | public | `{ client_name, client_version }` → `200 { device_code, user_code: "XXXX-XXXX", verification_uri: "<APP_URL>/device", expires_in: 600, interval: 5 }`; `429` beyond 10 requests per client IP in a burst (5 / min sustained) or while 100 codes are open server-wide; `400 { error: "invalid_request" }` without a client name |
 | `POST /api/v1/device/token` | public | `{ grant_type: "urn:ietf:params:oauth:grant-type:device_code", device_code }` → `200 { token: "aiobs_u_…", expires_at, label }` once approved on `/device`, else `400 { error: "authorization_pending" \| "slow_down" \| "access_denied" \| "expired_token" \| "invalid_grant" }` (`unsupported_grant_type` / `invalid_request` for a bad body); `429` when the client IP spent its miss budget |
 
@@ -196,11 +196,10 @@ Resolution rules:
   under its sender, where it is never applied to that row. Every write claims an ownerless (pre-ADR-0029,
   company-token) row for the sender (turns become `verified`). A parked patch remembers its sender
   (`pending_turn_patches.user_id`) and is applied only to an ownerless turn or one with the same owner.
-- **Team** (ADR-0030, brief Appendix D), resolved per session at `session_start` and stored on `agent_sessions.team_id`;
+- **Team** (ADR-0030, ADR-0035), resolved per session at `session_start` and stored on `agent_sessions.team_id`;
   the session's turns (and their runs and usage) take it: the admin's project → team mapping (`projects.team_id`),
-  else `project.team` (the repository's dot-file slug) when `ingest_team_status(user, slug)` says the user is a member,
-  else the user's primary team, else none. A dot-file team the user is not in (`team_not_member`) or that does not
-  exist (`team_unknown`) falls through with one warning for that session in the response. The team is pinned by the
+  else the user's primary team, else none. `project.team` from collectors before ADR-0035 is ignored, and no
+  warnings are returned. The team is pinned by the
   first `session_start` with a project: a later mapping or membership change does not move a running session, and a
   later `session_start` of the same session (a lost collector state) keeps the stored project and team, so one
   session's turns never split across teams; a `session_start` without a project keeps the session's team. Rows
@@ -381,7 +380,7 @@ Costs are USD with 6 decimals and empty when unknown.
 
 ### Conventions
 
-- Team is optional on a turn (a user with no primary team and no dot-file team has none): lists show "No team". Activity of a removed member shows as "former member" (their identity is hidden by RLS, ADR-0022).
+- Team is optional on a turn (an unmapped project of a user with no primary team has none): lists show "No team". Activity of a removed member shows as "former member" (their identity is hidden by RLS, ADR-0022).
 - Tokens: `total = input + output + cacheRead + cacheWrite`; reasoning is already inside output.
 - Success rate = success / (turns - unknown); the unknown share is always shown next to it (ADR-0003).
 - Budget progress is month to date (UTC): token budgets count `total` tokens, cost budgets the ≈ cost.
